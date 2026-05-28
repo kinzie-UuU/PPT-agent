@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "layouts": [
+    {
+      "id": "cover",
+      "name": "封面",
+      "bestFor": "项目开场、产品名、核心价值主张",
+      "density": "low",
+      "maxBullets": 2
+    },
+    {
+      "id": "visual",
+      "name": "主视觉展示",
+      "bestFor": "产品图、包装图、开盒图、实物图、设计效果图",
+      "density": "low",
+      "maxBullets": 3
+    },
+    {
+      "id": "section",
+      "name": "章节幕封",
+      "bestFor": "阶段切换、观点定调、提出问题",
+      "density": "low",
+      "maxBullets": 3
+    },
+    {
+      "id": "toc",
+      "name": "目录导航",
+      "bestFor": "长 deck 目录、章节预告、汇报路径",
+      "density": "medium",
+      "maxBullets": 6
+    },
+    {
+      "id": "kpi",
+      "name": "数据大字报",
+      "bestFor": "关键价格、MOQ、增长率、交付周期、核心数字",
+      "density": "medium",
+      "maxBullets": 4
+    },
+    {
+      "id": "pricing",
+      "name": "价格梯度",
+      "bestFor": "多档价格、产品价格带、套餐梯度、销售预算入口",
+      "density": "medium",
+      "maxBullets": 6
+    },
+    {
+      "id": "compare",
+      "name": "并列对比",
+      "bestFor": "旧方案 vs 新方案、竞品对比、不同套餐比较",
+      "density": "medium",
+      "maxBullets": 4
+    },
+    {
+      "id": "timeline",
+      "name": "流程时间线",
+      "bestFor": "销售步骤、交付周期、活动节奏、项目里程碑",
+      "density": "medium",
+      "maxBullets": 5
+    },
+    {
+      "id": "cards",
+      "name": "卖点卡片",
+      "bestFor": "产品卖点、推荐理由、价值点矩阵",
+      "density": "medium",
+      "maxBullets": 5
+    },
+    {
+      "id": "product-detail",
+      "name": "单品详情",
+      "bestFor": "单个产品、礼盒规格、价格、包装和核心卖点",
+      "density": "medium",
+      "maxBullets": 5
+    },
+    {
+      "id": "bundle",
+      "name": "组合推荐",
+      "bestFor": "入门/主推/升级套餐、客户预算分层、销售推荐组合",
+      "density": "medium",
+      "maxBullets": 6
+    },
+    {
+      "id": "risk-checklist",
+      "name": "风险清单",
+      "bestFor": "报价、库存、交期、素材、话术口径等交付检查",
+      "density": "medium",
+      "maxBullets": 6
+    },
+    {
+      "id": "quote",
+      "name": "大观点页",
+      "bestFor": "销售话术、核心结论、可被记住的一句话",
+      "density": "low",
+      "maxBullets": 2
+    },
+    {
+      "id": "closing",
+      "name": "行动收束",
+      "bestFor": "下一步动作、成交建议、总结页",
+      "density": "low",
+      "maxBullets": 4
+    }
+  ]
+}

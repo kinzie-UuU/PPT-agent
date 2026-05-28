@@ -1,0 +1,28 @@
+{
+  "name": "ppt-design-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.js",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "local": "powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1",
+    "check": "node --check server/index.js && node --check server/ppt.js && node --check server/ai.js && node --check server/store.js && node --check server/designSystem.js && node --check server/validateDeck.js && node --check server/materialBrief.js && node --check server/events.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.11.0",
+    "multer": "^2.0.2",
+    "pdf-parse": "^2.4.5",
+    "pptxgenjs": "^4.0.1",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "vite": "^7.2.7"
+  },
+  "devDependencies": {}
+}
