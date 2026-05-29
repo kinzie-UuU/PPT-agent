@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "rules": {
+    "planning": [
+      "先抽取资料结构，再规划页面，不先套模板。",
+      "图片、产品、价格、适用对象要参与大纲规划，不后贴。",
+      "不确定的信息要进入风险或待补齐页，不伪造成确定结论。"
+    ],
+    "density": [
+      "每页只承载一个主信息；长文字先拆页或改写。",
+      "cover、quote 不超过 2 条 bullet；closing 不超过 4 条 bullet。",
+      "标题优先短句，不靠缩小字号解决拥挤。"
+    ],
+    "rhythm": [
+      "5 页以上至少 3 种 layout；8 页以上至少 5 种 layout。",
+      "避免连续 3 页使用同一种正文结构。",
+      "长 deck 前部可用 toc，中段穿插 section 或 quote 作为呼吸页。"
+    ],
+    "image": [
+      "有产品图、包装图或效果图时优先安排 visual 或 product-detail。",
+      "截图和信息图优先完整显示；照片和产品图优先保留完整包装。",
+      "同组多图保持相同比例、边距和视觉重心。"
+    ],
+    "editing": [
+      "保存文字后必须重建 PPTX 和预览图，并给 previewImages 加 mtime 版本号。",
+      "直接编辑只改当前页文字，不应意外重排整套 deck。",
+      "PNG 预览失败时保留网页兜底预览并显示 previewWarning。"
+    ],
+    "delivery": [
+      "导出前检查 previewImages、exportMeta、quality.warnings 和 events。",
+      "PPTX 是主交付物；PDF 或 PNG 失败不能阻塞 PPTX 下载。",
+      "最终结果要能被用户继续编辑，而不是只做成静态图片。"
+    ]
+  }
+}

@@ -8,6 +8,7 @@ export const dataDir = path.join(rootDir, "data");
 export const uploadDir = path.join(rootDir, "uploads");
 export const outputDir = path.join(rootDir, "outputs");
 const dbPath = path.join(dataDir, "jobs.json");
+const emptyDb = () => ({ uploads: {}, jobs: {} });
 
 export async function ensureDirs() {
   await fs.mkdir(dataDir, { recursive: true });
@@ -16,17 +17,39 @@ export async function ensureDirs() {
   try {
     await fs.access(dbPath);
   } catch {
-    await fs.writeFile(dbPath, JSON.stringify({ uploads: {}, jobs: {} }, null, 2));
+    await writeDb(emptyDb());
   }
 }
 
 async function readDb() {
   await ensureDirs();
-  return JSON.parse(await fs.readFile(dbPath, "utf8"));
+  const raw = await fs.readFile(dbPath, "utf8");
+  try {
+    return normalizeDb(JSON.parse(raw));
+  } catch (error) {
+    const backupPath = path.join(dataDir, `jobs.corrupt-${toFileStamp(new Date())}.json`);
+    await fs.writeFile(backupPath, raw, "utf8");
+    await writeDb(emptyDb());
+    console.warn(`jobs.json is invalid and was reset. Backup: ${backupPath}. Reason: ${error.message}`);
+    return emptyDb();
+  }
 }
 
 async function writeDb(db) {
-  await fs.writeFile(dbPath, JSON.stringify(db, null, 2));
+  const tempPath = `${dbPath}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(normalizeDb(db), null, 2), "utf8");
+  await fs.rename(tempPath, dbPath);
+}
+
+function normalizeDb(db) {
+  return {
+    uploads: db && typeof db.uploads === "object" && !Array.isArray(db.uploads) ? db.uploads : {},
+    jobs: db && typeof db.jobs === "object" && !Array.isArray(db.jobs) ? db.jobs : {}
+  };
+}
+
+function toFileStamp(date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
 export function makeId(prefix) {
@@ -62,7 +85,7 @@ function scoreName(name) {
   if (/[\u4e00-\u9fa5]/.test(name)) score += 4;
   if (/[a-z0-9]/i.test(name)) score += 1;
   if (/[ÃÂâ¤åç]/.test(name)) score -= 3;
-  if (/[�]/.test(name)) score -= 8;
+  if (/[\ufffd]/.test(name)) score -= 8;
   return score;
 }
 
