@@ -8,7 +8,8 @@
     "build": "vite build",
     "start": "node server/index.js",
     "local": "powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1",
-    "check": "node --check server/index.js && node --check server/ppt.js && node --check server/ai.js && node --check server/store.js && node --check server/designSystem.js && node --check server/deckRouter.js && node --check server/validateDeck.js && node --check server/materialBrief.js && node --check server/events.js && node --check server/smoke-tests.js",
+    "zimage": "powershell -ExecutionPolicy Bypass -File scripts/start-zimage-local.ps1",
+    "check": "node --check server/index.js && node --check server/ppt.js && node --check server/pptAesthetic.js && node --check server/ai.js && node --check server/store.js && node --check server/designSystem.js && node --check server/aestheticSystem.js && node --check server/deckRouter.js && node --check server/validateDeck.js && node --check server/materialBrief.js && node --check server/styleFingerprint.js && node --check server/visualReview.js && node --check server/imageQa.js && node --check server/localImage.js && node --check server/events.js && node --check server/smoke-tests.js",
     "smoke": "node server/smoke-tests.js"
   },
   "dependencies": {

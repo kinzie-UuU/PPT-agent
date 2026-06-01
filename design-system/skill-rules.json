@@ -6,6 +6,12 @@
       "图片、产品、价格、适用对象要参与大纲规划，不后贴。",
       "不确定的信息要进入风险或待补齐页，不伪造成确定结论。"
     ],
+    "oldDeck": [
+      "Old PPT tasks must first build SlideIR, classify pages, run aesthetic diagnosis, then generate proof slides before full PPTX output.",
+      "AI may write structured diagnosis and redesign intent; coordinates, editable text, image placement, and export remain code-controlled.",
+      "Preserve critical facts from source decks: names, years, prices, quantities, client labels, risk notes, and delivery assumptions.",
+      "If AI JSON or PPTX image parsing fails, fall back to local rule-based diagnosis and text-first editable redesign."
+    ],
     "density": [
       "每页只承载一个主信息；长文字先拆页或改写。",
       "cover、quote 不超过 2 条 bullet；closing 不超过 4 条 bullet。",

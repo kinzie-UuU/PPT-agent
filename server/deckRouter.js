@@ -1,4 +1,6 @@
 import { getTemplatePack } from "./designSystem.js";
+import { summarizeStyleFingerprints } from "./styleFingerprint.js";
+import { buildAestheticPlan } from "./aestheticSystem.js";
 
 const EXPLICIT_SLIDE_COUNTS = [
   { pattern: /8/, count: 8 },
@@ -77,7 +79,10 @@ function makeStep(layout, title, purpose, kind, options = {}) {
     sourceType: options.sourceType || inferStepSourceType(kind, options),
     sourceLabel: options.sourceLabel || inferStepSourceLabel(kind, options),
     evidence: options.evidence || "",
-    needsConfirmation: Boolean(options.needsConfirmation)
+    needsConfirmation: Boolean(options.needsConfirmation),
+    sourceSlideType: options.sourceSlideType || "",
+    diagnosisScore: Number.isFinite(Number(options.diagnosisScore)) ? Number(options.diagnosisScore) : null,
+    layoutStrategy: options.layoutStrategy || ""
   };
 }
 
@@ -194,6 +199,18 @@ function ensureTemplateLayouts(sequence, templatePack, context = {}) {
 }
 
 function inferSourceLayout(page = {}, index = 0) {
+  const sourceTypeMap = {
+    cover: "cover",
+    agenda: "toc",
+    company_case: "cards",
+    product_cost: "pricing",
+    project_review: "risk-checklist",
+    light_custom: "product-detail",
+    creative_custom: "product-detail",
+    category_matrix: "compare",
+    thanks: "closing"
+  };
+  if (page.sourceSlideType && sourceTypeMap[page.sourceSlideType]) return sourceTypeMap[page.sourceSlideType];
   const text = cleanText(`${page.title || ""} ${page.text || ""}`);
   if (index === 0) return "cover";
   if (/目录|contents/i.test(text)) return "toc";
@@ -223,7 +240,10 @@ function buildSourceOutline(materialBrief = {}, targetSlides = 12, context = {})
       sourceType: context.hasOldDeck ? "original-ppt" : "extracted",
       sourceLabel: context.hasOldDeck ? "来自原 PPT" : "来自资料提取",
       evidence: `第 ${page.page || index + 1} 页${page.title ? `：${page.title}` : ""}`,
-      imageSlots: context.imagesBySlide?.[page.page || index + 1] || []
+      imageSlots: context.imagesBySlide?.[page.page || index + 1] || [],
+      sourceSlideType: page.sourceSlideType || "",
+      diagnosisScore: page.diagnosisScore,
+      layoutStrategy: page.layoutStrategy || ""
     });
   });
 }
@@ -231,6 +251,7 @@ function buildSourceOutline(materialBrief = {}, targetSlides = 12, context = {})
 export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, uploads = [] } = {}) {
   const deckType = detectDeckType({ mode, input, materialBrief, uploads });
   const styleReferences = Array.isArray(input.styleReferences) ? input.styleReferences.slice(0, 12) : [];
+  const styleFingerprintSummary = summarizeStyleFingerprints(styleReferences);
   const recommendedTheme = chooseTheme(input, deckType);
   const templatePack = getTemplatePack(input.style || recommendedTheme);
   const targetSlides = resolveTargetSlides(input.pageCount, materialBrief, uploads);
@@ -293,6 +314,15 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
   });
   const orderedBase = sourceBase ? templateReadyBase : reorderByTemplate(templateReadyBase, templatePack, weakOrEmpty);
   const layoutSequence = fitSequence(orderedBase, targetSlides, includeRisk);
+  const aestheticPlan = buildAestheticPlan({
+    style: input.style || recommendedTheme,
+    deckType,
+    layoutSequence,
+    sourceReport: materialBrief.sourceReport || null,
+    styleReferences,
+    materialBrief,
+    uploads
+  });
   return {
     deckType,
     inputStrength,
@@ -308,6 +338,7 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       count: styleReferences.length,
       names: styleReferences.map((item) => item.name || item.originalName).filter(Boolean).slice(0, 8),
       tone: styleReferences.map((item) => item.tone).filter(Boolean).join("；").slice(0, 420),
+      fingerprint: styleFingerprintSummary,
       instruction: styleReferences.length
         ? "生成时参考风格参考库的色彩、留白、质感、字体气质和画面密度；不要复制图片内容本身。"
         : "未提供自定义风格参考，使用内置主题和模板包。"
@@ -315,12 +346,14 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
     layoutSequence,
+    sourceReport: materialBrief.sourceReport || null,
     imageStrategy: {
       hasImages,
       imageCount: imageHints.length,
       imageSlots: imageHints,
       requiredLayouts: hasImages ? ["visual"] : []
     },
+    aestheticPlan,
     riskStrategy: {
       includeRiskChecklist: includeRisk,
       required: includeRisk,

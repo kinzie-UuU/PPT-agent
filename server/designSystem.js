@@ -7,13 +7,15 @@ const themeSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "desig
 const layoutSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "design-system", "layouts.json"), "utf8"));
 const skillRuleSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "design-system", "skill-rules.json"), "utf8"));
 const templatePackSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "design-system", "template-packs.json"), "utf8"));
+const aestheticRecipeSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "design-system", "aesthetic-recipes.json"), "utf8"));
 
 export function getDesignSystem() {
   return {
     themes: themeSystem.themes,
     layouts: layoutSystem.layouts,
     skillRules: skillRuleSystem.rules,
-    templatePacks: templatePackSystem.templatePacks
+    templatePacks: templatePackSystem.templatePacks,
+    aestheticRecipes: aestheticRecipeSystem
   };
 }
 

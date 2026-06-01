@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
+import { analyzeStyleReference } from "./styleFingerprint.js";
 
 export const rootDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const dataDir = path.join(rootDir, "data");
@@ -110,6 +111,12 @@ export async function addStyleReference(file, meta = {}) {
   const db = await readDb();
   const id = makeId("style");
   const originalName = decodeUploadName(file.originalname);
+  const styleFingerprint = await analyzeStyleReference({
+    originalName,
+    mimeType: file.mimetype,
+    path: file.path,
+    size: file.size
+  }, meta).catch(() => null);
   const record = {
     id,
     name: cleanMeta(meta.name) || originalName.replace(/\.[^.]+$/, "") || "风格参考",
@@ -120,6 +127,7 @@ export async function addStyleReference(file, meta = {}) {
     mimeType: file.mimetype,
     path: file.path,
     size: file.size,
+    styleFingerprint,
     createdAt: new Date().toISOString()
   };
   db.styleReferences[id] = record;
@@ -131,12 +139,14 @@ export async function updateStyleReference(id, meta = {}) {
   const db = await readDb();
   const record = db.styleReferences[id];
   if (!record) return null;
+  const styleFingerprint = await analyzeStyleReference(record, { ...record, ...meta }).catch(() => record.styleFingerprint || null);
   const next = {
     ...record,
     name: meta.name === undefined ? record.name : cleanMeta(meta.name),
     tone: meta.tone === undefined ? record.tone : cleanMeta(meta.tone),
     themeName: meta.themeName === undefined ? record.themeName : cleanMeta(meta.themeName),
     themeSlug: meta.themeSlug === undefined ? record.themeSlug : cleanMeta(meta.themeSlug),
+    styleFingerprint,
     updatedAt: new Date().toISOString()
   };
   db.styleReferences[id] = next;
@@ -146,6 +156,14 @@ export async function updateStyleReference(id, meta = {}) {
 
 export async function listStyleReferences() {
   const db = await readDb();
+  let changed = false;
+  for (const record of Object.values(db.styleReferences)) {
+    if (!record.styleFingerprint && record.path) {
+      record.styleFingerprint = await analyzeStyleReference(record, record).catch(() => null);
+      changed = true;
+    }
+  }
+  if (changed) await writeDb(db);
   return Object.values(db.styleReferences).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 

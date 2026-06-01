@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "principle": "PPT pages are poster-like compositions: background layer, text-safe layer, image/object layer, small icon/ornament layer, and final quality gates.",
+  "styles": [
+    {
+      "themeSlug": "airy-gradient",
+      "themeName": "轻盈渐变风",
+      "visualGrammar": "clean commercial proposal look, soft blue gradient fields, airy whitespace, crisp panels, light shadows",
+      "background": "soft abstract gradient with open text area, no text, no logo, subtle business texture",
+      "textSafeArea": "left 8%, top 14%, width 48%, height 58%",
+      "imageTreatment": "right-side product or document crop, soft shadow, keep full product silhouette when possible",
+      "iconMotifs": ["thin line icons", "small dots", "soft cards", "progress bars"],
+      "avoid": ["busy texture behind body text", "heavy dark background", "over-decorated gradients"],
+      "comfyPrompt": "clean premium business presentation background, airy blue and white gradient, large empty text-safe area, subtle cards and line details, no words, no logo"
+    },
+    {
+      "themeSlug": "eastern-natural",
+      "themeName": "东方自然风",
+      "visualGrammar": "oriental natural premium, warm paper texture, restrained red/olive accents, calm seasonal gift atmosphere",
+      "background": "rice paper texture, natural warm beige, soft ink-wash depth, clear blank space for Chinese title text",
+      "textSafeArea": "left 8%, top 13%, width 46%, height 60%",
+      "imageTreatment": "product hero on right or lower right, preserve packaging integrity, gentle paper-cut or shadow separation",
+      "iconMotifs": ["seal-like dots", "thin botanical strokes", "paper grain", "small vertical divider"],
+      "avoid": ["festival clutter", "cheap red-gold poster feel", "text over dense product details"],
+      "comfyPrompt": "oriental natural premium presentation background, warm rice paper texture, olive green and muted red accents, elegant gift/product area, large blank area for text, no words, no logo"
+    },
+    {
+      "themeSlug": "monochrome-editorial",
+      "themeName": "黑白画册风",
+      "visualGrammar": "editorial catalog, monochrome restraint, large image crops, strict grid, premium negative space",
+      "background": "white or very light gray editorial canvas, subtle paper grain, strong grid rhythm, no decorative noise",
+      "textSafeArea": "left 9%, top 15%, width 40%, height 62%",
+      "imageTreatment": "large photographic crop, full-bleed edge or strict rectangular crop, generous whitespace",
+      "iconMotifs": ["thin rules", "page numbers", "small square markers", "minimal labels"],
+      "avoid": ["colorful gradients", "dense card piles", "stock-poster atmosphere"],
+      "comfyPrompt": "minimal monochrome editorial presentation background, white gallery space, subtle paper grain, strict grid, large blank text area, no words, no logo"
+    },
+    {
+      "themeSlug": "swiss-blue",
+      "themeName": "蓝白科技风",
+      "visualGrammar": "Swiss technical report, blue-white structure, precise grids, data modules, engineering confidence",
+      "background": "light technical grid, blue accents, clean data-panel depth, reserve readable text zone",
+      "textSafeArea": "left 7%, top 12%, width 50%, height 62%",
+      "imageTreatment": "screenshots/charts in clean frames, avoid cropping critical labels, use callout lines sparingly",
+      "iconMotifs": ["grid ticks", "thin arrows", "data chips", "coordinate lines"],
+      "avoid": ["cyberpunk darkness", "fake complex dashboards", "low-contrast tiny text"],
+      "comfyPrompt": "blue and white technical presentation background, clean Swiss grid, subtle data panels, precise line accents, large empty text area, no words, no logo"
+    },
+    {
+      "themeSlug": "dark-tech",
+      "themeName": "暗黑科技风",
+      "visualGrammar": "dark launch keynote, high contrast, glow accents, cinematic depth, sparse confident copy",
+      "background": "dark premium stage background, cyan glow accents, readable dark-to-clear text zone, no text",
+      "textSafeArea": "left 8%, top 14%, width 45%, height 58%",
+      "imageTreatment": "hero object with rim light, strong contrast, keep product contour legible",
+      "iconMotifs": ["glow line", "micro grid", "thin neon marker", "small data chips"],
+      "avoid": ["low readability", "overloaded neon effects", "fake UI clutter"],
+      "comfyPrompt": "dark premium technology keynote background, cyan glow accents, cinematic depth, clear empty area for text, no words, no logo"
+    }
+  ],
+  "layoutLayerRules": {
+    "cover": { "backgroundRole": "hero-background", "textRole": "large-title", "imageRole": "optional-hero-object", "ornamentRole": "signature-accent", "textSafePriority": "high" },
+    "visual": { "backgroundRole": "supportive-background", "textRole": "short-caption", "imageRole": "dominant-image", "ornamentRole": "minimal-anchor", "textSafePriority": "critical" },
+    "section": { "backgroundRole": "breathing-background", "textRole": "single-message", "imageRole": "none-or-subtle", "ornamentRole": "divider", "textSafePriority": "high" },
+    "toc": { "backgroundRole": "quiet-background", "textRole": "navigation-list", "imageRole": "none", "ornamentRole": "progress-lines", "textSafePriority": "high" },
+    "kpi": { "backgroundRole": "quiet-background", "textRole": "large-number", "imageRole": "none-or-data-frame", "ornamentRole": "data-chip", "textSafePriority": "high" },
+    "pricing": { "backgroundRole": "quiet-background", "textRole": "price-ladder", "imageRole": "small-product-proof", "ornamentRole": "tier-marker", "textSafePriority": "high" },
+    "product-detail": { "backgroundRole": "product-stage", "textRole": "spec-and-benefit", "imageRole": "product-crop", "ornamentRole": "callout-dot", "textSafePriority": "critical" },
+    "bundle": { "backgroundRole": "quiet-background", "textRole": "three-tier-choice", "imageRole": "optional-product-row", "ornamentRole": "tier-marker", "textSafePriority": "high" },
+    "risk-checklist": { "backgroundRole": "plain-background", "textRole": "checklist", "imageRole": "none", "ornamentRole": "small-check-icons", "textSafePriority": "high" },
+    "compare": { "backgroundRole": "split-background", "textRole": "side-by-side-comparison", "imageRole": "optional-paired-crops", "ornamentRole": "divider-lines", "textSafePriority": "high" },
+    "timeline": { "backgroundRole": "quiet-background", "textRole": "step-flow", "imageRole": "none-or-small-proof", "ornamentRole": "timeline-nodes", "textSafePriority": "high" },
+    "cards": { "backgroundRole": "quiet-background", "textRole": "card-grid", "imageRole": "small-supporting-crops", "ornamentRole": "card-icons", "textSafePriority": "high" },
+    "quote": { "backgroundRole": "breathing-background", "textRole": "large-quote", "imageRole": "none-or-atmosphere", "ornamentRole": "single-mark", "textSafePriority": "high" },
+    "closing": { "backgroundRole": "calm-background", "textRole": "next-action", "imageRole": "optional-hero-object", "ornamentRole": "final-accent", "textSafePriority": "high" }
+  }
+}

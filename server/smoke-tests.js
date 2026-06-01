@@ -41,6 +41,31 @@ const techRoute = routeDeck({ input: { pageCount: "12 页标准版", style: "蓝
 assert.equal(techRoute.templatePack.slug, "tech-solution");
 assert.ok(techRoute.layoutSequence.slice(0, 5).some((step) => step.layout === "kpi"));
 
+const oldDeckBrief = buildMaterialBrief([{ name: "case.pptx", text: "cover\nprice 39 59 159\nrisk delivery complaint\ncategory matrix" }]);
+oldDeckBrief.sourceReport = {
+  hasOldDeck: true,
+  aestheticDiagnosis: {
+    overallScore: 60,
+    lowScoreSlides: [2],
+    highDensitySlides: [3],
+    slides: [
+      { page: 1, type: "cover", diagnosisScore: 82, layoutStrategy: "cover_hero" },
+      { page: 2, type: "product_cost", diagnosisScore: 55, layoutStrategy: "cost_cards" },
+      { page: 3, type: "project_review", diagnosisScore: 64, layoutStrategy: "review_four_blocks" }
+    ]
+  }
+};
+oldDeckBrief.pages = [
+  { page: 1, title: "Source cover", text: "cover", sourceSlideType: "cover", diagnosisScore: 82, layoutStrategy: "cover_hero" },
+  { page: 2, title: "Source price", text: "price 39 59 159", sourceSlideType: "product_cost", diagnosisScore: 55, layoutStrategy: "cost_cards" },
+  { page: 3, title: "Source risk", text: "risk delivery complaint", sourceSlideType: "project_review", diagnosisScore: 64, layoutStrategy: "review_four_blocks" },
+  { page: 4, title: "Source matrix", text: "category matrix", sourceSlideType: "category_matrix", diagnosisScore: 74, layoutStrategy: "category_matrix" }
+];
+const oldDeckRoute = routeDeck({ mode: "optimize", input: { pageCount: "系统推荐" }, materialBrief: oldDeckBrief, uploads: [{ originalName: "case.pptx" }] });
+assert.equal(oldDeckRoute.sourceReport.aestheticDiagnosis.overallScore, 60);
+assert.ok(oldDeckRoute.layoutSequence.some((step) => step.sourceSlideType === "product_cost" && step.layout === "pricing"));
+assert.ok(oldDeckRoute.layoutSequence.some((step) => step.sourceSlideType === "project_review" && step.layout === "risk-checklist"));
+
 const emptyBrief = buildMaterialBrief([{ name: "输入说明", text: "项目名称：新品发布" }]);
 assert.equal(emptyBrief.inputStrength, "empty");
 assert.ok(emptyBrief.confirmationFields.length >= 3);

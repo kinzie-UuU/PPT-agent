@@ -212,18 +212,30 @@ export async function buildDeck(job) {
   const theme = getTheme(job.input.style || job.input.routePlan?.recommendedTheme);
   const templatePack = getTemplatePack(job.input.style || job.input.routePlan?.recommendedTheme);
   theme.templatePack = templatePack;
+  job.renderReport = { version: 1, createdAt: new Date().toISOString(), imagePlacements: [] };
 
   job.deck.slides.forEach((item, index) => {
     const slide = pptx.addSlide();
+    slide._pptDesignImagePlacements = [];
     slide.background = { color: theme.bg };
     if (item.speakerNotes) slide.addNotes(item.speakerNotes);
     renderSlide(pptx, slide, item, index, job.deck.slides.length, theme, job);
+    job.renderReport.imagePlacements.push(...slide._pptDesignImagePlacements.map((placement) => ({
+      ...placement,
+      slideIndex: index + 1,
+      layout: item.layout || null,
+      title: cleanText(item.title || "")
+    })));
   });
 
   const jobDir = path.join(outputDir, job.id);
   await fs.mkdir(jobDir, { recursive: true });
   const pptxPath = path.join(jobDir, `${safeName(job.deck.title || "deck")}.pptx`);
   await pptx.writeFile({ fileName: pptxPath });
+  job.quality = {
+    ...(job.quality || {}),
+    renderImageQa: summarizeRenderImageQa(job.renderReport)
+  };
   return pptxPath;
 }
 
@@ -233,6 +245,7 @@ function renderSlide(pptx, slide, item, index, total, theme, job) {
   const templateRenderer = getTemplateRenderer(theme.templatePack?.slug, layout);
   if (templateRenderer) {
     templateRenderer(pptx, slide, item, theme, job, index);
+    applyCanvasEdits(pptx, slide, item, theme);
     return;
   }
   const renderers = {
@@ -252,6 +265,7 @@ function renderSlide(pptx, slide, item, index, total, theme, job) {
     closing: renderClosing
   };
   (renderers[layout] || renderCards)(pptx, slide, item, theme, job, index);
+  applyCanvasEdits(pptx, slide, item, theme);
 }
 
 function getTemplateRenderer(slug, layout) {
@@ -334,6 +348,86 @@ function addTitle(slide, item, theme, options = {}) {
   }
 }
 
+function applyCanvasEdits(pptx, slide, item = {}, theme = {}) {
+  const edits = item.canvasEdits && typeof item.canvasEdits === "object" ? item.canvasEdits : null;
+  if (!edits) return;
+  const fields = [
+    { key: "title", text: item.title, fontSize: 28, bold: true },
+    { key: "subtitle", text: item.subtitle, fontSize: 13, bold: false },
+    { key: "bullets", text: (item.bullets || []).join("\n"), fontSize: 10.5, bold: false }
+  ];
+  for (const field of fields) {
+    const box = edits[field.key]?.box;
+    const text = cleanText(field.text || "");
+    if (!box || !text) continue;
+    const x = percentToInch(box.x, SLIDE_W);
+    const y = percentToInch(box.y, SLIDE_H);
+    const w = percentToInch(box.w, SLIDE_W);
+    const h = percentToInch(box.h, SLIDE_H);
+    slide.addShape(pptx.ShapeType.rect, {
+      x,
+      y,
+      w,
+      h,
+      fill: { color: theme.bg || "FFFFFF", transparency: 10 },
+      line: { color: theme.accent || "2854D8", transparency: 75 }
+    });
+    slide.addText(text, {
+      x: x + 0.06,
+      y: y + 0.04,
+      w: Math.max(0.2, w - 0.12),
+      h: Math.max(0.2, h - 0.08),
+      fontSize: field.fontSize,
+      bold: field.bold,
+      color: theme.ink || "1F261F",
+      fit: "shrink",
+      margin: 0.02,
+      breakLine: field.key === "bullets"
+    });
+  }
+}
+
+function percentToInch(value, size) {
+  return Math.max(0, Math.min(size, (Number(value || 0) / 100) * size));
+}
+
+function seasonalPalette(theme) {
+  return {
+    red: theme.accent || "9E1F16",
+    orange: theme.accent2 || "D86B2A",
+    olive: theme.olive || "6E765D",
+    paper: theme.paper || theme.bg || "FBF6EA",
+    soft: theme.soft || "EFE1CF"
+  };
+}
+
+function addSeasonalBackdrop(pptx, slide, theme, variant = "default") {
+  const p = seasonalPalette(theme);
+  slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: SLIDE_W, h: SLIDE_H, fill: { color: p.paper }, line: { color: p.paper } });
+  slide.addShape(pptx.ShapeType.rect, { x: 0.22, y: 0.2, w: SLIDE_W - 0.44, h: SLIDE_H - 0.4, fill: { color: p.paper, transparency: 100 }, line: { color: p.red, transparency: 58, width: 0.8 } });
+  slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: SLIDE_W, h: 0.12, fill: { color: p.red }, line: { color: p.red } });
+  slide.addShape(pptx.ShapeType.rect, { x: 0, y: SLIDE_H - 0.12, w: SLIDE_W, h: 0.12, fill: { color: p.olive, transparency: 12 }, line: { color: p.olive, transparency: 12 } });
+  const dots = variant === "dense" ? 10 : 7;
+  for (let i = 0; i < dots; i += 1) {
+    slide.addShape(pptx.ShapeType.ellipse, {
+      x: 11.6 + (i % 3) * 0.22,
+      y: 0.72 + Math.floor(i / 3) * 0.24,
+      w: 0.045,
+      h: 0.045,
+      fill: { color: i % 2 ? p.orange : p.red, transparency: 24 },
+      line: { color: i % 2 ? p.orange : p.red, transparency: 24 }
+    });
+  }
+  slide.addShape(pptx.ShapeType.arc, { x: 0.72, y: 5.8, w: 1.2, h: 0.36, line: { color: p.orange, transparency: 50, width: 1.2 }, adjustPoint: 0.25 });
+  slide.addShape(pptx.ShapeType.rect, { x: 0.86, y: 1.05, w: 0.08, h: 0.58, fill: { color: p.red }, line: { color: p.red } });
+}
+
+function addSeasonalSeal(pptx, slide, theme, x, y, label = "礼") {
+  const p = seasonalPalette(theme);
+  slide.addShape(pptx.ShapeType.roundRect, { x, y, w: 0.42, h: 0.42, rectRadius: 0.02, fill: { color: p.red }, line: { color: p.red } });
+  slide.addText(label, { x: x + 0.09, y: y + 0.08, w: 0.24, h: 0.14, fontSize: 8.5, bold: true, color: "FFFFFF", align: "center", margin: 0 });
+}
+
 function renderCover(pptx, slide, item, theme, job) {
   const coverImage = getSlideImage(job, item, 0);
   slide.addShape(pptx.ShapeType.rect, { x: 0.58, y: 0.72, w: 0.1, h: 4.95, fill: { color: theme.accent }, line: { color: theme.accent } });
@@ -399,14 +493,19 @@ function renderKpi(pptx, slide, item, theme) {
   });
 }
 
-function renderPricing(pptx, slide, item, theme) {
-  addTitle(slide, item, theme, { x: 0.68, y: 0.68, w: 9.4, subW: 8.6 });
+function renderPricing(pptx, slide, item, theme, job, index = 0) {
+  const image = getSlideImage(job, item, index);
+  addTitle(slide, item, theme, { x: 0.68, y: 0.68, w: image ? 7.2 : 9.4, subW: image ? 6.8 : 8.6 });
   const entries = normalizePricingEntries(item).slice(0, 6);
   const max = entries.length;
-  const cardW = max <= 3 ? 3.25 : max <= 4 ? 2.65 : 1.85;
+  const cardW = image ? (max <= 3 ? 2.25 : 1.65) : max <= 3 ? 3.25 : max <= 4 ? 2.65 : 1.85;
   const gap = max <= 3 ? 0.42 : 0.28;
   const totalW = max * cardW + (max - 1) * gap;
-  const startX = (SLIDE_W - totalW) / 2;
+  const startX = image ? 0.78 : (SLIDE_W - totalW) / 2;
+  if (image) {
+    slide.addShape(pptx.ShapeType.roundRect, { x: 8.2, y: 1.32, w: 3.55, h: 4.4, rectRadius: 0.05, fill: { color: theme.soft }, line: { color: theme.soft } });
+    addImageCover(slide, image.path, 8.38, 1.5, 3.18, 4.04, theme);
+  }
   entries.forEach((entry, i) => {
     const x = startX + i * (cardW + gap);
     const y = i % 2 ? 2.52 : 2.25;
@@ -553,33 +652,44 @@ function renderQuote(pptx, slide, item, theme) {
   addBulletStrip(pptx, slide, item.bullets, theme, 1.2, 4.45, 9.4);
 }
 
-function renderClosing(pptx, slide, item, theme) {
+function renderClosing(pptx, slide, item, theme, job, index = 0) {
+  const image = getSlideImage(job, item, index);
   slide.addShape(pptx.ShapeType.roundRect, { x: 0.7, y: 0.9, w: 11.9, h: 4.75, rectRadius: 0.06, fill: { color: theme.soft }, line: { color: theme.soft } });
-  slide.addText(item.title || "下一步行动", { x: 1.05, y: 1.35, w: 8.6, h: 0.8, fontSize: 30, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
-  slide.addText(item.subtitle || item.visualIntent || "确认版本、补齐素材、进入交付。", { x: 1.08, y: 2.22, w: 8.2, h: 0.38, fontSize: 13, color: theme.muted, fit: "shrink", margin: 0 });
-  addBulletStrip(pptx, slide, item.bullets, theme, 1.1, 3.05, 8.8);
-  slide.addShape(pptx.ShapeType.rect, { x: 10.35, y: 1.35, w: 1.3, h: 3.25, fill: { color: theme.accent }, line: { color: theme.accent } });
+  slide.addText(item.title || "下一步行动", { x: 1.05, y: 1.35, w: image ? 6.1 : 8.6, h: 0.8, fontSize: 30, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
+  slide.addText(item.subtitle || item.visualIntent || "确认版本、补齐素材、进入交付。", { x: 1.08, y: 2.22, w: image ? 5.8 : 8.2, h: 0.38, fontSize: 13, color: theme.muted, fit: "shrink", margin: 0 });
+  addBulletStrip(pptx, slide, item.bullets, theme, 1.1, 3.05, image ? 5.4 : 8.8);
+  if (image) addImageCover(slide, image.path, 7.35, 1.34, 4.45, 3.35, theme);
+  else slide.addShape(pptx.ShapeType.rect, { x: 10.35, y: 1.35, w: 1.3, h: 3.25, fill: { color: theme.accent }, line: { color: theme.accent } });
 }
 
 function renderSeasonalCover(pptx, slide, item, theme, job) {
   const image = getSlideImage(job, item, 0);
-  slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: SLIDE_W, h: SLIDE_H, fill: { color: theme.bg }, line: { color: theme.bg } });
-  slide.addShape(pptx.ShapeType.rect, { x: 0.62, y: 0.62, w: 12.1, h: 6.25, fill: { color: theme.bg, transparency: 100 }, line: { color: theme.accent, transparency: 42, width: 1.1 } });
-  slide.addShape(pptx.ShapeType.rect, { x: 8.55, y: 0.58, w: 3.62, h: 5.15, fill: { color: theme.soft }, line: { color: theme.soft } });
-  slide.addShape(pptx.ShapeType.rect, { x: 8.95, y: 0.98, w: 2.82, h: 4.34, fill: { color: "FFFFFF", transparency: 12 }, line: { color: theme.accent, transparency: 58 } });
-  if (image) addImageContain(slide, image.path, 8.9, 1.1, 2.95, 3.78, theme);
-  else slide.addText("产品主视觉", { x: 9.15, y: 2.8, w: 2.4, h: 0.28, fontSize: 12, bold: true, color: theme.accent, align: "center", margin: 0 });
-  slide.addText("节日礼赠方案", { x: 0.98, y: 1.02, w: 2.1, h: 0.24, fontSize: 10, bold: true, color: theme.accent, margin: 0 });
-  slide.addText(item.title || job.deck.title, { x: 0.95, y: 1.55, w: 6.85, h: 1.55, fontSize: 35, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
-  slide.addText(item.subtitle || job.deck.summary || "围绕场景、预算和体面感生成可编辑 PPT", { x: 1, y: 3.35, w: 6.5, h: 0.52, fontSize: 14, color: theme.muted, fit: "shrink", margin: 0 });
-  addBulletStrip(pptx, slide, item.bullets, theme, 1.02, 4.52, 6.8);
+  const p = seasonalPalette(theme);
+  if (image) {
+    addImageCover(slide, image.path, 0, 0, SLIDE_W, SLIDE_H, theme);
+    slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: SLIDE_W, h: SLIDE_H, fill: { color: "000000", transparency: 84 }, line: { color: "000000", transparency: 100 } });
+    slide.addShape(pptx.ShapeType.rect, { x: 6.35, y: 0, w: 6.98, h: SLIDE_H, fill: { color: p.paper, transparency: 7 }, line: { color: p.paper, transparency: 100 } });
+  } else {
+    addSeasonalBackdrop(pptx, slide, theme, "dense");
+    slide.addShape(pptx.ShapeType.rect, { x: 0.62, y: 0.62, w: 5.48, h: 6.18, fill: { color: p.soft }, line: { color: p.red, transparency: 46, width: 0.8 } });
+    slide.addText("产品主视觉", { x: 1.5, y: 3.4, w: 3.7, h: 0.28, fontSize: 12, bold: true, color: theme.accent, align: "center", margin: 0 });
+  }
+  slide.addShape(pptx.ShapeType.rect, { x: 7.05, y: 0.62, w: 5.62, h: 6.18, fill: { color: p.paper, transparency: 100 }, line: { color: p.orange, transparency: 60, width: 0.7 } });
+  addSeasonalSeal(pptx, slide, theme, 7.38, 1.0, "礼");
+  slide.addText("节日礼赠方案", { x: 7.9, y: 1.08, w: 2.1, h: 0.24, fontSize: 10, bold: true, color: p.red, margin: 0 });
+  slide.addText(item.title || job.deck.title, { x: 7.35, y: 1.62, w: 4.82, h: 1.48, fontSize: 32, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
+  slide.addText(item.subtitle || job.deck.summary || "围绕场景、预算和体面感生成可编辑 PPT", { x: 7.38, y: 3.36, w: 4.7, h: 0.56, fontSize: 13, color: theme.muted, fit: "shrink", margin: 0 });
+  addBulletStrip(pptx, slide, item.bullets, theme, 7.38, 4.62, 4.75);
 }
 
 function renderSeasonalVisual(pptx, slide, item, theme, job, index = 0) {
   const image = getSlideImage(job, item, index) || getSlideImage(job, item, 0);
-  slide.addShape(pptx.ShapeType.rect, { x: 0.75, y: 0.75, w: 5.25, h: 5.68, fill: { color: theme.soft }, line: { color: theme.soft } });
-  if (image) addImageContain(slide, image.path, 0.98, 0.98, 4.78, 5.02, theme);
+  const p = seasonalPalette(theme);
+  addSeasonalBackdrop(pptx, slide, theme);
+  slide.addShape(pptx.ShapeType.rect, { x: 0.72, y: 0.75, w: 5.35, h: 5.68, fill: { color: p.soft }, line: { color: p.red, transparency: 54 } });
+  if (image) addImageCover(slide, image.path, 0.9, 0.9, 5.0, 5.36, theme);
   else slide.addText("礼盒 / 产品图", { x: 1.38, y: 3.12, w: 3.9, h: 0.28, fontSize: 14, bold: true, color: theme.accent, align: "center", margin: 0 });
+  addSeasonalSeal(pptx, slide, theme, 6.68, 0.9, "品");
   slide.addText(item.title || "产品主视觉", { x: 6.65, y: 1, w: 5.3, h: 0.88, fontSize: 28, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
   slide.addText(item.subtitle || item.visualIntent || "先用完整包装和质感建立礼赠判断。", { x: 6.68, y: 1.95, w: 4.9, h: 0.5, fontSize: 12.5, color: theme.muted, fit: "shrink", margin: 0 });
   (item.bullets || []).slice(0, 4).forEach((bullet, i) => {
@@ -589,27 +699,47 @@ function renderSeasonalVisual(pptx, slide, item, theme, job, index = 0) {
   });
 }
 
-function renderSeasonalPricing(pptx, slide, item, theme) {
-  addTitle(slide, item, theme, { x: 0.75, y: 0.72, w: 8.6, fontSize: 25, subW: 8.4 });
+function renderSeasonalPricing(pptx, slide, item, theme, job, index = 0) {
+  const image = getSlideImage(job, item, index);
+  const p = seasonalPalette(theme);
+  addSeasonalBackdrop(pptx, slide, theme);
+  addTitle(slide, item, theme, { x: 0.75, y: 0.72, w: image ? 6.7 : 8.6, fontSize: 25, subW: image ? 6.4 : 8.4 });
   const entries = normalizePricingEntries(item).slice(0, 3);
   const labels = ["入门礼", "主推礼", "升级礼"];
   entries.forEach((entry, i) => {
-    const x = 0.88 + i * 4.12;
+    const x = image ? 0.88 + i * 2.18 : 0.88 + i * 4.12;
+    const cardW = image ? 1.86 : 3.35;
     const accented = i === 1 || entry.accented;
-    slide.addShape(pptx.ShapeType.roundRect, { x, y: accented ? 2.05 : 2.35, w: 3.35, h: accented ? 3.25 : 2.95, rectRadius: 0.05, fill: { color: accented ? theme.accent : theme.soft }, line: { color: accented ? theme.accent : theme.soft } });
-    slide.addText(labels[i] || entry.tier, { x: x + 0.28, y: accented ? 2.38 : 2.68, w: 1.8, h: 0.25, fontSize: 10.5, bold: true, color: accented ? theme.bg : theme.accent, margin: 0 });
-    slide.addText(entry.price, { x: x + 0.35, y: accented ? 3.02 : 3.18, w: 2.65, h: 0.62, fontSize: 27, bold: true, color: accented ? theme.bg : theme.ink, align: "center", fit: "shrink", margin: 0 });
-    slide.addText(entry.label, { x: x + 0.35, y: accented ? 3.88 : 3.95, w: 2.62, h: 0.55, fontSize: 11, bold: true, color: accented ? theme.bg : theme.ink, align: "center", fit: "shrink", margin: 0.02 });
-    slide.addText(entry.note, { x: x + 0.35, y: accented ? 4.68 : 4.58, w: 2.62, h: 0.38, fontSize: 8.8, color: accented ? theme.bg : theme.muted, align: "center", fit: "shrink", margin: 0.02 });
+    slide.addShape(pptx.ShapeType.roundRect, { x, y: accented ? 2.05 : 2.35, w: cardW, h: accented ? 3.25 : 2.95, rectRadius: 0.05, fill: { color: accented ? p.red : p.soft }, line: { color: accented ? p.red : p.orange, transparency: accented ? 0 : 45 } });
+    slide.addText(labels[i] || entry.tier, { x: x + 0.18, y: accented ? 2.38 : 2.68, w: cardW - 0.36, h: 0.25, fontSize: image ? 8.5 : 10.5, bold: true, color: accented ? theme.bg : theme.accent, margin: 0, fit: "shrink" });
+    slide.addText(entry.price, { x: x + 0.22, y: accented ? 3.02 : 3.18, w: cardW - 0.44, h: 0.62, fontSize: image ? 22 : 27, bold: true, color: accented ? theme.bg : theme.ink, align: "center", fit: "shrink", margin: 0 });
+    slide.addText(entry.label, { x: x + 0.2, y: accented ? 3.88 : 3.95, w: cardW - 0.4, h: 0.55, fontSize: image ? 9.2 : 11, bold: true, color: accented ? theme.bg : theme.ink, align: "center", fit: "shrink", margin: 0.02 });
+    slide.addText(entry.note, { x: x + 0.2, y: accented ? 4.68 : 4.58, w: cardW - 0.4, h: 0.38, fontSize: image ? 7.4 : 8.8, color: accented ? theme.bg : theme.muted, align: "center", fit: "shrink", margin: 0.02 });
   });
-  slide.addText("建议用三档价格绑定送礼对象：员工福利、客户拜访、重要礼赠。", { x: 1.1, y: 6, w: 10.9, h: 0.28, fontSize: 10.5, color: theme.muted, align: "center", fit: "shrink", margin: 0 });
+  if (image) {
+    const ratio = safeImageRatio(image.path);
+    if (ratio && ratio < 0.8) {
+      slide.addShape(pptx.ShapeType.roundRect, { x: 9.15, y: 1.08, w: 2.42, h: 4.75, rectRadius: 0.05, fill: { color: p.soft }, line: { color: p.red, transparency: 50 } });
+      addImageCover(slide, image.path, 9.3, 1.28, 2.12, 3.95, theme);
+      addSeasonalSeal(pptx, slide, theme, 11.0, 1.28, "选");
+      slide.addText(displayCaption(item.visualIntent, "竖版素材保留完整主体，避免横框挤压。"), { x: 7.55, y: 5.48, w: 4.15, h: 0.34, fontSize: 9.2, color: theme.muted, fit: "shrink", margin: 0.02 });
+    } else {
+      slide.addShape(pptx.ShapeType.roundRect, { x: 7.38, y: 1.28, w: 4.65, h: 3.04, rectRadius: 0.05, fill: { color: p.soft }, line: { color: p.red, transparency: 50 } });
+      addImageCover(slide, image.path, 7.55, 1.46, 4.28, 2.4, theme);
+      addSeasonalSeal(pptx, slide, theme, 11.22, 1.48, "选");
+      slide.addText(displayCaption(item.visualIntent, "保留原图主体，作为价格档位旁的场景证据。"), { x: 7.55, y: 4.55, w: 4.15, h: 0.42, fontSize: 9.5, color: theme.muted, fit: "shrink", margin: 0.02 });
+    }
+  }
+  slide.addText("建议用三档价格绑定送礼对象：员工福利、客户拜访、重要礼赠。", { x: 1.1, y: 6, w: image ? 6.6 : 10.9, h: 0.28, fontSize: 10.5, color: theme.muted, align: image ? "left" : "center", fit: "shrink", margin: 0 });
 }
 
 function renderSeasonalProductDetail(pptx, slide, item, theme, job, index = 0) {
   const image = getSlideImage(job, item, index);
+  const p = seasonalPalette(theme);
+  addSeasonalBackdrop(pptx, slide, theme);
   addTitle(slide, item, theme, { x: 0.72, y: 0.72, w: 6.2, fontSize: 25, subW: 6.2 });
-  slide.addShape(pptx.ShapeType.roundRect, { x: 7.45, y: 0.98, w: 4.2, h: 4.55, rectRadius: 0.05, fill: { color: theme.soft }, line: { color: theme.soft } });
-  if (image) addImageContain(slide, image.path, 7.72, 1.22, 3.66, 3.55, theme);
+  slide.addShape(pptx.ShapeType.roundRect, { x: 7.45, y: 0.98, w: 4.2, h: 4.55, rectRadius: 0.05, fill: { color: p.soft }, line: { color: p.red, transparency: 48 } });
+  if (image) addImageCover(slide, image.path, 7.62, 1.12, 3.96, 4.1, theme);
   else slide.addText("包装质感 / 细节图", { x: 7.95, y: 3, w: 3.22, h: 0.28, fontSize: 12, bold: true, color: theme.accent, align: "center", margin: 0 });
   const facts = buildProductFacts(item);
   facts.forEach((fact, i) => {
@@ -621,24 +751,30 @@ function renderSeasonalProductDetail(pptx, slide, item, theme, job, index = 0) {
 }
 
 function renderSeasonalBundle(pptx, slide, item, theme) {
+  const p = seasonalPalette(theme);
+  addSeasonalBackdrop(pptx, slide, theme);
   addTitle(slide, item, theme, { x: 0.75, y: 0.72, w: 8.4, fontSize: 25, subW: 8.3 });
   const bullets = (item.bullets || []).slice(0, 6);
   const labels = ["员工福利", "客户拜访", "重要礼赠"];
   labels.forEach((label, i) => {
     const x = 0.85 + i * 4.05;
-    slide.addShape(pptx.ShapeType.rect, { x, y: 2.15, w: 3.28, h: 3.08, fill: { color: i === 1 ? theme.accent : theme.soft, transparency: i === 1 ? 3 : 0 }, line: { color: i === 1 ? theme.accent : theme.soft } });
+    slide.addShape(pptx.ShapeType.rect, { x, y: 2.15, w: 3.28, h: 3.08, fill: { color: i === 1 ? p.red : p.soft, transparency: i === 1 ? 0 : 0 }, line: { color: i === 1 ? p.red : p.orange, transparency: i === 1 ? 0 : 55 } });
     slide.addText(label, { x: x + 0.25, y: 2.45, w: 2.55, h: 0.28, fontSize: 11, bold: true, color: i === 1 ? theme.bg : theme.accent, margin: 0 });
     slide.addText(bullets[i] || "待补齐主推组合", { x: x + 0.25, y: 3.05, w: 2.72, h: 0.72, fontSize: 13, bold: true, color: i === 1 ? theme.bg : theme.ink, fit: "shrink", margin: 0.02 });
     slide.addText(bullets[i + 3] || "补齐预算、数量和交期后生成正式版本。", { x: x + 0.25, y: 4.22, w: 2.72, h: 0.46, fontSize: 9.3, color: i === 1 ? theme.bg : theme.muted, fit: "shrink", margin: 0.02 });
   });
 }
 
-function renderSeasonalClosing(pptx, slide, item, theme) {
-  slide.addShape(pptx.ShapeType.rect, { x: 0.68, y: 0.85, w: 12, h: 5.85, fill: { color: theme.soft }, line: { color: theme.soft } });
+function renderSeasonalClosing(pptx, slide, item, theme, job, index = 0) {
+  const image = getSlideImage(job, item, index);
+  const p = seasonalPalette(theme);
+  addSeasonalBackdrop(pptx, slide, theme);
+  slide.addShape(pptx.ShapeType.rect, { x: 0.68, y: 0.85, w: 12, h: 5.85, fill: { color: p.soft, transparency: 8 }, line: { color: p.red, transparency: 55 } });
   slide.addText(item.title || "确认主推组合", { x: 1.05, y: 1.28, w: 8.2, h: 0.75, fontSize: 28, bold: true, color: theme.ink, fit: "shrink", margin: 0 });
   slide.addText(item.subtitle || item.visualIntent || "补齐报价、交期和图片素材后输出客户版。", { x: 1.08, y: 2.1, w: 7.4, h: 0.4, fontSize: 12.5, color: theme.muted, fit: "shrink", margin: 0 });
   addBulletStrip(pptx, slide, item.bullets, theme, 1.1, 3, 7.8);
-  slide.addShape(pptx.ShapeType.rect, { x: 10.12, y: 1.18, w: 1.2, h: 4.12, fill: { color: theme.accent }, line: { color: theme.accent } });
+  if (image) addImageCover(slide, image.path, 9.05, 1.18, 2.45, 4.12, theme);
+  else slide.addShape(pptx.ShapeType.rect, { x: 10.12, y: 1.18, w: 1.2, h: 4.12, fill: { color: theme.accent }, line: { color: theme.accent } });
 }
 
 function renderTechCover(pptx, slide, item, theme, job) {
@@ -884,6 +1020,13 @@ function getSlideImage(job, item = {}, index = 0) {
   const images = getImageFiles(job);
   if (!images.length) return null;
   if (images.length === 1) return images[0];
+  const preferredSlots = (item.imageSlots || []).map(normalizeForMatch).filter(Boolean);
+  if (preferredSlots.length) {
+    for (const slot of preferredSlots) {
+      const exact = images.find((image) => image._normalizedName === slot);
+      if (exact) return exact;
+    }
+  }
   const slideText = normalizeForMatch([item.title, item.subtitle, item.visualIntent, ...(item.imageSlots || []), ...(item.bullets || [])].join(" "));
   const scored = images.map((image) => ({ image, score: scoreImageForSlide(image, slideText, item.layout, index) }));
   scored.sort((a, b) => b.score - a.score || a.image._imageIndex - b.image._imageIndex);
@@ -894,6 +1037,7 @@ function scoreImageForSlide(image, slideText, layout, index) {
   const name = image._normalizedName || "";
   let score = 0;
   if (Number(image.sourceSlide || 0) === index + 1) score += 30;
+  score += imageSizeScore(image);
   for (const token of tokenizeMatchText(slideText)) {
     if (token.length >= 2 && name.includes(token)) score += token.length >= 4 ? 8 : 3;
   }
@@ -903,6 +1047,15 @@ function scoreImageForSlide(image, slideText, layout, index) {
   if (/logo|标志|品牌/.test(name) && layout === "cover") score += 8;
   if (index === 0) score += Math.max(0, 4 - image._imageIndex);
   return score;
+}
+
+function imageSizeScore(image = {}) {
+  const size = Number(image.size || 0);
+  if (size >= 1_000_000) return 34;
+  if (size >= 250_000) return 24;
+  if (size >= 80_000) return 14;
+  if (size >= 20_000) return 6;
+  return 0;
 }
 
 function tokenizeMatchText(value) {
@@ -924,10 +1077,118 @@ function addImageContain(slide, imagePath, x, y, w, h, theme) {
     const draw = imageRatio > boxRatio
       ? { x, y: y + (h - w / imageRatio) / 2, w, h: w / imageRatio }
       : { x: x + (w - h * imageRatio) / 2, y, w: h * imageRatio, h };
+    recordImagePlacement(slide, "contain", imagePath, dimensions, { x, y, w, h }, draw);
     slide.addImage({ path: imagePath, ...draw });
   } catch {
     slide.addText("图片素材", { x, y: y + h / 2 - 0.15, w, h: 0.3, fontSize: 10, color: theme.accent, align: "center", margin: 0 });
   }
+}
+
+function addImageCover(slide, imagePath, x, y, w, h, theme) {
+  try {
+    const dimensions = imageSize(imagePath);
+    const imageRatio = dimensions.width / dimensions.height;
+    const boxRatio = w / h;
+    const cropLoss = estimateCoverCropLoss(imageRatio, boxRatio);
+    const isLargeHero = w * h >= SLIDE_W * SLIDE_H * 0.55;
+    if (cropLoss > 0.42 && !isLargeHero) {
+      const draw = imageRatio > boxRatio
+        ? { x, y: y + (h - w / imageRatio) / 2, w, h: w / imageRatio }
+        : { x: x + (w - h * imageRatio) / 2, y, w: h * imageRatio, h };
+      recordImagePlacement(slide, "contain-auto", imagePath, dimensions, { x, y, w, h }, draw);
+      slide.addImage({ path: imagePath, ...draw });
+      return;
+    }
+    recordImagePlacement(slide, "cover", imagePath, dimensions, { x, y, w, h }, { x, y, w, h });
+    slide.addImage({
+      path: imagePath,
+      x,
+      y,
+      w,
+      h,
+      sizing: { type: "cover", w, h }
+    });
+  } catch {
+    slide.addText("图片素材", { x, y: y + h / 2 - 0.15, w, h: 0.3, fontSize: 10, color: theme.accent, align: "center", margin: 0 });
+  }
+}
+
+function recordImagePlacement(slide, mode, imagePath, dimensions, box, draw) {
+  const imageRatio = dimensions.width / dimensions.height;
+  const boxRatio = box.w / box.h;
+  const cropLoss = mode === "cover" ? estimateCoverCropLoss(imageRatio, boxRatio) : 0;
+  const fillRatio = (mode === "contain" || mode === "contain-auto") ? estimateContainFillRatio(imageRatio, boxRatio) : 1;
+  const warnings = [];
+  if (mode === "cover" && cropLoss > 0.42) warnings.push("cover-crops-too-much");
+  if ((mode === "contain" || mode === "contain-auto") && fillRatio < 0.55) warnings.push("contain-leaves-too-much-empty-space");
+  slide._pptDesignImagePlacements?.push({
+    mode,
+    source: path.basename(imagePath || ""),
+    imageWidth: dimensions.width,
+    imageHeight: dimensions.height,
+    imageRatio: roundMetric(imageRatio),
+    box: roundBox(box),
+    draw: roundBox(draw),
+    boxRatio: roundMetric(boxRatio),
+    cropLoss: roundMetric(cropLoss),
+    fillRatio: roundMetric(fillRatio),
+    warnings
+  });
+}
+
+function safeImageRatio(imagePath) {
+  try {
+    const dimensions = imageSize(imagePath);
+    return dimensions.width / dimensions.height;
+  } catch {
+    return null;
+  }
+}
+
+function displayCaption(value, fallback) {
+  const text = cleanText(value);
+  if (!text) return fallback;
+  if (text.length > 58) return fallback;
+  if (/视觉特征|亮度倾向|饱和度|palette|composition|avoid|style|background|foreground/i.test(text)) return fallback;
+  return text;
+}
+
+function estimateCoverCropLoss(imageRatio, boxRatio) {
+  if (!imageRatio || !boxRatio) return 0;
+  if (imageRatio > boxRatio) return 1 - boxRatio / imageRatio;
+  return 1 - imageRatio / boxRatio;
+}
+
+function estimateContainFillRatio(imageRatio, boxRatio) {
+  if (!imageRatio || !boxRatio) return 0;
+  if (imageRatio > boxRatio) return boxRatio / imageRatio;
+  return imageRatio / boxRatio;
+}
+
+function summarizeRenderImageQa(renderReport = {}) {
+  const placements = renderReport.imagePlacements || [];
+  const warnings = [...new Set(placements.flatMap((placement) => placement.warnings || []))];
+  return {
+    total: placements.length,
+    warningCount: placements.filter((placement) => placement.warnings?.length).length,
+    warnings,
+    maxCropLoss: roundMetric(Math.max(0, ...placements.map((placement) => Number(placement.cropLoss || 0)))),
+    minFillRatio: placements.length ? roundMetric(Math.min(...placements.map((placement) => Number(placement.fillRatio ?? 1)))) : 1,
+    items: placements.filter((placement) => placement.warnings?.length).slice(0, 12)
+  };
+}
+
+function roundBox(box = {}) {
+  return {
+    x: roundMetric(box.x),
+    y: roundMetric(box.y),
+    w: roundMetric(box.w),
+    h: roundMetric(box.h)
+  };
+}
+
+function roundMetric(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
 function safeName(name) {

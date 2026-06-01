@@ -314,8 +314,11 @@ export async function generateDeckPlan(input, mode) {
     `可用版式：${layouts.map((layout) => `${layout.id}=${layout.name}(${layout.bestFor}，最多 ${layout.maxBullets} 条)`).join("；")}`,
     templatePackPrompt ? `模板包规则（必须遵守）：\n${templatePackPrompt}` : "",
     skillRulePrompt ? `PPT 技能规则：\n${skillRulePrompt}` : "",
-    styleReferences.length ? `风格参考库（需要内化到调性里，不要直接复制图片内容）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "风格参考"}：${item.tone || "参考色彩、留白、质感和版式密度"}`).join("\n")}` : "",
+    styleReferences.length ? `风格参考库（需要内化到调性里，不要直接复制图片内容）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "风格参考"}：${item.tone || "参考色彩、留白、质感和版式密度"}${item.styleFingerprint?.prompt ? `；本地风格指纹：${item.styleFingerprint.prompt}` : ""}`).join("\n")}` : "",
+    routePlan?.styleReferenceStrategy?.fingerprint?.prompt ? `风格库综合指纹：${routePlan.styleReferenceStrategy.fingerprint.prompt}` : "",
     routePlan?.styleReferenceStrategy?.instruction ? `风格参考策略：${routePlan.styleReferenceStrategy.instruction}` : "",
+    routePlan?.aestheticPlan ? `PPT 美学分层系统（必须遵守）：背景层只服务文字可读性；文字安全区不能被底图、产品图或装饰遮挡；每页 visualIntent 要体现 pagePlans 中的 background/text/image/ornament 分层。\n${JSON.stringify(routePlan.aestheticPlan, null, 2)}` : "",
+    input.styleProofConfirmation ? `已确认风格样张（完整 PPT 必须继承其调性，并避开样稿质检指出的问题）：\n${JSON.stringify(input.styleProofConfirmation, null, 2)}` : "",
     routePlan?.storyArc ? `推荐故事线（必须遵守）：${routePlan.storyArc}` : "",
     routePlan ? `智能路由结果（必须遵守页数、顺序、layout、purpose、storyRole）：\n${JSON.stringify(routePlan, null, 2)}` : "",
     input.materialBrief?.summary ? `资料简报：${input.materialBrief.summary}` : "",
@@ -422,6 +425,7 @@ function compactPromptInput(input = {}) {
     copyMode: input.copyMode,
     materials: input.materials,
     materialBrief: input.materialBrief,
+    styleProofConfirmation: input.styleProofConfirmation,
     extracted: (input.extracted || []).map((file) => ({ name: file.name, text: compactText(file.text, 5200) }))
   };
 }

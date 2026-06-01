@@ -13,7 +13,7 @@
       "name": "东方自然风",
       "tone": ["warm", "premium", "seasonal"],
       "bestFor": "节日礼盒、文化产品、食品茶饮、强调高级耐看的方案",
-      "colors": { "bg": "F7F3EA", "accent": "68745E", "soft": "EDE6D8", "ink": "222018", "muted": "6E675F" }
+      "colors": { "bg": "F8F1E4", "accent": "9E1F16", "soft": "EFE1CF", "ink": "241B16", "muted": "75685C", "accent2": "D86B2A", "olive": "6E765D", "paper": "FBF6EA" }
     },
     {
       "slug": "monochrome-editorial",
