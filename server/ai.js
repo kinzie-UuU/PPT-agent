@@ -291,6 +291,7 @@ export async function generateDeckPlan(input, mode) {
   const layouts = getLayoutRecords();
   const skillRulePrompt = getSkillRulePrompt();
   const routePlan = input.routePlan || null;
+  const styleReferences = Array.isArray(input.styleReferences) ? input.styleReferences.slice(0, 12) : [];
   const targetSlides = routePlan?.targetSlides || resolveSlideCount(input.pageCount);
   const promptInput = compactPromptInput(input);
   const prompt = [
@@ -313,6 +314,8 @@ export async function generateDeckPlan(input, mode) {
     `可用版式：${layouts.map((layout) => `${layout.id}=${layout.name}(${layout.bestFor}，最多 ${layout.maxBullets} 条)`).join("；")}`,
     templatePackPrompt ? `模板包规则（必须遵守）：\n${templatePackPrompt}` : "",
     skillRulePrompt ? `PPT 技能规则：\n${skillRulePrompt}` : "",
+    styleReferences.length ? `风格参考库（需要内化到调性里，不要直接复制图片内容）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "风格参考"}：${item.tone || "参考色彩、留白、质感和版式密度"}`).join("\n")}` : "",
+    routePlan?.styleReferenceStrategy?.instruction ? `风格参考策略：${routePlan.styleReferenceStrategy.instruction}` : "",
     routePlan?.storyArc ? `推荐故事线（必须遵守）：${routePlan.storyArc}` : "",
     routePlan ? `智能路由结果（必须遵守页数、顺序、layout、purpose、storyRole）：\n${JSON.stringify(routePlan, null, 2)}` : "",
     input.materialBrief?.summary ? `资料简报：${input.materialBrief.summary}` : "",

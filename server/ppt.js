@@ -7,7 +7,7 @@ import pptxgen from "pptxgenjs";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
 import { imageSize } from "image-size";
-import { outputDir, rootDir } from "./store.js";
+import { outputDir, rootDir, uploadDir } from "./store.js";
 import { getTemplatePack, getThemeRecord } from "./designSystem.js";
 
 const execFileAsync = promisify(execFile);
@@ -92,6 +92,92 @@ export async function extractPptxText(filePath) {
     slides.push(cleanText(texts.join(" ")));
   }
   return slides.map((text, index) => `第 ${index + 1} 页：${text}`).join("\n");
+}
+
+export async function extractPptxImages(file) {
+  const ext = path.extname(file.originalName || file.path || "").toLowerCase();
+  if (ext !== ".pptx") return [];
+  const buffer = await fs.readFile(file.path);
+  const zip = await JSZip.loadAsync(buffer);
+  const slideFiles = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1]));
+  const mediaDir = path.join(uploadDir, "pptx-media", file.id || safeName(path.basename(file.path || "pptx")));
+  await fs.mkdir(mediaDir, { recursive: true });
+  const images = [];
+  const seen = new Set();
+  for (const slideName of slideFiles) {
+    const slideIndex = Number(slideName.match(/slide(\d+)\.xml$/)?.[1] || images.length + 1);
+    const relsName = slideName.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
+    const relsFile = zip.files[relsName];
+    const slideFile = zip.files[slideName];
+    if (!relsFile || !slideFile) continue;
+    const [relsXml, slideXml] = await Promise.all([relsFile.async("text"), slideFile.async("text")]);
+    const usedRelIds = new Set([...slideXml.matchAll(/(?:r:embed|r:link)="([^"]+)"/g)].map((match) => match[1]));
+    for (const rel of parseImageRelationships(relsXml)) {
+      if (!usedRelIds.has(rel.id)) continue;
+      const mediaPath = resolvePptxTarget(slideName, rel.target);
+      const mediaFile = zip.files[mediaPath];
+      if (!mediaFile) continue;
+      const extName = path.extname(mediaPath).toLowerCase() || ".png";
+      const key = `${slideIndex}-${rel.id}-${mediaPath}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const originalBase = safeName(path.basename(file.originalName || "source.pptx", ext)) || "source";
+      const filename = `${originalBase}-slide${String(slideIndex).padStart(2, "0")}-${safeName(path.basename(mediaPath, extName))}${extName}`;
+      const outputPath = path.join(mediaDir, filename);
+      const bytes = await mediaFile.async("nodebuffer");
+      await fs.writeFile(outputPath, bytes);
+      images.push({
+        id: `${file.id || "pptx"}_slide${slideIndex}_${rel.id}`,
+        originalName: filename,
+        mimeType: mimeTypeFromExt(extName),
+        path: outputPath,
+        size: bytes.length,
+        createdAt: new Date().toISOString(),
+        source: "pptx-media",
+        sourceUploadId: file.id || null,
+        sourceUploadName: file.originalName || path.basename(file.path || ""),
+        sourceSlide: slideIndex,
+        sourceRelId: rel.id,
+        sourceMediaPath: mediaPath,
+        derived: true
+      });
+    }
+  }
+  return images;
+}
+
+function parseImageRelationships(xml = "") {
+  return [...xml.matchAll(/<Relationship\b([^>]*)\/?>/g)]
+    .map((match) => {
+      const attrs = match[1] || "";
+      return {
+        id: attrs.match(/\bId="([^"]+)"/)?.[1] || "",
+        type: attrs.match(/\bType="([^"]+)"/)?.[1] || "",
+        target: attrs.match(/\bTarget="([^"]+)"/)?.[1] || ""
+      };
+    })
+    .filter((rel) => rel.id && rel.target && /\/image$/i.test(rel.type));
+}
+
+function resolvePptxTarget(baseSlidePath, target = "") {
+  const baseDir = path.posix.dirname(baseSlidePath);
+  return path.posix.normalize(path.posix.join(baseDir, target));
+}
+
+function mimeTypeFromExt(ext = "") {
+  const map = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".emf": "image/x-emf",
+    ".wmf": "image/x-wmf"
+  };
+  return map[String(ext).toLowerCase()] || "application/octet-stream";
 }
 
 function decodeXml(value = "") {
@@ -790,7 +876,7 @@ function splitMetric(text) {
 function getImageFiles(job = {}) {
   return (job.files || []).filter((file) => {
     const ext = path.extname(file.originalName || file.path || "").toLowerCase();
-    return [".png", ".jpg", ".jpeg", ".svg"].includes(ext) || /^image\/(png|jpe?g|svg\+xml)/i.test(file.mimeType || "");
+    return [".png", ".jpg", ".jpeg", ".svg", ".webp"].includes(ext) || /^image\/(png|jpe?g|svg\+xml|webp)/i.test(file.mimeType || "");
   }).map((file, index) => ({ ...file, _imageIndex: index, _normalizedName: normalizeForMatch(file.originalName || path.basename(file.path || "")) }));
 }
 
@@ -807,6 +893,7 @@ function getSlideImage(job, item = {}, index = 0) {
 function scoreImageForSlide(image, slideText, layout, index) {
   const name = image._normalizedName || "";
   let score = 0;
+  if (Number(image.sourceSlide || 0) === index + 1) score += 30;
   for (const token of tokenizeMatchText(slideText)) {
     if (token.length >= 2 && name.includes(token)) score += token.length >= 4 ? 8 : 3;
   }

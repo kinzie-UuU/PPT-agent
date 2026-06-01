@@ -6,8 +6,8 @@ import path from "path";
 import fsSync from "fs";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
-import { addUpload, ensureDirs, getJob, getUploads, listJobs, makeId, outputDir, rootDir, saveJob, uploadDir } from "./store.js";
-import { buildDeck, exportWithPowerPoint, extractText, renderPptxPreview } from "./ppt.js";
+import { addStyleGroup, addStyleReference, addUpload, deleteJob, deleteStyleGroup, deleteStyleReference, deleteUpload, ensureDirs, getJob, getUploads, listJobs, listStyleGroups, listStyleReferences, makeId, outputDir, rootDir, saveJob, updateStyleReference, uploadDir } from "./store.js";
+import { buildDeck, exportWithPowerPoint, extractPptxImages, extractText, renderPptxPreview } from "./ppt.js";
 import { generateDeckPlan, reviseSlide } from "./ai.js";
 import { validateDeck } from "./validateDeck.js";
 import { getDesignSystem } from "./designSystem.js";
@@ -165,8 +165,99 @@ app.post("/api/uploads", upload.array("files"), async (req, res, next) => {
   }
 });
 
+app.delete("/api/uploads/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteUpload(req.params.id);
+    if (!deleted) return res.json({ ok: true, missing: true, deleted: { id: req.params.id } });
+    res.json({ ok: true, deleted: { id: deleted.id, originalName: deleted.originalName } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/style-references", async (_req, res, next) => {
+  try {
+    const references = await listStyleReferences();
+    res.json({ references: references.map(normalizeStyleReference) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/style-references", upload.array("files"), async (req, res, next) => {
+  try {
+    const records = [];
+    for (const file of req.files || []) records.push(await addStyleReference(file, req.body || {}));
+    res.json({ references: records.map(normalizeStyleReference) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/style-references/:id", async (req, res, next) => {
+  try {
+    const updated = await updateStyleReference(req.params.id, req.body || {});
+    if (!updated) return res.status(404).json({ error: "风格参考图不存在" });
+    res.json({ reference: normalizeStyleReference(updated) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/style-references/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteStyleReference(req.params.id);
+    if (!deleted) return res.json({ ok: true, missing: true, deleted: { id: req.params.id } });
+    res.json({ ok: true, deleted: { id: deleted.id, name: deleted.name } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/style-groups", async (_req, res, next) => {
+  try {
+    const groups = await listStyleGroups();
+    res.json({ groups: groups.map(normalizeStyleGroup) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/style-groups", async (req, res, next) => {
+  try {
+    const group = await addStyleGroup(req.body || {});
+    res.json({ group: normalizeStyleGroup(group) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/style-groups/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteStyleGroup(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "自定义风格库不存在" });
+    res.json({ ok: true, deleted: normalizeStyleGroup(deleted) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function expandUploadsWithPptxImages(uploads = []) {
+  const derived = [];
+  for (const file of uploads) {
+    try {
+      derived.push(...await extractPptxImages(file));
+    } catch (error) {
+      console.warn(`PPTX media extraction failed for ${file.originalName || file.id}: ${error.message}`);
+    }
+  }
+  return [...uploads, ...derived];
+}
+
 async function createJob(req, res, mode) {
-  const uploads = await getUploads(req.body.fileIds || []);
+  const uploads = await expandUploadsWithPptxImages(await getUploads(req.body.fileIds || []));
+  const allStyleReferences = await listStyleReferences();
+  const styleReferences = filterStyleReferencesForInput(allStyleReferences, req.body);
   const extracted = [];
   for (const file of uploads) {
     try {
@@ -193,9 +284,9 @@ async function createJob(req, res, mode) {
     includeToc: req.body.includeToc !== false,
     includeRiskChecklist: req.body.includeRiskChecklist !== false
   };
-  const baseRoutePlan = routeDeck({ mode, input: req.body, materialBrief, uploads });
+  const baseRoutePlan = routeDeck({ mode, input: { ...req.body, styleReferences }, materialBrief, uploads });
   const routePlan = applyOutlinePlan(baseRoutePlan, req.body.outlinePlan);
-  const input = { ...req.body, extracted, materialBrief, routePlan };
+  const input = { ...req.body, extracted, materialBrief, routePlan, styleReferences: styleReferences.map(compactStyleReference) };
   const ai = await generateDeckPlan(input, mode);
   const validated = validateDeck(ai.deck, routePlan);
   const events = [
@@ -236,9 +327,154 @@ async function createJob(req, res, mode) {
   res.json(toClientJob(job));
 }
 
+async function buildAgentContext(req, mode) {
+  const uploads = await expandUploadsWithPptxImages(await getUploads(req.body.fileIds || []));
+  const allStyleReferences = await listStyleReferences();
+  const styleReferences = filterStyleReferencesForInput(allStyleReferences, req.body);
+  const extracted = [];
+  for (const file of uploads) {
+    try {
+      extracted.push({ name: file.originalName, text: await extractText(file) });
+    } catch (error) {
+      extracted.push({ name: file.originalName, text: `资料抽取失败：${error.message}` });
+    }
+  }
+  const materialBrief = buildMaterialBrief([
+    ...extracted,
+    {
+      name: "输入说明",
+      text: [
+        req.body.projectName ? `项目名称：${req.body.projectName}` : "",
+        req.body.audience ? `目标对象：${req.body.audience}` : "",
+        req.body.copyMode ? `生成类型：${req.body.copyMode}` : "",
+        req.body.notes ? `补充说明：${req.body.notes}` : "",
+        Array.isArray(req.body.materials) && req.body.materials.length ? `资料类型：${req.body.materials.join("、")}` : ""
+      ].filter(Boolean).join("\n")
+    }
+  ]);
+  materialBrief.preferences = {
+    primaryProduct: req.body.primaryProduct || "",
+    includeToc: req.body.includeToc !== false,
+    includeRiskChecklist: req.body.includeRiskChecklist !== false
+  };
+  const baseRoutePlan = routeDeck({ mode, input: { ...req.body, styleReferences }, materialBrief, uploads });
+  const routePlan = applyOutlinePlan(baseRoutePlan, req.body.outlinePlan);
+  const input = { ...req.body, extracted, materialBrief, routePlan, styleReferences: styleReferences.map(compactStyleReference) };
+  return { uploads, extracted, materialBrief, baseRoutePlan, routePlan, input };
+}
+
+async function runAgentJob(req, res, mode) {
+  const agentStartedAt = new Date().toISOString();
+  const agentSteps = [];
+  const recordStep = (id, label, status = "done", summary = "", details = {}) => {
+    agentSteps.push({ id, label, status, summary, details, at: new Date().toISOString() });
+  };
+
+  recordStep("intent", "识别任务意图", "done", mode === "optimize" ? "优化旧 PPT" : "生成新 PPT");
+  recordStep("extract", "读取资料", "running", "正在抽取上传资料和用户需求");
+  const { uploads, materialBrief, routePlan, input } = await buildAgentContext(req, mode);
+  const agentDecision = buildAgentDecision(mode, req.body, uploads, materialBrief, routePlan);
+  const agentPlan = buildAgentPlan(agentDecision, routePlan);
+  agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: materialBrief.summary || "资料已读取" };
+
+  recordStep("route", "规划页面路线", "done", `${routePlan.deckType} / ${routePlan.targetSlides} 页`, {
+    layouts: routePlan.layoutSequence?.map((item) => item.layout) || []
+  });
+  recordStep("generate", "生成结构化 Deck", "running", "正在调用 AI 或本地 fallback");
+  const ai = await generateDeckPlan(input, mode);
+  let validated = validateDeck(ai.deck, routePlan);
+  let quality = enrichQuality(validated.quality, uploads, materialBrief, routePlan);
+  agentSteps[agentSteps.length - 1] = {
+    ...agentSteps[agentSteps.length - 1],
+    status: "done",
+    summary: ai.aiUsed ? `AI 已生成：${ai.provider?.model || "unknown"}` : "已使用本地 fallback",
+    details: { warning: ai.warning || null }
+  };
+
+  recordStep("validate", "交付自检", "done", `${validated.deck.slides?.length || 0} 页 / ${validated.warnings.length} 条提示`);
+  const firstAssessment = classifyAgentQuality(validated.deck, quality, routePlan, materialBrief);
+  const agentFixes = [];
+  if (shouldAgentAutoRepair(firstAssessment)) {
+    recordStep("repair", "自动修复", "running", "发现可修复问题，执行 1 轮自动修复", firstAssessment);
+    const beforeQuality = summarizeAgentQuality(quality);
+    const repair = repairDeckForDelivery(validated.deck, routePlan, uploads, materialBrief);
+    validated = validateDeck(repair.deck, routePlan);
+    quality = enrichQuality(validated.quality, uploads, materialBrief, routePlan);
+    const afterAssessment = classifyAgentQuality(validated.deck, quality, routePlan, materialBrief);
+    const fix = {
+      triggered: true,
+      changes: repair.summary?.changes || [],
+      before: beforeQuality,
+      after: summarizeAgentQuality(quality),
+      beforeIssues: firstAssessment,
+      afterIssues: afterAssessment
+    };
+    agentFixes.push(fix);
+    agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: `已自动修复 ${fix.changes.length || 1} 类问题`, details: fix };
+  } else {
+    recordStep("repair", "自动修复", "skipped", "未发现需要自动修复的阻断问题");
+  }
+
+  const events = [
+    makeEvent("route", `智能路由：${routePlan.deckType} / ${routePlan.targetSlides} 页 / ${routePlan.layoutSequence.map((step) => step.layout).join(" > ")}`, {
+      deckType: routePlan.deckType,
+      targetSlides: routePlan.targetSlides,
+      layoutSequence: routePlan.layoutSequence.map((step) => step.layout),
+      reasons: routePlan.routingReasons
+    }),
+    makeEvent("upload", `读取 ${uploads.length} 个上传文件`, { files: uploads.map((file) => file.originalName) }),
+    makeEvent("extract", materialBrief.summary || "资料已抽取", { inputStrength: materialBrief.inputStrength, charCount: materialBrief.charCount, pageCount: materialBrief.pageCount, confirmationFields: materialBrief.confirmationFields }),
+    makeEvent("agent", `Agent 计划：${agentDecision.intent} / ${agentDecision.autonomy}`, { agentPlan, agentDecision }),
+    ...(agentFixes.length ? [makeEvent("agent-repair", "Agent 已自动修复 1 轮", agentFixes[0])] : []),
+    makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `已使用 AI 生成设计计划：${ai.provider?.model || "unknown"}` : "未使用 AI，已采用本地资料驱动 fallback", { warning: ai.warning || null, provider: ai.provider || null }),
+    makeEvent("validate", `校验完成：${validated.warnings.length} 条提示`, { warnings: validated.warnings }),
+    makeEvent("render", "开始生成 PPTX")
+  ];
+  const job = {
+    id: makeId("job"),
+    mode,
+    status: "ready",
+    input,
+    deck: validated.deck,
+    quality,
+    agentPlan,
+    agentSteps,
+    agentDecision,
+    agentFixes,
+    agentStartedAt,
+    agentFinishedAt: null,
+    aiUsed: ai.aiUsed,
+    aiProvider: ai.provider || null,
+    warning: [ai.warning, ...validated.warnings].filter(Boolean).join("；") || null,
+    files: uploads,
+    exports: {},
+    previewImages: [],
+    events,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  recordStep("render", "生成 PPTX", "running", "正在生成 PPTX 文件");
+  job.exports.pptx = await buildDeck(job);
+  job.exportMeta = collectExportMeta(job.exports);
+  agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: "PPTX 已生成", details: { pptx: job.exports.pptx } };
+  addEvent(job, "rendered", "PPTX 已生成", { pptx: job.exports.pptx });
+  recordStep("preview", "刷新预览", "running", "正在生成预览图");
+  await refreshPreview(job, "已生成");
+  const finalAssessment = classifyAgentQuality(job.deck, job.quality, routePlan, materialBrief, job.previewImages || []);
+  agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: `${(job.previewImages || []).filter(Boolean).length} 张预览图`, details: finalAssessment };
+  job.agentSteps = agentSteps;
+  job.agentDecision = { ...agentDecision, finalAssessment, autoRepaired: agentFixes.length > 0 };
+  job.agentFinishedAt = new Date().toISOString();
+  if (finalAssessment.blocking.length) {
+    job.warning = [job.warning, `Agent 自检仍有阻断问题：${finalAssessment.blocking.join("；")}`].filter(Boolean).join("；");
+  }
+  await saveJob(job);
+  res.json(toClientJob(job));
+}
+
 app.post("/api/jobs/outline", async (req, res, next) => {
   try {
-    const uploads = await getUploads(req.body.fileIds || []);
+    const uploads = await expandUploadsWithPptxImages(await getUploads(req.body.fileIds || []));
     const extracted = [];
     for (const file of uploads) {
       try {
@@ -275,7 +511,10 @@ app.post("/api/jobs/outline", async (req, res, next) => {
         confirmationFields: materialBrief.confirmationFields || [],
         imageCount: materialBrief.imageCount || 0,
         priceCount: materialBrief.prices?.length || 0,
-        productCount: materialBrief.productCandidates?.length || 0
+        productCount: materialBrief.productCandidates?.length || 0,
+        pageCount: materialBrief.pageCount || 0,
+        charCount: materialBrief.charCount || 0,
+        routingReasons: routePlan.routingReasons || []
       }
     });
   } catch (error) {
@@ -285,7 +524,7 @@ app.post("/api/jobs/outline", async (req, res, next) => {
 
 app.post("/api/jobs/generate", async (req, res, next) => {
   try {
-    await createJob(req, res, "generate");
+    await runAgentJob(req, res, "generate");
   } catch (error) {
     next(error);
   }
@@ -293,7 +532,7 @@ app.post("/api/jobs/generate", async (req, res, next) => {
 
 app.post("/api/jobs/optimize", async (req, res, next) => {
   try {
-    await createJob(req, res, "optimize");
+    await runAgentJob(req, res, "optimize");
   } catch (error) {
     next(error);
   }
@@ -308,8 +547,14 @@ app.get("/api/jobs", async (_req, res, next) => {
   }
 });
 
-app.get("/api/design-system", (_req, res) => {
-  res.json(getDesignSystem());
+app.get("/api/design-system", async (_req, res, next) => {
+  try {
+    const references = await listStyleReferences();
+    const groups = await listStyleGroups();
+    res.json({ ...getDesignSystem(), styleReferences: references.map(normalizeStyleReference), styleGroups: groups.map(normalizeStyleGroup) });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/jobs/:id", async (req, res, next) => {
@@ -317,6 +562,16 @@ app.get("/api/jobs/:id", async (req, res, next) => {
     const job = await getJob(req.params.id);
     if (!job) return res.status(404).json({ error: "任务不存在" });
     res.json(toClientJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/jobs/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteJob(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "任务不存在" });
+    res.json({ ok: true, deleted: { id: deleted.id, title: deleted.deck?.title || "" } });
   } catch (error) {
     next(error);
   }
@@ -377,7 +632,8 @@ app.post("/api/jobs/:id/slides/:slideIndex/update", async (req, res, next) => {
       ...job.deck,
       slides: job.deck.slides.map((slide, index) => (index === slideIndex ? nextSlide : slide))
     };
-    const routePlan = job.input?.routePlan || null;
+    const routePlan = syncRoutePlanWithSlides(job.input?.routePlan || null, nextSlides, "manual-edit");
+    if (job.input) job.input.routePlan = routePlan;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
@@ -411,10 +667,11 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
         title: `${source.title || "未命名页面"} 副本`
       });
       nextIndex = slideIndex + 1;
-    } else if (action === "insert-after") {
+    } else if (action === "insert-after" || action === "insert-before") {
       const layout = cleanClientText(req.body.layout) || "section";
       const defaults = getInsertedSlideDefaults(layout);
-      nextSlides.splice(slideIndex + 1, 0, {
+      const insertIndex = action === "insert-before" ? slideIndex : slideIndex + 1;
+      nextSlides.splice(insertIndex, 0, {
         layout,
         title: defaults.title,
         subtitle: defaults.subtitle,
@@ -426,7 +683,7 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
         visualIntent: defaults.visualIntent,
         speakerNotes: ""
       });
-      nextIndex = slideIndex + 1;
+      nextIndex = insertIndex;
     } else if (action === "delete") {
       if (slides.length <= 1) return res.status(400).json({ error: "至少需要保留 1 页" });
       nextSlides.splice(slideIndex, 1);
@@ -441,12 +698,20 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
         [nextSlides[slideIndex + 1], nextSlides[slideIndex]] = [nextSlides[slideIndex], nextSlides[slideIndex + 1]];
         nextIndex = slideIndex + 1;
       }
+    } else if (action === "move-to") {
+      const toIndex = Math.max(0, Math.min(nextSlides.length - 1, Number(req.body.toIndex)));
+      const [moved] = nextSlides.splice(slideIndex, 1);
+      nextSlides.splice(toIndex, 0, moved);
+      nextIndex = toIndex;
     } else {
       return res.status(400).json({ error: "未知页面操作" });
     }
     pushUndo(job, `撤销页面操作：${action}`);
+    const previousPreviewImages = [...(job.previewImages || [])];
+    job.skipPreviewRender = true;
     job.deck = { ...job.deck, slides: nextSlides };
-    const routePlan = job.input?.routePlan || null;
+    const routePlan = syncRoutePlanWithSlides(job.input?.routePlan || null, nextSlides, action);
+    if (job.input) job.input.routePlan = routePlan;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
@@ -456,6 +721,7 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
     await refreshPreview(job, "页面结构已刷新");
+    syncPreviewAfterSlideAction(job, previousPreviewImages, action, slideIndex, nextIndex);
     await saveJob(job);
     res.json({ ...toClientJob(job), selectedSlide: nextIndex });
   } catch (error) {
@@ -560,6 +826,32 @@ app.post("/api/jobs/:id/rewrite", async (req, res, next) => {
   }
 });
 
+app.post("/api/jobs/:id/repair", async (req, res, next) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: "任务不存在" });
+    pushUndo(job, "撤销交付自检修复");
+    let routePlan = job.input?.routePlan || null;
+    const report = repairDeckForDelivery(job.deck, routePlan, job.files || [], job.input?.materialBrief || {});
+    job.deck = report.deck;
+    routePlan = syncRoutePlanWithSlides(routePlan, job.deck.slides || [], "repair");
+    if (job.input) job.input.routePlan = routePlan;
+    const validated = validateDeck(job.deck, routePlan);
+    job.deck = validated.deck;
+    job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
+    job.warning = validated.warnings.length ? validated.warnings.join("；") : null;
+    addEvent(job, "delivery-repair", "交付自检修复已完成", report.summary);
+    job.updatedAt = new Date().toISOString();
+    job.exports.pptx = await buildDeck(job);
+    job.exportMeta = collectExportMeta(job.exports);
+    await refreshPreview(job, "交付自检修复已刷新");
+    await saveJob(job);
+    res.json(toClientJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/jobs/:id/undo", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
@@ -631,6 +923,7 @@ function toClientJob(job) {
     return `/outputs/${relative}${version}`;
   };
   const previewImages = (job.previewImages || []).map((file) => toOutputUrl(file, { cacheBust: true }));
+  const slideCount = job.deck?.slides?.length || 0;
   return {
     ...publicJob,
     canUndo: Boolean(job.undoStack?.length),
@@ -639,7 +932,7 @@ function toClientJob(job) {
     files: (job.files || []).map(normalizeUploadRecord),
     exports: Object.fromEntries(Object.entries(job.exports || {}).map(([key, value]) => [key, toOutputUrl(value)])),
     exportMeta: job.exportMeta || collectExportMeta(job.exports || {}),
-    previewImages: previewImages.length && previewImages.every(Boolean) ? previewImages : repairPreviewImages(job, { cacheBust: true })
+    previewImages: previewImages.length === slideCount ? previewImages : previewImages.length && previewImages.every(Boolean) ? previewImages : repairPreviewImages(job, { cacheBust: true })
   };
 }
 
@@ -679,7 +972,79 @@ function enrichQuality(quality, files = [], materialBrief = {}, routePlan = null
   };
 }
 
+function buildAgentDecision(mode, input = {}, uploads = [], materialBrief = {}, routePlan = {}) {
+  const hasOldDeck = mode === "optimize" || uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
+  const text = cleanClientText([input.notes, input.copyMode, input.projectName].filter(Boolean).join(" "));
+  const wantsEdit = /修改|改写|优化|重排|重新排版|升级|高级|渲染/.test(text);
+  const intent = hasOldDeck && wantsEdit ? "优化旧 PPT" : hasOldDeck ? "重排旧 PPT" : materialBrief.inputStrength === "empty" ? "零资料初稿" : "新建 PPT";
+  return {
+    intent,
+    autonomy: "confirm-outline-then-auto-repair-once",
+    inputStrength: materialBrief.inputStrength || "strong",
+    routeType: routePlan.deckType || "自动",
+    targetSlides: routePlan.targetSlides || 0,
+    hasConfirmedOutline: Boolean(input.outlinePlan?.layoutSequence?.length),
+    hasOldDeck,
+    needsHumanOutlineGate: true
+  };
+}
+
+function buildAgentPlan(decision = {}, routePlan = {}) {
+  return {
+    name: "AI PPT Agent v1",
+    summary: `${decision.intent || "PPT 任务"}：先确认大纲，再生成、自检并自动修复一轮。`,
+    steps: ["读取资料", "判断任务意图", "规划可确认大纲", "按确认大纲生成 Deck", "交付自检", "必要时自动修复一轮", "生成 PPTX 和预览"],
+    route: {
+      deckType: routePlan.deckType,
+      targetSlides: routePlan.targetSlides,
+      layouts: routePlan.layoutSequence?.map((step) => step.layout) || [],
+      reasons: routePlan.routingReasons || []
+    }
+  };
+}
+
+function classifyAgentQuality(deck = {}, quality = {}, routePlan = null, materialBrief = {}, previewImages = null) {
+  const slides = Array.isArray(deck.slides) ? deck.slides : [];
+  const blocking = [];
+  const repairable = [];
+  const hints = [];
+  const expectedSlides = Number(routePlan?.layoutSequence?.length || routePlan?.targetSlides || 0);
+  const actualSlides = slides.length;
+  if (!actualSlides) blocking.push("没有生成任何页面");
+  if (expectedSlides && Math.abs(actualSlides - expectedSlides) >= 2) blocking.push(`页数偏离明显：计划 ${expectedSlides} 页，实际 ${actualSlides} 页`);
+  if (slides.some((slide) => !cleanClientText(slide.title))) repairable.push("存在空标题页面");
+  if (slides.some((slide) => !cleanClientText([slide.title, slide.subtitle, ...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("存在内容过空页面");
+  const routeScore = Number(quality.routeAdherence?.score);
+  if (Number.isFinite(routeScore) && routeScore < 0.75) repairable.push(`路由匹配偏低：${Math.round(routeScore * 100)}%`);
+  if ((quality.routingWarnings || []).some((item) => /连续|repeat/i.test(String(item)))) repairable.push("存在连续重复版式");
+  if (slides.some((slide) => slide.layout === "pricing" && !/\d/.test([...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("价格页缺少明确数字");
+  const hasImageMaterial = Number(materialBrief.imageCount || quality.material?.imageCount || 0) > 0;
+  if (hasImageMaterial && slides.some((slide) => slide.layout === "visual" && !(slide.imageSlots || []).length)) repairable.push("图片页缺少图片槽");
+  if (Array.isArray(previewImages) && actualSlides && previewImages.filter(Boolean).length !== actualSlides) blocking.push(`预览图数量不一致：${previewImages.filter(Boolean).length}/${actualSlides}`);
+  if ((materialBrief.confirmationFields || []).length) hints.push(`待人工确认：${materialBrief.confirmationFields.join("、")}`);
+  if (materialBrief.inputStrength === "weak" || materialBrief.inputStrength === "empty") hints.push("资料较弱，生成内容需人工复核");
+  return { blocking: [...new Set(blocking)], repairable: [...new Set(repairable)], hints: [...new Set(hints)] };
+}
+
+function shouldAgentAutoRepair(assessment = {}) {
+  return Boolean(assessment.blocking?.length || assessment.repairable?.length);
+}
+
+function summarizeAgentQuality(quality = {}) {
+  return {
+    slideCount: quality.slideCount || 0,
+    warningCount: quality.warningCount || 0,
+    routeScore: quality.routeAdherence?.score ?? null,
+    usedLayouts: quality.usedLayouts || []
+  };
+}
+
 async function refreshPreview(job, successVerb = "已生成") {
+  if (job.skipPreviewRender) {
+    delete job.skipPreviewRender;
+    addEvent(job, "preview-fast-sync", "预览已按页面操作快速同步", { count: (job.previewImages || []).filter(Boolean).length });
+    return;
+  }
   const result = await renderPptxPreview(job.exports.pptx);
   job.previewImages = result.images || [];
   job.previewWarning = result.error ? `PNG 预览生成失败：${result.error}` : null;
@@ -691,11 +1056,49 @@ async function refreshPreview(job, successVerb = "已生成") {
   );
 }
 
+function syncPreviewAfterSlideAction(job, previousPreviewImages = [], action = "", slideIndex = 0, nextIndex = slideIndex) {
+  const next = [...previousPreviewImages];
+  if (action === "move-up" || action === "move-down" || action === "move-to") {
+    const [moved] = next.splice(slideIndex, 1);
+    next.splice(nextIndex, 0, moved || null);
+  } else if (action === "duplicate") {
+    next.splice(slideIndex + 1, 0, previousPreviewImages[slideIndex] || null);
+  } else if (action === "delete") {
+    next.splice(slideIndex, 1);
+  } else if (action === "insert-after" || action === "insert-before") {
+    next.splice(action === "insert-before" ? slideIndex : slideIndex + 1, 0, null);
+  }
+  const slideCount = job.deck?.slides?.length || 0;
+  job.previewImages = next.slice(0, slideCount);
+  while (job.previewImages.length < slideCount) job.previewImages.push(null);
+  job.previewWarning = null;
+  addEvent(job, "preview-fast-sync", `页面操作已快速同步预览：${action}`, {
+    action,
+    from: slideIndex,
+    to: nextIndex,
+    previewCount: job.previewImages.filter(Boolean).length,
+    slideCount
+  });
+}
+
 function normalizeInput(input = {}) {
   return {
     ...input,
     extracted: (input.extracted || []).map((item) => ({ ...item, name: decodeMaybeMojibake(item.name) }))
   };
+}
+
+function filterStyleReferencesForInput(references = [], input = {}, routePlan = null) {
+  const themes = getDesignSystem().themes || [];
+  const defaultTheme = themes[0]?.name || "";
+  const selectedTheme = decodeMaybeMojibake(input.style || routePlan?.recommendedTheme || defaultTheme);
+  const selectedThemeRecord = themes.find((theme) => theme.name === selectedTheme || theme.slug === selectedTheme) || themes[0] || {};
+  const selectedThemeSlug = selectedThemeRecord.slug || "";
+  return references.filter((record) => {
+    const recordTheme = decodeMaybeMojibake(record.themeName || "");
+    if (!recordTheme && !record.themeSlug) return selectedTheme === defaultTheme;
+    return recordTheme === selectedTheme || recordTheme === selectedThemeRecord.name || record.themeSlug === selectedThemeSlug;
+  });
 }
 
 function normalizeUploadRecord(file) {
@@ -706,6 +1109,46 @@ function normalizeUploadRecord(file) {
     ? `/uploads/${path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")}`
     : null;
   return { ...file, originalName: decodeMaybeMojibake(file.originalName), uploadUrl: isImage ? uploadUrl : null };
+}
+
+function normalizeStyleReference(record) {
+  if (!record) return record;
+  const normalized = path.normalize(record.path || "");
+  const imageUrl = normalized.startsWith(uploadDir) && fsSync.existsSync(normalized)
+    ? `/uploads/${path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")}`
+    : null;
+  const defaultTheme = getDesignSystem().themes?.[0] || {};
+  return {
+    ...record,
+    name: decodeMaybeMojibake(record.name),
+    themeName: decodeMaybeMojibake(record.themeName || defaultTheme.name || ""),
+    themeSlug: record.themeSlug || defaultTheme.slug || "",
+    originalName: decodeMaybeMojibake(record.originalName),
+    imageUrl
+  };
+}
+
+function normalizeStyleGroup(record) {
+  if (!record) return record;
+  return {
+    ...record,
+    name: decodeMaybeMojibake(record.name),
+    tone: decodeMaybeMojibake(record.tone || ""),
+    bestFor: decodeMaybeMojibake(record.bestFor || record.tone || ""),
+    custom: true
+  };
+}
+
+function compactStyleReference(record) {
+  const defaultTheme = getDesignSystem().themes?.[0] || {};
+  return {
+    id: record.id,
+    name: decodeMaybeMojibake(record.name),
+    tone: record.tone || "",
+    themeName: decodeMaybeMojibake(record.themeName || defaultTheme.name || ""),
+    themeSlug: record.themeSlug || defaultTheme.slug || "",
+    originalName: decodeMaybeMojibake(record.originalName)
+  };
 }
 
 function collectExportMeta(exports = {}) {
@@ -750,7 +1193,11 @@ function applyOutlinePlan(baseRoutePlan, outlinePlan = null) {
     purpose: cleanClientText(step.purpose) || cleanClientText(step.visualIntent) || "按确认大纲生成本页内容。",
     storyRole: cleanClientText(step.storyRole) || cleanClientText(step.kind) || "补充内容",
     kind: cleanClientText(step.kind) || cleanClientText(step.layout) || "section",
-    imageSlots: Array.isArray(step.imageSlots) ? step.imageSlots.map(cleanClientText).filter(Boolean) : []
+    imageSlots: Array.isArray(step.imageSlots) ? step.imageSlots.map(cleanClientText).filter(Boolean) : [],
+    sourceType: cleanClientText(step.sourceType) || "inferred",
+    sourceLabel: cleanClientText(step.sourceLabel) || "",
+    evidence: cleanClientText(step.evidence) || "",
+    needsConfirmation: Boolean(step.needsConfirmation)
   }));
   return {
     ...baseRoutePlan,
@@ -760,6 +1207,32 @@ function applyOutlinePlan(baseRoutePlan, outlinePlan = null) {
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
     storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
     routingReasons: [...(baseRoutePlan.routingReasons || []), "outlinePlan=confirmed"]
+  };
+}
+
+function syncRoutePlanWithSlides(routePlan = null, slides = [], reason = "manual") {
+  if (!routePlan?.layoutSequence?.length) return routePlan;
+  const layoutSequence = slides.map((slide, index) => {
+    const previous = routePlan.layoutSequence[index] || {};
+    return {
+      ...previous,
+      index: index + 1,
+      layout: slide.layout || previous.layout || "section",
+      title: cleanClientText(slide.title) || previous.title || `第 ${index + 1} 页`,
+      purpose: previous.purpose || cleanClientText(slide.visualIntent) || cleanClientText(slide.subtitle) || "手动调整后的页面",
+      storyRole: cleanClientText(slide.storyRole) || previous.storyRole || "手动调整",
+      kind: previous.kind || slide.layout || "section",
+      imageSlots: Array.isArray(slide.imageSlots) ? slide.imageSlots.map(cleanClientText).filter(Boolean) : previous.imageSlots || []
+    };
+  });
+  return {
+    ...routePlan,
+    targetSlides: layoutSequence.length,
+    layoutCount: layoutSequence.length,
+    layoutSequence,
+    sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
+    storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" -> "),
+    routingReasons: [...(routePlan.routingReasons || []), `manual-slide-action=${reason}`, "routePlan=synced-to-current-deck"]
   };
 }
 
@@ -781,6 +1254,133 @@ function getInsertedSlideDefaults(layout = "section") {
     closing: { title: "下一步行动", subtitle: "补充确认事项和交付动作", storyRole: "下一步行动", bullets: ["确认资料", "输出正式版", "进入交付"], dataPoints: [], visualIntent: "用行动清单收束整份 PPT。" }
   };
   return defaults[layout] || defaults.section;
+}
+
+function repairDeckForDelivery(deck = {}, routePlan = null, files = [], materialBrief = {}) {
+  const slides = Array.isArray(deck.slides) ? deck.slides.map((slide) => ({ ...slide })) : [];
+  const imageFiles = files
+    .filter((file) => /^image\//.test(file.mimeType || "") || /\.(png|jpe?g|webp|svg)$/i.test(file.originalName || ""))
+    .map((file) => cleanClientText(file.originalName || file.filename || "image"))
+    .filter(Boolean);
+  const changes = [];
+  if (!slides.length) {
+    slides.push(getInsertedSlideDefaults("cover"), getInsertedSlideDefaults("cards"), getInsertedSlideDefaults("closing"));
+    changes.push("added-minimum-slides");
+  }
+
+  if (slides[0] && slides[0].layout !== "cover") {
+    slides[0].layout = "cover";
+    changes.push("fixed-cover");
+  }
+  if (slides.length > 1 && !["closing", "quote"].includes(slides.at(-1).layout)) {
+    slides[slides.length - 1].layout = "closing";
+    changes.push("fixed-closing");
+  }
+
+  const routeLayouts = routePlan?.layoutSequence?.map((step) => step.layout).filter(Boolean) || [];
+  if (routeLayouts.length && slides.length !== routeLayouts.length) {
+    while (slides.length > routeLayouts.length) {
+      slides.splice(Math.max(1, slides.length - 2), 1);
+      changes.push("trimmed-to-route-count");
+    }
+    while (slides.length < routeLayouts.length) {
+      const insertAt = Math.max(1, slides.length - 1);
+      const layout = routeLayouts[slides.length] || "section";
+      slides.splice(insertAt, 0, getInsertedSlideDefaults(layout));
+      changes.push("filled-route-count");
+    }
+  }
+  if (routeLayouts.length === slides.length) {
+    slides.forEach((slide, index) => {
+      if (index > 0 && index < slides.length - 1 && routeLayouts[index] && slide.layout !== routeLayouts[index]) {
+        slide.layout = routeLayouts[index];
+        changes.push("aligned-route");
+      }
+    });
+  }
+
+  const layoutCycle = ["cards", "kpi", "compare", "timeline", "quote", "product-detail", "risk-checklist"];
+  if (slides.length >= 5) {
+    const used = new Set(slides.map((slide) => slide.layout));
+    let cursor = 0;
+    for (let index = 1; used.size < 3 && index < slides.length - 1; index += 1) {
+      slides[index].layout = layoutCycle[cursor % layoutCycle.length];
+      used.add(slides[index].layout);
+      cursor += 1;
+      changes.push("increased-layout-variety");
+    }
+  }
+
+  for (let index = 2; index < slides.length; index += 1) {
+    if (slides[index].layout === slides[index - 1].layout && slides[index].layout === slides[index - 2].layout) {
+      slides[index - 1].layout = layoutCycle[index % layoutCycle.length];
+      changes.push("broke-layout-repeat");
+    }
+  }
+
+  slides.forEach((slide, index) => {
+    slide.bullets = normalizeClientList(slide.bullets).slice(0, slide.layout === "pricing" ? 4 : 5);
+    slide.dataPoints = normalizeClientList(slide.dataPoints).slice(0, 8);
+    slide.imageSlots = normalizeClientList(slide.imageSlots).slice(0, 8);
+    if (!slide.title) {
+      slide.title = index === 0 ? deck.title || "项目首页" : `第 ${index + 1} 页`;
+      changes.push("filled-title");
+    }
+    if (!slide.storyRole) {
+      slide.storyRole = slide.layout === "closing" ? "下一步行动" : slide.layout === "pricing" ? "预算决策" : "内容承接";
+      changes.push("filled-story-role");
+    }
+    if (!slide.visualIntent) {
+      slide.visualIntent = slide.layout === "visual" ? "使用上传图片或素材槽作为页面主视觉。" : "按当前模板规则保持清晰层级和留白。";
+      changes.push("filled-visual-intent");
+    }
+    if (!slide.speakerNotes) {
+      slide.speakerNotes = `讲清「${slide.title}」这一页的结论、依据和下一步动作。`;
+      changes.push("filled-speaker-notes");
+    }
+    if (slide.layout === "visual" && imageFiles.length && !slide.imageSlots.length) {
+      slide.imageSlots = imageFiles.slice(0, 3);
+      changes.push("filled-image-slots");
+    }
+    if (slide.layout === "pricing") {
+      const pricingText = [...slide.bullets, ...slide.dataPoints].join(" ");
+      if (!/\d/.test(pricingText)) {
+        slide.bullets = ["价格/报价待人工确认", ...slide.bullets].slice(0, 4);
+        slide.contentSource = "待人工确认";
+        changes.push("marked-pricing-confirmation");
+      }
+    }
+    if ((materialBrief.confirmationFields || []).length && !slide.contentSource) {
+      slide.contentSource = "用户输入 + 系统推断";
+      changes.push("filled-content-source");
+    }
+  });
+
+  const confirmationFields = materialBrief.confirmationFields || [];
+  if (confirmationFields.length && !slides.some((slide) => slide.layout === "risk-checklist")) {
+    const insertAt = Math.max(1, slides.length - 1);
+    slides.splice(insertAt, 0, {
+      ...getInsertedSlideDefaults("risk-checklist"),
+      title: "待确认事项清单",
+      bullets: confirmationFields.slice(0, 6),
+      contentSource: "待人工确认",
+      speakerNotes: "这里集中说明还不能被当作最终结论的信息，避免伪造价格、规格、库存或品牌承诺。"
+    });
+    changes.push("added-risk-checklist");
+  }
+
+  return {
+    deck: {
+      ...deck,
+      slides,
+      summary: cleanClientText(deck.summary) || "已完成交付自检修复。"
+    },
+    summary: {
+      changes: [...new Set(changes)],
+      slideCount: slides.length,
+      imageSlots: slides.reduce((sum, slide) => sum + normalizeClientList(slide.imageSlots).length, 0)
+    }
+  };
 }
 
 function rewriteDeckLocally(deck = {}, instruction = "") {

@@ -25,7 +25,9 @@ function resolveTargetSlides(pageCount, materialBrief = {}, uploads = []) {
   if (materialBrief.inputStrength === "weak") return 9;
   if (materialBrief.inputStrength === "empty") return 8;
   const hasOldDeck = uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
-  if (hasOldDeck || Number(materialBrief.pageCount || 0) >= 15) return 19;
+  const sourcePageCount = Number(materialBrief.pageCount || 0);
+  if (hasOldDeck && sourcePageCount) return Math.max(6, Math.min(24, sourcePageCount));
+  if (hasOldDeck || sourcePageCount >= 15) return 19;
   const richMaterial = (materialBrief.products?.length || 0) >= 3
     || (materialBrief.productCandidates?.length || 0) >= 3
     || (materialBrief.prices?.length || 0) >= 3
@@ -71,8 +73,28 @@ function makeStep(layout, title, purpose, kind, options = {}) {
     kind,
     storyRole: options.storyRole || kind,
     required: Boolean(options.required),
-    imageSlots: options.imageSlots || []
+    imageSlots: options.imageSlots || [],
+    sourceType: options.sourceType || inferStepSourceType(kind, options),
+    sourceLabel: options.sourceLabel || inferStepSourceLabel(kind, options),
+    evidence: options.evidence || "",
+    needsConfirmation: Boolean(options.needsConfirmation)
   };
+}
+
+function inferStepSourceType(kind = "", options = {}) {
+  if (options.sourceType) return options.sourceType;
+  if (kind === "source") return "original-ppt";
+  if (["prices", "products", "productDetail", "visual", "compare", "bundle"].includes(kind)) return "extracted";
+  if (["risks", "assumptions"].includes(kind)) return "needs-confirmation";
+  return "inferred";
+}
+
+function inferStepSourceLabel(kind = "", options = {}) {
+  const sourceType = inferStepSourceType(kind, options);
+  if (sourceType === "original-ppt") return "来自原 PPT";
+  if (sourceType === "extracted") return "来自资料提取";
+  if (sourceType === "needs-confirmation") return "待人工确认";
+  return "AI 推断";
 }
 
 function dedupeConsecutive(sequence) {
@@ -171,15 +193,59 @@ function ensureTemplateLayouts(sequence, templatePack, context = {}) {
   return next;
 }
 
+function inferSourceLayout(page = {}, index = 0) {
+  const text = cleanText(`${page.title || ""} ${page.text || ""}`);
+  if (index === 0) return "cover";
+  if (/目录|contents/i.test(text)) return "toc";
+  if (/价格|报价|预算|预估|元|MOQ|金额/.test(text)) return "pricing";
+  if (/风险|投诉|问题|周期|交付|库存|确认/.test(text)) return "risk-checklist";
+  if (/对比|差异|竞品|方案A|方案B/.test(text)) return "compare";
+  if (/流程|路径|进度|阶段|时间|交付/.test(text)) return "timeline";
+  if (/案例|客户|品牌|背景|介绍/.test(text)) return "section";
+  if (/产品|礼盒|套装|单品|规格|定制/.test(text)) return "product-detail";
+  return index % 3 === 0 ? "cards" : "section";
+}
+
+function buildSourceOutline(materialBrief = {}, targetSlides = 12, context = {}) {
+  const pages = Array.isArray(materialBrief.pages) ? materialBrief.pages.filter((page) => cleanText(`${page.title || ""} ${page.text || ""}`).length > 3) : [];
+  if (!context.hasOldDeck && pages.length < 3) return null;
+  if (!pages.length) return null;
+  const limit = Math.min(targetSlides, pages.length);
+  return pages.slice(0, limit).map((page, index) => {
+    const layout = inferSourceLayout(page, index);
+    const title = cleanText(page.title || `第 ${page.page || index + 1} 页`);
+    const purpose = index === 0
+      ? "保留原稿主题，重新梳理封面表达和视觉层级。"
+      : `基于原稿第 ${page.page || index + 1} 页内容重排，优化文字层级、信息密度和版式。`;
+    return makeStep(layout, title, purpose, "source", {
+      required: true,
+      storyRole: context.hasOldDeck ? "原稿重排" : "资料页提炼",
+      sourceType: context.hasOldDeck ? "original-ppt" : "extracted",
+      sourceLabel: context.hasOldDeck ? "来自原 PPT" : "来自资料提取",
+      evidence: `第 ${page.page || index + 1} 页${page.title ? `：${page.title}` : ""}`,
+      imageSlots: context.imagesBySlide?.[page.page || index + 1] || []
+    });
+  });
+}
+
 export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, uploads = [] } = {}) {
   const deckType = detectDeckType({ mode, input, materialBrief, uploads });
+  const styleReferences = Array.isArray(input.styleReferences) ? input.styleReferences.slice(0, 12) : [];
   const recommendedTheme = chooseTheme(input, deckType);
   const templatePack = getTemplatePack(input.style || recommendedTheme);
   const targetSlides = resolveTargetSlides(input.pageCount, materialBrief, uploads);
+  const hasOldDeck = mode === "optimize" || uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
   const imageHints = [
     ...(materialBrief.imageHints || []),
     ...uploads.filter(isImageFile).map((file) => file.originalName || "图片素材")
   ].filter(Boolean).slice(0, 12);
+  const imagesBySlide = uploads
+    .filter((file) => Number(file.sourceSlide || 0) > 0)
+    .reduce((map, file) => {
+      const slide = Number(file.sourceSlide);
+      map[slide] = [...(map[slide] || []), file.originalName || file.path || ""].filter(Boolean);
+      return map;
+    }, {});
   const hasImages = imageHints.length > 0;
   const hasPrices = (materialBrief.prices || []).length > 0;
   const hasProducts = (materialBrief.productCandidates || []).length > 0 || (materialBrief.products || []).length > 0;
@@ -188,6 +254,8 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
   const includeToc = targetSlides >= 10 && input.includeToc !== false;
   const inputStrength = materialBrief.inputStrength || "strong";
   const weakOrEmpty = inputStrength === "weak" || inputStrength === "empty";
+  const outlineStrategy = input.outlineStrategy || (hasOldDeck ? "keep-source" : "auto");
+  const shouldUseSourceOutline = hasOldDeck ? outlineStrategy !== "regenerate" : outlineStrategy === "keep-source";
 
   const base = weakOrEmpty ? [
     makeStep("cover", "封面", "用一句话说明这份初稿的目标和适用对象。", "cover", { required: true, storyRole: "结论先行" }),
@@ -215,14 +283,16 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     makeStep("closing", "行动建议", "总结下一步动作和交付方式。", "closing", { required: true, storyRole: "下一步行动" })
   ].filter(Boolean);
 
-  const templateReadyBase = ensureTemplateLayouts(base, templatePack, {
+  const sourceBase = shouldUseSourceOutline ? buildSourceOutline(materialBrief, targetSlides, { hasOldDeck, imagesBySlide }) : null;
+  const templateReadyBase = sourceBase || ensureTemplateLayouts(base, templatePack, {
     hasPrices,
     imageHints,
     includeRisk,
     includeToc,
     weakOrEmpty
   });
-  const layoutSequence = fitSequence(reorderByTemplate(templateReadyBase, templatePack, weakOrEmpty), targetSlides, includeRisk);
+  const orderedBase = sourceBase ? templateReadyBase : reorderByTemplate(templateReadyBase, templatePack, weakOrEmpty);
+  const layoutSequence = fitSequence(orderedBase, targetSlides, includeRisk);
   return {
     deckType,
     inputStrength,
@@ -233,6 +303,14 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       name: templatePack.name,
       scenario: templatePack.scenario,
       coreLayouts: templatePack.coreLayouts
+    },
+    styleReferenceStrategy: {
+      count: styleReferences.length,
+      names: styleReferences.map((item) => item.name || item.originalName).filter(Boolean).slice(0, 8),
+      tone: styleReferences.map((item) => item.tone).filter(Boolean).join("；").slice(0, 420),
+      instruction: styleReferences.length
+        ? "生成时参考风格参考库的色彩、留白、质感、字体气质和画面密度；不要复制图片内容本身。"
+        : "未提供自定义风格参考，使用内置主题和模板包。"
     },
     storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
@@ -257,6 +335,8 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       `templatePack=${templatePack.slug}`,
       `inputStrength=${inputStrength}`,
       `targetSlides=${targetSlides}`,
+      `outlineStrategy=${outlineStrategy}`,
+      styleReferences.length ? `styleRefs=${styleReferences.length}` : "noStyleRefs",
       hasImages ? `images=${imageHints.length}` : "noImages",
       hasPrices ? `prices=${materialBrief.prices.length}` : "noPrices",
       hasProducts ? `products=${materialBrief.productCandidates?.length || materialBrief.products?.length || 0}` : "noProducts",

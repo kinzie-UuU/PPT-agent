@@ -105,6 +105,16 @@ function inferPageCount(text, pages) {
 }
 
 function extractPages(text) {
+  const chineseMarkers = [...text.matchAll(/第\s*(\d{1,3})\s*页\s*[：:]/g)];
+  if (chineseMarkers.length > 1) {
+    return chineseMarkers.map((match, index) => {
+      const start = match.index + match[0].length;
+      const end = chineseMarkers[index + 1]?.index ?? text.length;
+      const body = cleanText(text.slice(start, end));
+      return body ? { page: Number(match[1]), title: inferPageTitle(body), text: body.slice(0, 1100) } : null;
+    }).filter(Boolean);
+  }
+
   const parts = text.split(/--\s*(\d+)\s+of\s+\d+\s*--/g);
   const pages = [];
   const coverText = cleanText(parts[0]);

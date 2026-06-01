@@ -8,7 +8,7 @@ export const dataDir = path.join(rootDir, "data");
 export const uploadDir = path.join(rootDir, "uploads");
 export const outputDir = path.join(rootDir, "outputs");
 const dbPath = path.join(dataDir, "jobs.json");
-const emptyDb = () => ({ uploads: {}, jobs: {} });
+const emptyDb = () => ({ uploads: {}, jobs: {}, styleReferences: {}, styleGroups: {} });
 
 export async function ensureDirs() {
   await fs.mkdir(dataDir, { recursive: true });
@@ -44,7 +44,9 @@ async function writeDb(db) {
 function normalizeDb(db) {
   return {
     uploads: db && typeof db.uploads === "object" && !Array.isArray(db.uploads) ? db.uploads : {},
-    jobs: db && typeof db.jobs === "object" && !Array.isArray(db.jobs) ? db.jobs : {}
+    jobs: db && typeof db.jobs === "object" && !Array.isArray(db.jobs) ? db.jobs : {},
+    styleReferences: db && typeof db.styleReferences === "object" && !Array.isArray(db.styleReferences) ? db.styleReferences : {},
+    styleGroups: db && typeof db.styleGroups === "object" && !Array.isArray(db.styleGroups) ? db.styleGroups : {}
   };
 }
 
@@ -94,6 +96,108 @@ export async function getUploads(ids = []) {
   return ids.map((id) => db.uploads[id]).filter(Boolean);
 }
 
+export async function deleteUpload(id) {
+  const db = await readDb();
+  const record = db.uploads[id];
+  if (!record) return null;
+  delete db.uploads[id];
+  await writeDb(db);
+  await removeFileInside(record.path, uploadDir);
+  return record;
+}
+
+export async function addStyleReference(file, meta = {}) {
+  const db = await readDb();
+  const id = makeId("style");
+  const originalName = decodeUploadName(file.originalname);
+  const record = {
+    id,
+    name: cleanMeta(meta.name) || originalName.replace(/\.[^.]+$/, "") || "风格参考",
+    tone: cleanMeta(meta.tone) || "参考这张图的色彩、质感、版式气质和留白节奏。",
+    themeName: cleanMeta(meta.themeName),
+    themeSlug: cleanMeta(meta.themeSlug),
+    originalName,
+    mimeType: file.mimetype,
+    path: file.path,
+    size: file.size,
+    createdAt: new Date().toISOString()
+  };
+  db.styleReferences[id] = record;
+  await writeDb(db);
+  return record;
+}
+
+export async function updateStyleReference(id, meta = {}) {
+  const db = await readDb();
+  const record = db.styleReferences[id];
+  if (!record) return null;
+  const next = {
+    ...record,
+    name: meta.name === undefined ? record.name : cleanMeta(meta.name),
+    tone: meta.tone === undefined ? record.tone : cleanMeta(meta.tone),
+    themeName: meta.themeName === undefined ? record.themeName : cleanMeta(meta.themeName),
+    themeSlug: meta.themeSlug === undefined ? record.themeSlug : cleanMeta(meta.themeSlug),
+    updatedAt: new Date().toISOString()
+  };
+  db.styleReferences[id] = next;
+  await writeDb(db);
+  return next;
+}
+
+export async function listStyleReferences() {
+  const db = await readDb();
+  return Object.values(db.styleReferences).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function addStyleGroup(meta = {}) {
+  const db = await readDb();
+  const name = cleanMeta(meta.name);
+  if (!name) throw new Error("风格库名称不能为空");
+  const existing = Object.values(db.styleGroups).find((group) => group.name === name);
+  if (existing) return existing;
+  const id = makeId("style_group");
+  const record = {
+    id,
+    slug: `custom-${id.replace(/^style_group_/, "")}`,
+    name,
+    tone: cleanMeta(meta.tone),
+    bestFor: cleanMeta(meta.bestFor || meta.tone),
+    custom: true,
+    createdAt: new Date().toISOString()
+  };
+  db.styleGroups[id] = record;
+  await writeDb(db);
+  return record;
+}
+
+export async function listStyleGroups() {
+  const db = await readDb();
+  return Object.values(db.styleGroups).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function deleteStyleGroup(id) {
+  const db = await readDb();
+  const record = db.styleGroups[id];
+  if (!record) return null;
+  delete db.styleGroups[id];
+  await writeDb(db);
+  return record;
+}
+
+export async function deleteStyleReference(id) {
+  const db = await readDb();
+  const record = db.styleReferences[id];
+  if (!record) return null;
+  delete db.styleReferences[id];
+  await writeDb(db);
+  await removeFileInside(record.path, uploadDir);
+  return record;
+}
+
+function cleanMeta(value = "") {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
 export async function saveJob(job) {
   const db = await readDb();
   db.jobs[job.id] = job;
@@ -106,7 +210,32 @@ export async function getJob(id) {
   return db.jobs[id] || null;
 }
 
+export async function deleteJob(id) {
+  const db = await readDb();
+  const record = db.jobs[id];
+  if (!record) return null;
+  delete db.jobs[id];
+  await writeDb(db);
+  await removeDirectoryInside(path.join(outputDir, id), outputDir);
+  return record;
+}
+
 export async function listJobs() {
   const db = await readDb();
   return Object.values(db.jobs).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function isInside(candidate, parent) {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+async function removeFileInside(filePath, parentDir) {
+  if (!filePath || !isInside(filePath, parentDir)) return;
+  await fs.unlink(filePath).catch(() => {});
+}
+
+async function removeDirectoryInside(dirPath, parentDir) {
+  if (!dirPath || !isInside(dirPath, parentDir)) return;
+  await fs.rm(dirPath, { recursive: true, force: true }).catch(() => {});
 }
