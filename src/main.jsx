@@ -1717,6 +1717,7 @@ function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTempla
   const [layerMode, setLayerMode] = useState("preview");
   const textLayerActive = layerMode === "text";
   const assetLayerActive = layerMode === "asset";
+  const shapeLayerActive = layerMode === "shape";
   return (
     <div className={`preview-stage ${focusPreview ? "focus" : ""} layer-${layerMode}`}>
       <HybridPreviewStrip job={job} currentImage={currentImage} selectedSlide={selectedSlide} />
@@ -1737,6 +1738,7 @@ function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTempla
         <div className="stage-controls">
           <button className={layerMode === "preview" ? "active" : ""} onClick={() => setLayerMode("preview")} disabled={!job}>预览</button>
           <button className={layerMode === "asset" ? "active" : ""} onClick={() => setLayerMode("asset")} disabled={!job || editBlocked}>素材层</button>
+          <button className={layerMode === "shape" ? "active" : ""} onClick={() => setLayerMode("shape")} disabled={!job || editBlocked}>图形层</button>
           <button className={layerMode === "text" ? "active" : ""} onClick={() => setLayerMode("text")} disabled={!job || editBlocked}>文字层</button>
           <button onClick={() => setSelectedSlide((value) => Math.max(0, value - 1))} disabled={!job || selectedSlide === 0}>上一页</button>
           <button onClick={() => setSelectedSlide((value) => Math.min(slides.length - 1, value + 1))} disabled={!job || selectedSlide >= slides.length - 1}>下一页</button>
@@ -1747,7 +1749,8 @@ function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTempla
       <div className="large-slide">
         <div className="editable-slide-stage">
           {currentImage && layerMode === "preview" ? <img src={currentImage} alt={`第 ${selectedSlide + 1} 页大图预览`} /> : currentSlide ? <LayerBaseCanvas slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : <div className="empty-preview">生成后这里显示大图预览</div>}
-          {currentSlide && assetLayerActive ? <CanvasAssetLayer slide={editableSlide} job={job} slideIndex={selectedSlide} /> : null}
+          {currentSlide && assetLayerActive ? <CanvasAssetLayer draft={draft} slide={editableSlide} job={job} slideIndex={selectedSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
+          {currentSlide && shapeLayerActive ? <CanvasShapeLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
           {currentSlide && textLayerActive ? <CanvasTextLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
         </div>
       </div>
@@ -1809,32 +1812,149 @@ function LayerSeparationBar({ slide = {}, job, slideIndex = 0, layerMode = "prev
   const textCount = buildCanvasObjects(slide, slide).length;
   const materialCount = getSlideMaterialImages(job, slide, slideIndex).length;
   const hasBackground = Boolean(getSlideVisualImage(job, slide, slideIndex)) && ["cover", "visual", "product-detail", "bundle"].includes(slide.layout);
-  const decorationCount = ["cover", "section", "quote", "closing"].includes(slide.layout) ? 2 : 1;
+  const decorationCount = buildCanvasShapeObjects(slide).length;
   return (
     <div className="layer-separation-bar">
       <span className={hasBackground ? "active" : ""}>底图 {hasBackground ? 1 : 0}</span>
       <span className={layerMode === "asset" || materialCount ? "active" : ""}>素材 {materialCount}</span>
       <span className={layerMode === "text" ? "active" : ""}>文字 {textCount}</span>
-      <span>装饰 {decorationCount}</span>
-      <em>{layerMode === "text" ? "正在编辑文字层：拖动蓝色标签移动对象，保存后写回 PPTX。" : layerMode === "asset" ? "正在查看素材层：只显示当前页绑定图片槽，不显示文字编辑框。" : "当前为干净预览：不叠加文字编辑框，避免和底图/预览图重复。"}</em>
+      <span className={layerMode === "shape" ? "active" : ""}>图形 {decorationCount}</span>
+      <em>{layerMode === "text" ? "正在编辑文字层：拖动蓝色标签移动对象，保存后写回 PPTX。" : layerMode === "asset" ? "正在编辑素材层：拖动图片或右下角缩放，不会压扁原图。" : layerMode === "shape" ? "正在编辑图形层：调整装饰线、卡片和强调块的位置与颜色。" : "当前为干净预览：不叠加编辑框，避免和底图/预览图重复。"}</em>
     </div>
   );
 }
 
-function CanvasAssetLayer({ slide = {}, job, slideIndex = 0 }) {
-  const images = getSlideMaterialImages(job, slide, slideIndex);
-  const boxes = buildAssetBoxes(slide.layout, images.length);
+function CanvasAssetLayer({ draft = {}, slide = {}, job, slideIndex = 0, updateDraft, onSave }) {
+  const [gesture, setGesture] = useState(null);
+  const [selectedLayerId, setSelectedLayerId] = useState("");
+  const objects = useMemo(() => buildCanvasAssetObjects(job, slide, slideIndex), [job, slide, slideIndex]);
+  const edits = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, objects);
+  const selectedObject = objects.find((item) => item.key === selectedLayerId) || objects[0] || null;
+  const selectedEdit = selectedObject ? edits[selectedObject.key] || selectedObject : null;
+
+  useEffect(() => {
+    if (!selectedLayerId && objects[0]?.key) setSelectedLayerId(objects[0].key);
+    if (selectedLayerId && !objects.some((item) => item.key === selectedLayerId)) setSelectedLayerId(objects[0]?.key || "");
+  }, [objects, selectedLayerId]);
+
+  function patchCanvasEdit(key, patch) {
+    const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, objects);
+    updateDraft?.("canvasEdits", {
+      ...current,
+      [key]: { ...current[key], type: "image", ...patch }
+    });
+  }
+
+  function startGesture(event, key, mode = "move") {
+    event.preventDefault();
+    event.stopPropagation();
+    const box = edits[key]?.box || objects.find((item) => item.key === key)?.box;
+    if (!box) return;
+    setSelectedLayerId(key);
+    setGesture({ key, mode, startX: event.clientX, startY: event.clientY, box: { ...box } });
+  }
+
+  useLayerGesture(gesture, setGesture, patchCanvasEdit, onSave);
+
   return (
     <div className="canvas-asset-layer">
-      {images.length ? images.map((image, index) => {
-        const box = boxes[index] || boxes[0];
+      {selectedObject ? (
+        <div className="layer-property-panel">
+          <b>{selectedObject.label}</b>
+          <label>适配<select value={selectedEdit?.fit || "contain"} onChange={(event) => patchCanvasEdit(selectedObject.key, { fit: event.target.value })}><option value="contain">完整显示</option><option value="cover">铺满裁切</option></select></label>
+          <label>透明度<input type="number" min="0.15" max="1" step="0.05" value={selectedEdit?.opacity ?? 1} onChange={(event) => patchCanvasEdit(selectedObject.key, { opacity: Number(event.target.value) })} /></label>
+          <span>图片只用 contain 或 cover，避免被拉伸变形。</span>
+        </div>
+      ) : null}
+      {objects.length ? objects.map((object) => {
+        const edit = edits[object.key] || object;
+        const box = edit.box || object.box;
         return (
-          <figure className="canvas-asset-box" key={`${image.id || image.originalName}-${index}`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}>
-            <img src={image.uploadUrl} alt={image.originalName || "素材图"} />
-            <figcaption>素材 {index + 1} · {image.originalName || "未命名"}</figcaption>
+          <figure
+            className={`canvas-asset-box ${selectedLayerId === object.key ? "selected" : ""}`}
+            key={object.key}
+            onClick={(event) => { event.stopPropagation(); setSelectedLayerId(object.key); }}
+            onPointerDown={(event) => startGesture(event, object.key, "move")}
+            style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, opacity: edit.opacity ?? object.opacity ?? 1 }}
+          >
+            <img src={object.image.uploadUrl} alt={object.image.originalName || "素材图"} style={{ objectFit: edit.fit || object.fit || "contain" }} draggable="false" />
+            <figcaption>{object.label} · {object.image.originalName || "未命名"}</figcaption>
+            <button className="canvas-resize-handle" type="button" aria-label="缩放素材" onPointerDown={(event) => startGesture(event, object.key, "resize")} />
           </figure>
         );
       }) : <div className="canvas-empty-layer">当前页没有绑定素材图。到右侧“图片槽 / 素材名”填写文件名，或让 Agent 重新匹配素材。</div>}
+    </div>
+  );
+}
+
+function CanvasShapeLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
+  const [gesture, setGesture] = useState(null);
+  const [selectedLayerId, setSelectedLayerId] = useState("");
+  const objects = useMemo(() => buildCanvasShapeObjects(slide), [slide]);
+  const edits = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, objects);
+  const selectedObject = objects.find((item) => item.key === selectedLayerId) || objects[0] || null;
+  const selectedEdit = selectedObject ? edits[selectedObject.key] || selectedObject : null;
+
+  useEffect(() => {
+    if (!selectedLayerId && objects[0]?.key) setSelectedLayerId(objects[0].key);
+    if (selectedLayerId && !objects.some((item) => item.key === selectedLayerId)) setSelectedLayerId(objects[0]?.key || "");
+  }, [objects, selectedLayerId]);
+
+  function patchCanvasEdit(key, patch) {
+    const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, objects);
+    updateDraft?.("canvasEdits", {
+      ...current,
+      [key]: { ...current[key], type: "shape", ...patch }
+    });
+  }
+
+  function startGesture(event, key, mode = "move") {
+    event.preventDefault();
+    event.stopPropagation();
+    const box = edits[key]?.box || objects.find((item) => item.key === key)?.box;
+    if (!box) return;
+    setSelectedLayerId(key);
+    setGesture({ key, mode, startX: event.clientX, startY: event.clientY, box: { ...box } });
+  }
+
+  useLayerGesture(gesture, setGesture, patchCanvasEdit, onSave);
+
+  return (
+    <div className="canvas-shape-layer">
+      {selectedObject ? (
+        <div className="layer-property-panel">
+          <b>{selectedObject.label}</b>
+          <label>填充<input type="color" value={selectedEdit?.fill || selectedObject.fill} onChange={(event) => patchCanvasEdit(selectedObject.key, { fill: event.target.value })} /></label>
+          <label>描边<input type="color" value={selectedEdit?.line || selectedObject.line} onChange={(event) => patchCanvasEdit(selectedObject.key, { line: event.target.value })} /></label>
+          <label>圆角<input type="number" min="0" max="24" value={selectedEdit?.radius ?? selectedObject.radius} onChange={(event) => patchCanvasEdit(selectedObject.key, { radius: Number(event.target.value) })} /></label>
+          <label>透明度<input type="number" min="0.1" max="1" step="0.05" value={selectedEdit?.opacity ?? selectedObject.opacity} onChange={(event) => patchCanvasEdit(selectedObject.key, { opacity: Number(event.target.value) })} /></label>
+        </div>
+      ) : null}
+      {objects.map((object) => {
+        const edit = edits[object.key] || object;
+        const box = edit.box || object.box;
+        return (
+          <div
+            className={`canvas-shape-box ${selectedLayerId === object.key ? "selected" : ""}`}
+            key={object.key}
+            onClick={(event) => { event.stopPropagation(); setSelectedLayerId(object.key); }}
+            onPointerDown={(event) => startGesture(event, object.key, "move")}
+            style={{
+              left: `${box.x}%`,
+              top: `${box.y}%`,
+              width: `${box.w}%`,
+              height: `${box.h}%`,
+              background: edit.fill || object.fill,
+              borderColor: edit.line || object.line,
+              borderRadius: `${edit.radius ?? object.radius}px`,
+              opacity: edit.opacity ?? object.opacity
+            }}
+          >
+            <span>{object.label}</span>
+            <button className="canvas-resize-handle" type="button" aria-label="缩放图形" onPointerDown={(event) => startGesture(event, object.key, "resize")} />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2037,6 +2157,80 @@ const CANVAS_LAYOUT_BOXES = {
   }
 };
 
+function useLayerGesture(gesture, setGesture, patchCanvasEdit, onSave) {
+  useEffect(() => {
+    if (!gesture) return undefined;
+    function onMove(event) {
+      const stage = document.querySelector(".editable-slide-stage");
+      const rect = stage?.getBoundingClientRect();
+      if (!rect) return;
+      const dx = ((event.clientX - gesture.startX) / rect.width) * 100;
+      const dy = ((event.clientY - gesture.startY) / rect.height) * 100;
+      if (gesture.mode === "resize") {
+        patchCanvasEdit(gesture.key, {
+          box: {
+            ...gesture.box,
+            w: clamp(gesture.box.w + dx, 4, 96 - gesture.box.x),
+            h: clamp(gesture.box.h + dy, 3, 96 - gesture.box.y)
+          }
+        });
+        return;
+      }
+      patchCanvasEdit(gesture.key, {
+        box: {
+          ...gesture.box,
+          x: clamp(gesture.box.x + dx, 0, 96),
+          y: clamp(gesture.box.y + dy, 0, 96)
+        }
+      });
+    }
+    function onUp() {
+      setGesture(null);
+      onSave?.();
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [gesture, patchCanvasEdit, setGesture, onSave]);
+}
+
+function buildCanvasAssetObjects(job, slide = {}, slideIndex = 0) {
+  const images = getSlideMaterialImages(job, slide, slideIndex);
+  const boxes = buildAssetBoxes(slide.layout, images.length);
+  return images.map((image, index) => ({
+    key: `asset_${index}`,
+    type: "image",
+    label: `素材 ${index + 1}`,
+    image,
+    box: boxes[index] || boxes[0] || { x: 58, y: 24, w: 28, h: 38 },
+    fit: slide.layout === "cover" ? "cover" : "contain",
+    opacity: 1
+  }));
+}
+
+function buildCanvasShapeObjects(slide = {}) {
+  const layout = slide.layout || "default";
+  const boxes = CANVAS_LAYOUT_BOXES[layout] || CANVAS_LAYOUT_BOXES.default;
+  const hasCards = ["cards", "pricing", "compare", "bundle", "product-detail", "risk-checklist", "kpi"].includes(layout);
+  let shapeIndex = 0;
+  const shapes = [];
+  const pushShape = (item) => shapes.push({ key: `shape_${shapeIndex++}`, type: "shape", ...item });
+  pushShape({ label: "顶部强调线", box: { x: 0, y: 0, w: 100, h: 1.1 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+  if (["cover", "section", "quote"].includes(layout)) {
+    pushShape({ label: "侧边强调线", box: { x: 3.6, y: 10.4, w: 0.6, h: 64 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+  }
+  pushShape({ label: "内容强调线", box: { x: boxes.title?.x || 8, y: clamp((boxes.subtitle?.y || boxes.title?.y || 16) + 14, 4, 90), w: boxes.title?.w || 42, h: 0.8 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+  if (hasCards) {
+    const start = boxes.dataStart || boxes.bulletStart || CANVAS_LAYOUT_BOXES.default.dataStart;
+    pushShape({ label: "信息卡片 1", box: { x: clamp(start.x - 2, 4, 88), y: clamp(start.y - 4, 8, 84), w: 28, h: 14 }, fill: "#eef3ff", line: "#d7e2ff", radius: 8, opacity: 0.92 });
+    pushShape({ label: "信息卡片 2", box: { x: clamp(start.x + 30, 4, 88), y: clamp(start.y - 4, 8, 84), w: 28, h: 14 }, fill: "#f6f8fb", line: "#d9dee8", radius: 8, opacity: 0.92 });
+  }
+  return shapes;
+}
+
 function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
   const [drag, setDrag] = useState(null);
   const [selectedLayerId, setSelectedLayerId] = useState("");
@@ -2105,6 +2299,7 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
     }
     function onUp() {
       setDrag(null);
+      onSave?.();
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -2112,7 +2307,7 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [drag]);
+  }, [drag, onSave]);
 
   return (
     <div className="canvas-text-layer">
@@ -2184,7 +2379,7 @@ function buildCanvasObjects(draft = {}, slide = {}) {
 function buildCanvasObject(key, label, value, box, path = key, index = null) {
   const role = key === "title" ? "title" : key === "subtitle" ? "subtitle" : path === "dataPoint" ? "data" : "body";
   const style = defaultCanvasTextStyle(role);
-  return { key, label, value: String(value || ""), box, path, index, role, style };
+  return { key, type: "text", label, value: String(value || ""), box, path, index, role, style };
 }
 
 function defaultCanvasTextStyle(role = "body") {
@@ -2211,18 +2406,44 @@ function normalizeCanvasEdits(value = {}, canvasObjects = []) {
     const field = known.get(key);
     const box = edits[key]?.box || field?.box;
     if (!box) return acc;
-    acc[key] = {
+    const type = field?.type || edits[key]?.type || inferCanvasEditType(key);
+    const next = {
       ...edits[key],
+      type,
       box: {
         x: clamp(Number(box.x ?? field?.box?.x), 0, 96),
         y: clamp(Number(box.y ?? field?.box?.y), 0, 96),
-        w: clamp(Number(box.w ?? field?.box?.w), 8, 96),
-        h: clamp(Number(box.h ?? field?.box?.h), 4, 96)
-      },
-      style: normalizeCanvasTextStyle(edits[key]?.style, field?.style)
+        w: clamp(Number(box.w ?? field?.box?.w), 4, 96),
+        h: clamp(Number(box.h ?? field?.box?.h), 3, 96)
+      }
     };
+    if (type === "text") next.style = normalizeCanvasTextStyle(edits[key]?.style, field?.style);
+    if (type === "image") {
+      next.fit = ["contain", "cover"].includes(edits[key]?.fit || field?.fit) ? (edits[key]?.fit || field?.fit) : "contain";
+      next.opacity = clamp(Number(edits[key]?.opacity ?? field?.opacity ?? 1), 0.15, 1);
+    }
+    if (type === "shape") {
+      next.fill = normalizeHexColor(edits[key]?.fill || field?.fill, "#eef3ff");
+      next.line = normalizeHexColor(edits[key]?.line || field?.line, next.fill);
+      next.radius = clamp(Number(edits[key]?.radius ?? field?.radius ?? 0), 0, 24);
+      next.opacity = clamp(Number(edits[key]?.opacity ?? field?.opacity ?? 1), 0.1, 1);
+    }
+    acc[key] = next;
     return acc;
   }, {});
+}
+
+function inferCanvasEditType(key = "") {
+  if (/^asset_\d+/.test(key)) return "image";
+  if (/^shape_\d+/.test(key)) return "shape";
+  return "text";
+}
+
+function normalizeHexColor(value, fallback = "#263238") {
+  const color = String(value || "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(color)) return color;
+  if (/^[0-9a-f]{6}$/i.test(color)) return `#${color}`;
+  return fallback;
 }
 
 function normalizeCanvasTextStyle(value = {}, fallback = {}) {

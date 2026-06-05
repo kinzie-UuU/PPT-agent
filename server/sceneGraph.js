@@ -704,6 +704,9 @@ function buildSceneSlide({ slide = {}, index = 0, total = 1, files = [], routeSt
   const requiredImageMissing = wantsImage && !image;
   const images = image ? [buildImageObject(image, layout.image, role)] : requiredImageMissing ? [buildMissingImageObject(layout.image, role, index)] : [];
   const decorations = buildDecorations(role, palette);
+  applyCanvasEditsToImages(images, slide.canvasEdits);
+  applyCanvasEditsToShapes(decorations, slide.canvasEdits, 0);
+  applyCanvasEditsToShapes(shapes, slide.canvasEdits, decorations.length);
   const slideAssets = (assetManifest.assets || []).filter((asset) => !asset.sourceSlide || Number(asset.sourceSlide) === index + 1);
   const visualTargetImage = visualProjectImageForSlide(visualProject, index);
   const backgroundLayer = buildBackgroundLayer({ role, palette, target, slideAssets });
@@ -910,6 +913,43 @@ function applyCanvasEditsToTexts(texts = [], canvasEdits = null) {
     if (edit?.style) text.style = { ...(text.style || {}), ...normalizeCanvasStyleForSceneGraph(edit.style) };
   }
   return texts;
+}
+
+function applyCanvasEditsToImages(images = [], canvasEdits = null) {
+  if (!canvasEdits || typeof canvasEdits !== "object") return images;
+  images.forEach((image, index) => {
+    const edit = canvasEdits[`asset_${index}`] || canvasEdits[image.id];
+    if (!edit || edit.type !== "image") return;
+    if (edit.box) image.box = percentBoxToInches(edit.box);
+    if (["contain", "cover"].includes(edit.fit)) image.fit = edit.fit;
+    if (Number.isFinite(Number(edit.opacity))) image.opacity = Math.max(0.15, Math.min(1, Number(edit.opacity)));
+  });
+  return images;
+}
+
+function applyCanvasEditsToShapes(shapes = [], canvasEdits = null, offset = 0) {
+  if (!canvasEdits || typeof canvasEdits !== "object") return shapes;
+  shapes.forEach((shape, index) => {
+    const edit = canvasEdits[`shape_${index + offset}`] || canvasEdits[shape.id];
+    if (!edit || edit.type !== "shape") return;
+    if (edit.box) shape.box = percentBoxToInches(edit.box);
+    if (edit.fill) {
+      shape.fill = normalizeCanvasHex(edit.fill);
+      delete shape.fillRole;
+    }
+    if (edit.line) {
+      shape.line = normalizeCanvasHex(edit.line);
+      delete shape.lineRole;
+    }
+    if (Number.isFinite(Number(edit.radius))) shape.radius = Math.max(0, Math.min(0.3, Number(edit.radius) / 72));
+    if (Number.isFinite(Number(edit.opacity))) shape.transparency = Math.max(0, Math.min(90, Math.round((1 - Number(edit.opacity)) * 100)));
+  });
+  return shapes;
+}
+
+function normalizeCanvasHex(value = "") {
+  const color = String(value || "").replace(/^#/, "").toUpperCase();
+  return /^[0-9A-F]{6}$/.test(color) ? color : undefined;
 }
 
 function normalizeCanvasStyleForSceneGraph(style = {}) {

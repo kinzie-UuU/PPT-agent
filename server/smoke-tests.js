@@ -364,6 +364,31 @@ const canvasSceneGraph = buildSceneGraph({
   materialBrief: weakBrief
 });
 assert.equal(Math.round(canvasSceneGraph.slides[0].texts.find((item) => item.role === "title").box.x * 10) / 10, 2.7);
+const canvasLayerSceneGraph = buildSceneGraph({
+  job: {
+    deck: {
+      title: "canvas-layers",
+      slides: [
+        {
+          title: "Canvas image and shape",
+          layout: "visual",
+          imageSlots: ["hero-product.png"],
+          canvasEdits: {
+            asset_0: { type: "image", box: { x: 60, y: 20, w: 22, h: 28 }, fit: "cover", opacity: 0.8 },
+            shape_0: { type: "shape", box: { x: 0, y: 0, w: 100, h: 2 }, fill: "#123456", line: "#123456", opacity: 0.7 }
+          }
+        }
+      ]
+    },
+    files: [{ id: "hero", originalName: "hero-product.png", mimeType: "image/png", path: "C:/tmp/hero-product.png", materialRole: "foreground" }]
+  },
+  routePlan: giftRoute,
+  materialBrief: weakBrief
+});
+assert.equal(canvasLayerSceneGraph.slides[0].images[0].fit, "cover");
+assert.equal(Math.round(canvasLayerSceneGraph.slides[0].images[0].box.x * 10) / 10, 8);
+assert.equal(canvasLayerSceneGraph.slides[0].decorations[0].fill, "123456");
+assert.equal(canvasLayerSceneGraph.slides[0].decorations[0].transparency, 30);
 const visualSampleExcludedGraph = buildSceneGraph({
   job: {
     deck: { title: "visual target exclusion", slides: [{ title: "Cover", layout: "cover", imageSlots: ["sample"] }] },

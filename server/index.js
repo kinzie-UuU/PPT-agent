@@ -4109,14 +4109,30 @@ function normalizeCanvasEdits(value = {}) {
     if (!isAllowedCanvasEditKey(key)) continue;
     const box = value[key]?.box;
     if (!box || typeof box !== "object") continue;
-    result[key] = {
+    const type = normalizeCanvasEditType(value[key]?.type, key);
+    const next = {
+      type,
       box: {
         x: clampNumber(box.x, 0, 96),
         y: clampNumber(box.y, 0, 96),
-        w: clampNumber(box.w, 8, 96),
-        h: clampNumber(box.h, 5, 96)
+        w: clampNumber(box.w, 4, 96),
+        h: clampNumber(box.h, 3, 96)
       }
     };
+    if (type === "text" && value[key]?.style && typeof value[key].style === "object") {
+      next.style = normalizeCanvasTextStyleForSave(value[key].style);
+    }
+    if (type === "image") {
+      next.fit = ["contain", "cover"].includes(value[key]?.fit) ? value[key].fit : "contain";
+      next.opacity = clampNumber(value[key]?.opacity ?? 1, 0.15, 1);
+    }
+    if (type === "shape") {
+      next.fill = normalizeHexForSave(value[key]?.fill, "#eef3ff");
+      next.line = normalizeHexForSave(value[key]?.line, next.fill);
+      next.radius = clampNumber(value[key]?.radius ?? 0, 0, 24);
+      next.opacity = clampNumber(value[key]?.opacity ?? 1, 0.1, 1);
+    }
+    result[key] = next;
   }
   return Object.keys(result).length ? result : null;
 }
@@ -4124,7 +4140,34 @@ function normalizeCanvasEdits(value = {}) {
 function isAllowedCanvasEditKey(key = "") {
   return ["title", "subtitle", "bullets", "visualIntent", "speakerNotes"].includes(key)
     || /^bullet_\d{1,2}$/.test(key)
-    || /^data_\d{1,2}$/.test(key);
+    || /^data_\d{1,2}$/.test(key)
+    || /^asset_\d{1,2}$/.test(key)
+    || /^shape_\d{1,2}$/.test(key);
+}
+
+function normalizeCanvasEditType(type = "", key = "") {
+  if (type === "image" || /^asset_\d+/.test(key)) return "image";
+  if (type === "shape" || /^shape_\d+/.test(key)) return "shape";
+  return "text";
+}
+
+function normalizeCanvasTextStyleForSave(style = {}) {
+  const color = normalizeHexForSave(style.color, "#263238");
+  return {
+    fontSize: clampNumber(style.fontSize, 6, 72),
+    fontWeight: String(style.fontWeight || "400"),
+    color,
+    textAlign: ["left", "center", "right"].includes(style.textAlign) ? style.textAlign : "left",
+    lineHeight: clampNumber(style.lineHeight, 1, 2.4),
+    letterSpacing: clampNumber(style.letterSpacing, 0, 8)
+  };
+}
+
+function normalizeHexForSave(value, fallback = "#263238") {
+  const color = String(value || "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(color)) return color;
+  if (/^[0-9a-f]{6}$/i.test(color)) return `#${color}`;
+  return fallback;
 }
 
 function clampNumber(value, min, max) {
