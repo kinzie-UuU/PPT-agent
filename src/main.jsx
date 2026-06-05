@@ -398,18 +398,19 @@ function App() {
     const text = intakeDraft.trim();
     if (!text && fileIds.length === 0) return;
     const userText = text || "我已上传资料，请先理解内容。";
+    const actionable = text ? !isMetaIntakeQuestion(text) : fileIds.length > 0;
     const now = Date.now();
     setIntakeMessages((current) => [
       ...current,
       { id: `user-${now}`, role: "user", text: userText },
       { id: `assistant-${now}`, role: "assistant", text: buildIntakeReply(userText, files) }
     ]);
-    if (text) {
+    if (text && actionable) {
       setForm((current) => ({ ...current, notes: [current.notes, text].filter(Boolean).join("\n") }));
     }
     setIntakeDraft("");
     setError("");
-    setStatus("已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。");
+    setStatus(actionable ? "已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。" : "已回答这条问题，没有把它当成 PPT 需求。");
   }
 
   function handleIntakeKeyDown(event) {
@@ -1126,6 +1127,15 @@ function App() {
           {activeStep === "materials" && (
             <SectionCard className="intake-card">
               <div className="chat-intake">
+                {intakeMessages.length > 0 && (
+                  <div className="intake-thread" aria-live="polite">
+                    {intakeMessages.map((message) => (
+                      <div className={`intake-message ${message.role}`} key={message.id}>
+                        {message.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="chat-box">
                   <label className="chat-plus" title={UI.uploadTitle}>
                     <input type="file" multiple onChange={uploadFiles} />
@@ -1145,15 +1155,6 @@ function App() {
                     </button>
                   </div>
                 </div>
-                {intakeMessages.length > 0 && (
-                  <div className="intake-thread" aria-live="polite">
-                    {intakeMessages.map((message) => (
-                      <div className={`intake-message ${message.role}`} key={message.id}>
-                        {message.text}
-                      </div>
-                    ))}
-                  </div>
-                )}
                 {hasUploadedMaterials && (
                   <div className="outline-strategy-toggle" role="group" aria-label={UI.regenerateOutline}>
                     <button className={form.outlineStrategy !== "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "keep-source")}>
@@ -3315,13 +3316,17 @@ function inferMaterialTypes(files = []) {
 function buildIntakeReply(text = "", files = []) {
   const normalized = String(text || "").trim();
   const hasFiles = files.length > 0;
-  if (/你可以干嘛|能干嘛|怎么用|可以做什么|help/i.test(normalized)) {
+  if (isMetaIntakeQuestion(normalized)) {
     return "我可以先和你聊清楚 PPT 目标、受众、风格和资料，再生成可确认的大纲；如果你上传旧 PPT/PDF/图片，我会先识别原文字、图片和素材身份，再决定是优化旧稿还是重新规划。";
   }
   if (hasFiles) {
     return "我已把这条补充需求记到当前资料里。你可以继续补充目标、受众、风格，或点击开始理解并生成大纲。";
   }
   return "我已记录这条需求。你可以继续补充，也可以让我先按这句话理解目标并生成一版可确认的大纲。";
+}
+
+function isMetaIntakeQuestion(text = "") {
+  return /你可以干嘛|你能干嘛|能干嘛|怎么用|如何使用|可以做什么|有什么功能|help/i.test(String(text || ""));
 }
 
 function formatBytes(value) { if (!value) return "-"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }

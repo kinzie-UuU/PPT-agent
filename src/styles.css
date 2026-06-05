@@ -390,7 +390,7 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
   display: grid;
   justify-items: center;
   align-content: center;
-  gap: 16px;
+  gap: 12px;
   min-height: calc(100vh - 252px);
 }
 
@@ -492,20 +492,24 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
 
 .send-button:disabled {
   cursor: not-allowed;
-  opacity: .38;
+  background: #a6aab3;
+  opacity: 1;
 }
 
 .intake-thread {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   width: min(760px, 100%);
+  max-height: min(42vh, 360px);
+  overflow: auto;
+  padding: 2px 2px 4px;
 }
 
 .intake-message {
-  max-width: min(620px, 86%);
+  max-width: min(560px, 82%);
   padding: 11px 13px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 14px;
   background: #fff;
   color: var(--ink);
   font-size: 14px;
@@ -516,19 +520,21 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
 .intake-message.user {
   justify-self: end;
   border-color: rgba(40,84,216,.22);
-  background: #eef3ff;
+  background: var(--blue);
+  color: #fff;
 }
 
 .intake-message.assistant {
   justify-self: start;
+  background: #fff;
 }
 
 .intake-next-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
   width: min(760px, 100%);
   align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
+  gap: 10px;
 }
 
 .intake-next-actions span {
