@@ -3,50 +3,47 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const FALLBACK_THEMES = [
-  { name: "轻盈渐变风", bestFor: "销售战卡、客户提案、节日礼盒", colors: { bg: "F7FBFF", accent: "3158D4", soft: "EAF1FF" } },
-  { name: "东方自然风", bestFor: "节日礼盒、文化产品、高级方案", colors: { bg: "F7F3EA", accent: "68745E", soft: "EDE6D8" } },
-  { name: "黑白画册风", bestFor: "品牌手册、设计汇报、高端产品介绍", colors: { bg: "FFFFFF", accent: "111111", soft: "EFEFEF" } },
-  { name: "蓝白科技风", bestFor: "技术方案、产品分析、数据汇报", colors: { bg: "F6FAFF", accent: "3546A4", soft: "DDE8FF" } },
-  { name: "暗黑科技风", bestFor: "新品发布、技术演示、趋势报告", colors: { bg: "05070B", accent: "19D3FF", soft: "111827" } }
+  { name: "\u8f7b\u76c8\u6e10\u53d8\u98ce", bestFor: "\u9500\u552e\u6218\u5361\u3001\u5ba2\u6237\u63d0\u6848\u3001\u8282\u65e5\u793c\u76d2", colors: { bg: "F7FBFF", accent: "3158D4", soft: "EAF1FF" } },
+  { name: "\u4e1c\u65b9\u81ea\u7136\u98ce", bestFor: "\u8282\u65e5\u793c\u76d2\u3001\u6587\u5316\u4ea7\u54c1\u3001\u9ad8\u7ea7\u65b9\u6848", colors: { bg: "F7F3EA", accent: "68745E", soft: "EDE6D8" } },
+  { name: "\u9ed1\u767d\u753b\u518c\u98ce", bestFor: "\u54c1\u724c\u624b\u518c\u3001\u8bbe\u8ba1\u6c47\u62a5\u3001\u9ad8\u7aef\u4ea7\u54c1\u4ecb\u7ecd", colors: { bg: "FFFFFF", accent: "111111", soft: "EFEFEF" } },
+  { name: "\u84dd\u767d\u79d1\u6280\u98ce", bestFor: "\u6280\u672f\u65b9\u6848\u3001\u4ea7\u54c1\u5206\u6790\u3001\u6570\u636e\u6c47\u62a5", colors: { bg: "F6FAFF", accent: "3546A4", soft: "DDE8FF" } },
+  { name: "\u6697\u9ed1\u79d1\u6280\u98ce", bestFor: "\u65b0\u54c1\u53d1\u5e03\u3001\u6280\u672f\u6f14\u793a\u3001\u8d8b\u52bf\u62a5\u544a", colors: { bg: "05070B", accent: "19D3FF", soft: "111827" } }
 ];
 
 const FALLBACK_TEMPLATE_PACKS = [
-  { themeName: "轻盈渐变风", name: "销售提案 / 战卡方向", scenario: "销售战卡、客户提案、节日礼盒", coreLayouts: ["pricing", "product-detail", "quote", "risk-checklist"] },
-  { themeName: "东方自然风", name: "礼盒 / 节日 / 文化产品方向", scenario: "节日礼盒、食品茶饮、文化产品", coreLayouts: ["visual", "product-detail", "bundle", "pricing"] },
-  { themeName: "黑白画册风", name: "品牌画册 / 高端产品方向", scenario: "品牌手册、设计汇报、高端产品介绍", coreLayouts: ["section", "visual", "quote", "product-detail"] },
-  { themeName: "蓝白科技风", name: "技术方案 / 数据汇报方向", scenario: "技术方案、产品分析、数据汇报", coreLayouts: ["toc", "kpi", "compare", "timeline"] },
-  { themeName: "暗黑科技风", name: "发布会 / 趋势报告方向", scenario: "新品发布、技术演示、趋势报告", coreLayouts: ["cover", "kpi", "timeline", "closing"] }
+  { themeName: "\u8f7b\u76c8\u6e10\u53d8\u98ce", name: "\u9500\u552e\u63d0\u6848 / \u6218\u5361\u6a21\u677f", scenario: "\u9500\u552e\u6218\u5361\u3001\u5ba2\u6237\u63d0\u6848\u3001\u8282\u65e5\u793c\u76d2", coreLayouts: ["pricing", "product-detail", "quote", "risk-checklist"] },
+  { themeName: "\u4e1c\u65b9\u81ea\u7136\u98ce", name: "\u793c\u76d2 / \u8282\u65e5 / \u6587\u5316\u4ea7\u54c1\u6a21\u677f", scenario: "\u8282\u65e5\u793c\u76d2\u3001\u98df\u54c1\u8336\u996e\u3001\u6587\u5316\u4ea7\u54c1", coreLayouts: ["visual", "product-detail", "bundle", "pricing"] },
+  { themeName: "\u9ed1\u767d\u753b\u518c\u98ce", name: "\u54c1\u724c\u753b\u518c / \u9ad8\u7aef\u4ea7\u54c1\u6a21\u677f", scenario: "\u54c1\u724c\u624b\u518c\u3001\u8bbe\u8ba1\u6c47\u62a5\u3001\u9ad8\u7aef\u4ea7\u54c1\u4ecb\u7ecd", coreLayouts: ["section", "visual", "quote", "product-detail"] },
+  { themeName: "\u84dd\u767d\u79d1\u6280\u98ce", name: "\u6280\u672f\u65b9\u6848 / \u6570\u636e\u6c47\u62a5\u6a21\u677f", scenario: "\u6280\u672f\u65b9\u6848\u3001\u4ea7\u54c1\u5206\u6790\u3001\u6570\u636e\u6c47\u62a5", coreLayouts: ["toc", "kpi", "compare", "timeline"] },
+  { themeName: "\u6697\u9ed1\u79d1\u6280\u98ce", name: "\u53d1\u5e03\u4f1a / \u8d8b\u52bf\u62a5\u544a\u6a21\u677f", scenario: "\u65b0\u54c1\u53d1\u5e03\u3001\u6280\u672f\u6f14\u793a\u3001\u8d8b\u52bf\u62a5\u544a", coreLayouts: ["cover", "kpi", "timeline", "closing"] }
 ];
 
 const DESIGN_LED_INSTRUCTION = [
-  "高级设计优化：不管是上传旧 PPT/PDF/图片，还是纯聊天生成，都按视觉优先的提案级 PPT 处理。",
-  "必须先判断内容类型：销售提案、案例作品集、产品介绍、品牌手册、项目汇报、培训课件、招商方案或数据报告。",
-  "必须抽取视觉 DNA：主色、背景、字体气质、图片语言、Logo/品牌露出、留白、装饰语言和页面密度。",
-  "每页按内容角色选择固定版式策略：封面、案例大图、产品画廊、方案配置、对比矩阵、时间线、数据证据、风险清单、总结页。",
-  "设计优先：图片/图表/证据优先，正文压缩，标题必须强，页面不能全部做成同一种卡片。",
-  "输出必须是可在线编辑 PPTX：文字、图片、形状独立可编辑，不允许整页截图化。",
-  "生成后视觉自检：如果像普通模板、文字过密、图片太小、层级弱、风格不统一或可编辑性不足，就自动返工。"
+  "\u9ad8\u7ea7\u8bbe\u8ba1\u4f18\u5316\uff1a\u4e0d\u7ba1\u662f\u4e0a\u4f20\u65e7 PPT/PDF/\u56fe\u7247\uff0c\u8fd8\u662f\u7eaf\u804a\u5929\u751f\u6210\uff0c\u90fd\u6309\u89c6\u89c9\u4f18\u5148\u7684\u63d0\u6848\u7ea7 PPT \u5904\u7406\u3002",
+  "\u5fc5\u987b\u5148\u5224\u65ad\u5185\u5bb9\u7c7b\u578b\uff1a\u9500\u552e\u63d0\u6848\u3001\u6848\u4f8b\u4f5c\u54c1\u96c6\u3001\u4ea7\u54c1\u4ecb\u7ecd\u3001\u54c1\u724c\u624b\u518c\u3001\u9879\u76ee\u6c47\u62a5\u3001\u57f9\u8bad\u8bfe\u4ef6\u3001\u62db\u5546\u65b9\u6848\u6216\u6570\u636e\u62a5\u544a\u3002",
+  "\u5fc5\u987b\u62bd\u53d6\u89c6\u89c9 DNA\uff1a\u4e3b\u8272\u3001\u80cc\u666f\u3001\u5b57\u4f53\u6c14\u8d28\u3001\u56fe\u7247\u8bed\u8a00\u3001Logo/\u54c1\u724c\u9732\u51fa\u3001\u7559\u767d\u3001\u88c5\u9970\u8bed\u8a00\u548c\u9875\u9762\u5bc6\u5ea6\u3002",
+  "\u8f93\u51fa\u5fc5\u987b\u662f\u53ef\u5728\u7ebf\u7f16\u8f91 PPTX\uff1a\u6587\u5b57\u3001\u56fe\u7247\u3001\u5f62\u72b6\u72ec\u7acb\u53ef\u7f16\u8f91\uff0c\u4e0d\u5141\u8bb8\u6574\u9875\u622a\u56fe\u5316\u3002"
 ].join("\n");
 
 const LAYOUT_LABELS = {
-  cover: "封面",
-  visual: "主视觉",
-  section: "章节",
-  toc: "目录",
-  kpi: "数据",
-  pricing: "价格",
-  "product-detail": "单品",
-  bundle: "组合",
-  "risk-checklist": "清单",
-  compare: "对比",
-  timeline: "流程",
-  cards: "卡片",
-  quote: "观点",
-  closing: "收尾"
+  cover: "\u5c01\u9762",
+  visual: "\u4e3b\u89c6\u89c9",
+  section: "\u7ae0\u8282",
+  toc: "\u76ee\u5f55",
+  kpi: "\u6570\u636e",
+  pricing: "\u4ef7\u683c",
+  "product-detail": "\u5355\u54c1",
+  bundle: "\u7ec4\u5408",
+  "risk-checklist": "\u6e05\u5355",
+  compare: "\u5bf9\u6bd4",
+  timeline: "\u6d41\u7a0b",
+  cards: "\u5361\u7247",
+  quote: "\u89c2\u70b9",
+  closing: "\u6536\u5c3e"
 };
 
-const QUICK_ACTIONS = ["标题更销售化", "改成价格梯度页", "讲稿更口语", "减少文字更高级", "强化下一步动作"];
-const DECK_ACTIONS = ["整份减少文字更高级", "改成客户提案口吻", "强化销售话术和下一步行动", "改成技术数据汇报风格"];
+const QUICK_ACTIONS = ["\u6807\u9898\u66f4\u9500\u552e\u5316", "\u6539\u6210\u4ef7\u683c\u68af\u5ea6\u9875", "\u8bb2\u7a3f\u66f4\u53e3\u8bed", "\u51cf\u5c11\u6587\u5b57\u66f4\u9ad8\u7ea7", "\u5f3a\u5316\u4e0b\u4e00\u6b65\u52a8\u4f5c"];
+const DECK_ACTIONS = ["\u6574\u4efd\u51cf\u5c11\u6587\u5b57\u66f4\u9ad8\u7ea7", "\u6539\u6210\u5ba2\u6237\u63d0\u6848\u53e3\u543b", "\u5f3a\u5316\u9500\u552e\u8bdd\u672f\u548c\u4e0b\u4e00\u6b65\u884c\u52a8", "\u6539\u6210\u6280\u672f\u6570\u636e\u6c47\u62a5\u98ce\u683c"];
 
 const cp = (...codes) => String.fromCodePoint(...codes);
 const UI = {
@@ -73,14 +70,11 @@ const UI = {
 };
 
 const STEPS = [
-  { id: "materials", number: "01", title: "资料识别", desc: "抽文本 / 图片 / 素材身份" },
-  { id: "outline", number: "02", title: "大纲规划", desc: "页面角色和叙事路线" },
-  { id: "generate", number: "03", title: "视觉方向", desc: "codex-ppt visual target" },
-  { id: "visual-project", number: "04", title: "逐页生成", desc: "prompts / origin_image" },
-  { id: "visual-qa", number: "05", title: "视觉 QA", desc: "contact sheet / 视觉稿" },
-  { id: "preview", number: "06", title: "可编辑重建", desc: "Hybrid SceneGraph" },
-  { id: "feedback", number: "07", title: "一致性 QA", desc: "视觉目标 vs 可编辑" },
-  { id: "export", number: "08", title: "导出", desc: "editable-final.pptx" }
+  { id: "materials", number: "01", title: "\u8d44\u6599\u8bc6\u522b", desc: "\u62bd\u53d6\u6587\u5b57 / \u56fe\u7247 / \u7d20\u6750\u8eab\u4efd" },
+  { id: "outline", number: "02", title: "\u5927\u7eb2\u89c4\u5212", desc: "\u9875\u9762\u89d2\u8272\u548c\u53d9\u4e8b\u8def\u7ebf" },
+  { id: "generate", number: "03", title: "\u751f\u6210", desc: "\u98ce\u683c / \u6837\u7a3f / PPTX" },
+  { id: "preview", number: "04", title: "\u7f16\u8f91", desc: "\u9884\u89c8 / \u56fe\u5c42 / \u6587\u6848" },
+  { id: "export", number: "05", title: "\u5bfc\u51fa", desc: "editable-final.pptx" }
 ];
 
 const api = {
@@ -127,9 +121,6 @@ const api = {
   },
   async generateVisualTargetSample(id) {
     return this.create(`/api/jobs/${id}/visual-target/sample`, {});
-  },
-  async generateVisualProjectSlides(id, body = {}) {
-    return this.create(`/api/jobs/${id}/visual-project/generate`, body);
   },
   async config() {
     const response = await fetch("/api/config", { cache: "no-store" });
@@ -225,13 +216,8 @@ function App() {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [generationProgress, setGenerationProgress] = useState({ active: false, mode: "", value: 0, label: "" });
-  const [stylePreviewJob, setStylePreviewJob] = useState(null);
-  const [stylePreviewBusy, setStylePreviewBusy] = useState(false);
-  const [styleConfirmed, setStyleConfirmed] = useState(false);
   const [intakeDraft, setIntakeDraft] = useState("");
   const [intakeMessages, setIntakeMessages] = useState([]);
-  const [rating, setRating] = useState(4);
-  const [comment, setComment] = useState("");
   const [activeStep, setActiveStep] = useState("materials");
   const [rightPanelMode, setRightPanelMode] = useState("closed");
   const [focusPreview, setFocusPreview] = useState(false);
@@ -241,7 +227,6 @@ function App() {
   const [templateBusy, setTemplateBusy] = useState(false);
   const [apiConfig, setApiConfig] = useState({ apiKey: "", maskedApiKey: "", hasApiKey: false, baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" });
   const [availableModels, setAvailableModels] = useState([]);
-  const [settingsStatus, setSettingsStatus] = useState("");
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [draft, setDraft] = useState(makeSlideDraft(null));
   const [insertLayout, setInsertLayout] = useState("section");
@@ -386,8 +371,7 @@ function App() {
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
     if (name === "style") {
-      setStyleConfirmed(false);
-      setStylePreviewJob(null);
+      setStatus("已切换设计方向。");
     }
   }
 
@@ -447,8 +431,6 @@ function App() {
           { id: `upload-reply-${now}`, role: "assistant", text: "已收到资料。现在可以选择保留原稿结构优化，或重新规划叙事；也可以继续补充你的目标、受众和风格要求。" }
         ]);
       }
-      setStylePreviewJob(null);
-      setStyleConfirmed(false);
       setStatus("资料已上传，可以继续补充需求或开始生成。");
       setRightPanelMode("edit");
     } catch (err) {
@@ -468,8 +450,6 @@ function App() {
       await api.remove(`/api/uploads/${file.id}`);
       setFiles((current) => current.filter((item) => item.id !== file.id));
       setFileIds((current) => current.filter((id) => id !== file.id));
-      setStylePreviewJob(null);
-      setStyleConfirmed(false);
       setStatus("上传文件已删除。");
     } catch (err) {
       const message = getErrorMessage(err);
@@ -503,12 +483,11 @@ function App() {
         fileIds,
         materials: inferredMaterials,
         outlinePlan: confirmedOutline,
-        styleProofJobId: stylePreviewJob?.id || "",
         mode
       });
       setJob(data);
       setSelectedSlide(0);
-      setActiveStep(data.visualProject?.generatedImages || data.visualTarget?.sample?.imageUrl ? "visual-qa" : "preview");
+      setActiveStep("preview");
       setRightPanelMode("status");
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
       setStatus(data.warning || "一键链路已完成：可先审阅视觉目标与可编辑结果，再进入在线编辑或导出。");
@@ -526,42 +505,6 @@ function App() {
 
   function getRequestFormForFiles(current = form) {
     return hasUploadedMaterials ? current : { ...current, outlineStrategy: "regenerate" };
-  }
-
-  async function createStylePreview(confirmedOutline = null) {
-    if (!validatePreparation()) return;
-    const mode = getGenerationMode();
-    const requestForm = getRequestFormForFiles(form);
-    setError("");
-    setStylePreviewBusy(true);
-    setStyleConfirmed(false);
-    setStatus("正在生成主视觉方向图...");
-    setGenerationProgress({
-      active: true,
-      mode: "style-preview",
-      value: 10,
-      label: "正在整理视觉方向资料和参考"
-    });
-    try {
-      const data = await api.create("/api/jobs/style-preview", {
-        ...requestForm,
-        projectName: getEffectiveProjectName(requestForm, files),
-        fileIds,
-        materials: inferredMaterials,
-        outlinePlan: confirmedOutline,
-        mode
-      });
-      setStylePreviewJob(data);
-      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus(data.warning || "主视觉方向已生成；满意就采用方向，不满意就重做方向。");
-      setGenerationProgress({ active: false, mode: "", value: 100, label: "视觉方向生成完成" });
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
-      setGenerationProgress({ active: false, mode: "", value: 0, label: "" });
-    } finally {
-      setStylePreviewBusy(false);
-    }
   }
 
   function buildDesignLedForm(current = form) {
@@ -587,8 +530,6 @@ function App() {
   async function activateDesignLedMode() {
     const nextForm = buildDesignLedForm();
     setForm(nextForm);
-    setStylePreviewJob(null);
-    setStyleConfirmed(false);
     setStatus("已切换为高级设计优化：视觉优先、可编辑交付，正在生成设计重构大纲...");
     await planOutline(nextForm);
   }
@@ -608,8 +549,6 @@ function App() {
         mode: getGenerationMode()
       });
       setOutlinePlan(data.outlinePlan || null);
-      setStylePreviewJob(null);
-      setStyleConfirmed(false);
       setOutlineBrief(data.materialBrief || null);
       setStatus("大纲已生成，可以调整后按确认大纲生成。");
       setActiveStep("outline");
@@ -735,24 +674,6 @@ function App() {
     }
   }
 
-  async function generateVisualProjectSlides(maxSlides = 3) {
-    if (!job?.id) return;
-    setError("");
-    setStatus("正在逐页生成视觉目标图...");
-    try {
-      const data = await api.generateVisualProjectSlides(job.id, { maxSlides });
-      setJob(data);
-      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      const project = data.visualProject || {};
-      setStatus(project.status === "ready" ? "逐页视觉目标已完成，visual-target.pptx 已生成。" : `已生成 ${project.generatedImages || 0}/${project.slideCount || 0} 张视觉目标图。`);
-      setActiveStep("visual-project");
-      setRightPanelMode("status");
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
-    }
-  }
-
   async function undoJob() {
     if (!job?.canUndo) return;
     setError("");
@@ -823,28 +744,15 @@ function App() {
     }
   }
 
-  async function submitFeedback(skip = false) {
-    if (!job) return;
-    setError("");
-    try {
-      const data = await api.create(`/api/jobs/${job.id}/feedback`, { rating: skip ? null : rating, comment });
-      setJob(data);
-      setStatus(skip ? "已跳过反馈。" : "反馈已保存。");
-    } catch (err) {
-      setError(getErrorMessage(err));
-    }
-  }
-
   async function saveApiConfig() {
     setSettingsBusy(true);
-    setSettingsStatus("");
     setError("");
     try {
       const data = await api.saveConfig(apiConfig);
       setApiConfig((current) => ({ ...current, ...data, apiKey: "" }));
-      setSettingsStatus("API 配置已保存，后续生成会使用这个配置。");
+      setStatus("API \u914d\u7f6e\u5df2\u4fdd\u5b58\uff0c\u540e\u7eed\u751f\u6210\u4f1a\u4f7f\u7528\u8fd9\u4efd\u914d\u7f6e\u3002");
     } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
+      setError(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
     }
@@ -852,16 +760,16 @@ function App() {
 
   async function testApiConfig() {
     setSettingsBusy(true);
-    setSettingsStatus("正在测试 API 连接...");
+    setStatus("\u6b63\u5728\u6d4b\u8bd5 API \u8fde\u63a5...");
     setError("");
     try {
       const data = await api.testConfig(apiConfig);
       if (data.usedBaseUrl) {
         setApiConfig((current) => ({ ...current, baseUrl: data.usedBaseUrl }));
       }
-      setSettingsStatus(data.message || "API 连接成功。");
+      setStatus(data.message || "API \u8fde\u63a5\u6210\u529f\u3002");
     } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
+      setError(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
     }
@@ -869,7 +777,7 @@ function App() {
 
   async function detectModels() {
     setSettingsBusy(true);
-    setSettingsStatus("正在检测可用模型...");
+    setStatus("\u6b63\u5728\u68c0\u6d4b\u53ef\u7528\u6a21\u578b...");
     setError("");
     try {
       const data = await api.models(apiConfig);
@@ -881,9 +789,9 @@ function App() {
         baseUrl: data.usedBaseUrl || current.baseUrl,
         model: nextModel
       }));
-      setSettingsStatus(models.length ? `已检测到 ${models.length} 个可用模型，已自动使用 ${data.usedBaseUrl || apiConfig.baseUrl}。` : "没有检测到可用聊天模型。");
+      setStatus(models.length ? `\u5df2\u68c0\u6d4b\u5230 ${models.length} \u4e2a\u53ef\u7528\u6a21\u578b\uff0c\u5df2\u81ea\u52a8\u4f7f\u7528 ${data.usedBaseUrl || apiConfig.baseUrl}\u3002` : "\u6ca1\u6709\u68c0\u6d4b\u5230\u53ef\u7528\u804a\u5929\u6a21\u578b\u3002");
     } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
+      setError(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
     }
@@ -892,13 +800,13 @@ function App() {
   async function uploadStyleReference(files, meta) {
     if (!files?.length) return;
     setSettingsBusy(true);
-    setSettingsStatus("\u6b63\u5728\u52a0\u5165\u98ce\u683c\u53c2\u8003\u5e93...");
+    setStatus("\u6b63\u5728\u52a0\u5165\u98ce\u683c\u53c2\u8003\u5e93...");
     try {
       const data = await api.uploadStyleReferences(files, meta);
       setStyleReferences((current) => [...(data.references || []), ...current]);
-      setSettingsStatus("\u98ce\u683c\u53c2\u8003\u5df2\u52a0\u5165\uff0c\u540e\u7eed\u751f\u6210\u4f1a\u53c2\u8003\u8fd9\u7ec4\u8c03\u6027\u3002");
+      setStatus("\u98ce\u683c\u53c2\u8003\u5df2\u52a0\u5165\uff0c\u540e\u7eed\u751f\u6210\u4f1a\u53c2\u8003\u8fd9\u7ec4\u8c03\u6027\u3002");
     } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
+      setStatus(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
     }
@@ -906,13 +814,13 @@ function App() {
 
   async function deleteStyleReference(id) {
     setSettingsBusy(true);
-    setSettingsStatus("");
+    setStatus("");
     try {
       await api.deleteStyleReference(id);
       setStyleReferences((current) => current.filter((item) => item.id !== id));
-      setSettingsStatus("\u5df2\u4ece\u98ce\u683c\u53c2\u8003\u5e93\u5220\u9664\u3002");
+      setStatus("\u5df2\u4ece\u98ce\u683c\u53c2\u8003\u5e93\u5220\u9664\u3002");
     } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
+      setStatus(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
     }
@@ -1082,7 +990,7 @@ function App() {
     ? (hasEditableContext ? "edit" : "status")
     : (!hasEditableContext && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
   const rightPanelTabs = hasEditableContext
-    ? [["edit", "编辑"], ["ai", "AI"], ["history", "历史"]]
+    ? [["edit", "编辑"], ["history", "历史"]]
     : [["history", "历史"]];
 
   return (
@@ -1269,13 +1177,12 @@ function App() {
           )}
 
           {activeStep === "generate" && (
-            <SectionCard title="一键提案级可编辑重构" desc="自动执行资料识别、视觉目标、SceneGraph 重建、PPTX 渲染和 QA；主视觉方向可选审阅。">
+            <SectionCard title="生成可编辑 PPT" desc="确认设计方向后直接生成整套可编辑 PPTX；风格参考图会作为调性和排版参考。">
               <div className="readiness">
                 <Metric label="资料文件" value={fileIds.length} />
                 <Metric label="大纲状态" value={outlinePlan?.layoutSequence?.length ? "已确认" : "未确认"} />
                 <Metric label="需求完整度" value={`${completion}%`} />
               </div>
-              <GenerationGateFlow outlineReady={Boolean(outlinePlan?.layoutSequence?.length)} styleSelected={Boolean(form.style)} styleProofReady={Boolean(stylePreviewJob)} styleConfirmed={styleConfirmed} optionalStyleProof />
               <TemplatePreflightSelector
                 style={form.style}
                 themes={themes}
@@ -1283,38 +1190,13 @@ function App() {
                 styleReferences={styleReferences}
                 onChange={(style) => update("style", style)}
               />
-              {generationProgress.active && generationProgress.mode !== "style-preview" ? <GenerationProgress progress={generationProgress} /> : null}
-              <StylePreviewGate
-                busy={stylePreviewBusy}
-                confirmed={styleConfirmed}
-                job={stylePreviewJob}
-                progress={generationProgress.mode === "style-preview" ? generationProgress : null}
-                onConfirm={() => setStyleConfirmed(true)}
-                onCreate={() => createStylePreview(outlinePlan)}
-                onReset={() => {
-                  setStyleConfirmed(false);
-                  setStylePreviewJob(null);
-                }}
-                canCreate={Boolean(outlinePlan?.layoutSequence?.length && form.style)}
-              />
+              {generationProgress.active ? <GenerationProgress progress={generationProgress} /> : null}
               <div className="action-grid single-action">
-                <button className="primary-action" onClick={() => createJob(getGenerationMode(), outlinePlan)} disabled={generationProgress.active || stylePreviewBusy || !outlinePlan?.layoutSequence?.length}>
-                  <b>{generationProgress.active ? "正在跑完整链路" : "一键生成可编辑最终稿"}</b>
-                  <span>{styleConfirmed ? "已采用视觉方向，将输出 editable-final.pptx。" : "未采用方向也可直接生成；系统会自动生成 visual target 并重建可编辑 PPTX。"}</span>
+                <button className="primary-action" onClick={() => createJob(getGenerationMode(), outlinePlan)} disabled={generationProgress.active || !outlinePlan?.layoutSequence?.length}>
+                  <b>{generationProgress.active ? "正在生成" : "生成整套可编辑 PPT"}</b>
+                  <span>输出 editable-final.pptx，并自动生成预览图和交付自检。</span>
                 </button>
               </div>
-            </SectionCard>
-          )}
-
-          {activeStep === "visual-project" && (
-            <SectionCard title="逐页视觉生产" desc="按 codex-ppt 链路准备 outline、deck_spec、prompts、slide_jobs 和 origin_image。">
-              <VisualProjectWorkspace job={job} onGenerateSlides={generateVisualProjectSlides} />
-            </SectionCard>
-          )}
-
-          {activeStep === "visual-qa" && (
-            <SectionCard title="视觉目标 QA" desc="视觉目标是中间设计稿，不是最终可编辑文件；最终交付仍以 SceneGraph/PPTX 为准。">
-              <HybridQaWorkspace job={job} selectedSlide={selectedSlide} setSelectedSlide={setSelectedSlide} currentImage={currentImage} />
             </SectionCard>
           )}
 
@@ -1393,22 +1275,6 @@ function App() {
             </SectionCard>
           )}
 
-          {activeStep === "feedback" && (
-            <SectionCard title="评分与留言" desc="反馈会保存到当前任务记录里。">
-              <div className="feedback-grid">
-                <div className="score">
-                  {[1, 2, 3, 4, 5].map((item) => <button className={item <= rating ? "active" : ""} key={item} onClick={() => setRating(item)}>{item}</button>)}
-                </div>
-                <Field label="留言">
-                  <textarea value={comment} onChange={(e) => setComment(e.target.value)} />
-                  <div className="button-row">
-                    <button className="btn primary" onClick={() => submitFeedback(false)} disabled={!job}>提交反馈</button>
-                    <button className="btn ghost" onClick={() => submitFeedback(true)} disabled={!job}>跳过</button>
-                  </div>
-                </Field>
-              </div>
-            </SectionCard>
-          )}
         </main>
 
         {showRightPanel && (
@@ -1444,31 +1310,12 @@ function App() {
               onUndoJob={undoJob}
             />
           )}
-          {visibleRightPanelMode === "ai" && (
-            <AIPanel
-              currentStyle={currentStyle}
-              deckRevision={deckRevision}
-              dirty={dirty}
-              job={editBlocked ? null : job}
-              revision={revision}
-              setDeckRevision={setDeckRevision}
-              setRevision={setRevision}
-              themes={themes}
-              templateBusy={templateBusy}
-              templatePacks={templatePacks}
-              onQuickAction={appendQuickAction}
-              onRevise={revise}
-              onRewriteDeck={rewriteDeck}
-              onRerenderTemplate={rerenderTemplate}
-            />
-          )}
           {visibleRightPanelMode === "status" && <StatusPanel job={job} files={files} fileIds={fileIds} status={status} error={error} connection={connection} localImage={localImage} skillRules={skillRules} onRepairDelivery={repairDelivery} onApplyImageSupplement={applyImageSupplement} onApplyLocalImageSupplement={applyLocalImageSupplement} onRescanLocalImageQa={rescanLocalImageQa} onGenerateVisualTargetSample={generateVisualTargetSample} />}
           {visibleRightPanelMode === "history" && <HistoryPanel jobs={jobs} onSelect={selectJob} onDelete={deleteHistoryJob} onDeleteMany={deleteHistoryJobs} onRepair={repairHistoryJob} />}
           {visibleRightPanelMode === "settings" && (
             <SettingsPanel
               config={apiConfig}
               busy={settingsBusy}
-              status={settingsStatus}
               models={availableModels}
               themes={themes}
               onChange={setApiConfig}
@@ -1489,18 +1336,15 @@ function App() {
 
 function WorkflowStrip({ activeStep, completion, rightPanelMode, setActiveStep, setRightPanelMode, stepState }) {
   const currentStep = STEPS.find((step) => step.id === activeStep);
-  function openSettings() {
-    setRightPanelMode("settings");
-  }
   return (
     <div className="workflow-strip">
       <div className="workflow-current">
-        <span>当前阶段</span>
-        <b>{currentStep?.title || "工作台"}</b>
+        <span>{"\u5f53\u524d\u9636\u6bb5"}</span>
+        <b>{currentStep?.title || "\u5de5\u4f5c\u53f0"}</b>
         <em><i style={{ width: `${completion}%` }} /></em>
       </div>
       <div className="workflow-steps">
-        {STEPS.filter((step) => step.id !== "feedback").map((step, index, list) => (
+        {STEPS.map((step, index, list) => (
           <button className={activeStep === step.id ? "active" : ""} type="button" key={step.id} onClick={() => setActiveStep(step.id)}>
             <strong>{step.title}</strong>
             <span>{stepState[step.id]}</span>
@@ -1508,7 +1352,7 @@ function WorkflowStrip({ activeStep, completion, rightPanelMode, setActiveStep, 
           </button>
         ))}
       </div>
-      <button className="workflow-settings" type="button" onClick={() => setRightPanelMode("settings")}>设置</button>
+      <button className="workflow-settings" type="button" onClick={() => setRightPanelMode(rightPanelMode === "settings" ? "history" : "settings")}>{"\u8bbe\u7f6e"}</button>
     </div>
   );
 }
@@ -1687,27 +1531,6 @@ function TemplatePreflightSelector({ style, themes = [], templatePacks = [], sty
         <span>{"\u7248\u5f0f\u7b56\u7565\uff1a"}{coreLayouts.join(" / ") || "\u81ea\u52a8\u7248\u5f0f"}</span>
         <span>{selectedRefs.length ? "\u53c2\u8003\u56fe\u53ea\u5f71\u54cd\u8c03\u6027\u548c\u7248\u5f0f\uff0c\u4e0d\u4f5c\u4e3a\u4e8b\u5b9e\u56fe\u7247\u76f4\u63a5\u590d\u5236" : "\u53ef\u5728\u8bbe\u7f6e\u91cc\u4e0a\u4f20\u4e00\u7ec4\u98ce\u683c\u53c2\u8003\u56fe"}</span>
       </div>
-    </div>
-  );
-}
-
-function GenerationGateFlow({ outlineReady, styleSelected, styleProofReady, styleConfirmed, optionalStyleProof = false }) {
-  const styleProofMissing = optionalStyleProof && !Boolean(styleProofReady);
-  const styleUnconfirmed = optionalStyleProof && !Boolean(styleConfirmed);
-  const gates = [
-    { label: "确认大纲", done: outlineReady },
-    { label: "选择设计方向", done: styleSelected },
-    { label: optionalStyleProof ? "方向审阅可选" : "方向自动质检", done: optionalStyleProof || styleProofReady, optional: styleProofMissing },
-    { label: optionalStyleProof ? "直接进入全链路" : "人工确认风格", done: optionalStyleProof || styleConfirmed, optional: styleUnconfirmed }
-  ];
-  return (
-    <div className="generation-gate-flow">
-      {gates.map((gate, index) => (
-        <div className={gate.done ? gate.optional ? "optional" : "done" : "pending"} key={gate.label}>
-          <b>{String(index + 1).padStart(2, "0")}</b>
-          <span>{gate.label}</span>
-        </div>
-      ))}
     </div>
   );
 }
@@ -1955,23 +1778,6 @@ function CanvasShapeLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function AIPanel({ deckRevision, dirty, job, revision, setDeckRevision, setRevision, onQuickAction, onRevise, onRewriteDeck }) {
-  return (
-    <div className="side-section ai-panel">
-      <h2>AI 改写</h2>
-      <div className="edit-mode-title"><b>单页指令</b><span>让系统帮你重写当前页表达或结构。</span></div>
-      <div className="quick-actions">{QUICK_ACTIONS.map((item) => <button key={item} type="button" onMouseDown={(event) => { event.preventDefault(); onQuickAction(item); }} disabled={!job}>{item}</button>)}</div>
-      <textarea value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="例如：第 3 页太密，改成两行展示，标题更销售化。" />
-      <button className="btn primary wide" onClick={onRevise} disabled={!job || !revision.trim()}>应用到当前页</button>
-      <div className="edit-separator" />
-      <div className="edit-mode-title"><b>整份 PPT</b><span>适合统一口吻、减少文字或强化行动。</span></div>
-      <div className="quick-actions">{DECK_ACTIONS.map((item) => <button key={item} type="button" onMouseDown={(event) => { event.preventDefault(); setDeckRevision(item); }} disabled={!job || dirty}>{item}</button>)}</div>
-      <textarea className="compact-textarea" value={deckRevision} onChange={(e) => setDeckRevision(e.target.value)} disabled={!job || dirty} placeholder="例如：整份减少文字，改成客户提案口吻。" />
-      <button className="btn primary wide" onClick={onRewriteDeck} disabled={!job || dirty || !deckRevision.trim()}>应用到整份 PPT</button>
     </div>
   );
 }
@@ -2603,206 +2409,6 @@ function RecordBlock({ title, value, detail }) {
   );
 }
 
-function VisualProjectWorkspace({ job, onGenerateSlides }) {
-  const project = job?.visualProject || {};
-  const manifest = job?.assetManifest || {};
-  const qa = job?.assetManifestQa || {};
-  const slideJobs = job?.pipeline?.slideJobs || [];
-  if (!job) return <div className="visual-project-empty">先上传资料并生成任务，这里会显示 codex-ppt 式视觉生产链路。</div>;
-  return (
-    <div className="hybrid-workspace">
-      <div className={`hybrid-card ${qa.status || "pass"}`}>
-        <div className="hybrid-card-head"><b>素材中枢 Asset Manifest</b><span>{qa.status || manifest.status || "ready"}</span></div>
-        <p>Logo、产品图、图表、价格和正文从一开始锁定身份，禁止混入底图。</p>
-        <div className="hybrid-facts">
-          <span>{manifest.assets?.length || 0} 素材</span>
-          <span>{manifest.criticalCount || 0} 必须保留</span>
-          <span>{manifest.backgroundBlockedCount || 0} 禁入底图</span>
-        </div>
-        {manifest.hardRules?.length ? <small>{manifest.hardRules.slice(0, 2).join(" / ")}</small> : null}
-      </div>
-      <div className={`hybrid-card ${project.status === "ready" ? "pass" : "warn"}`}>
-        <div className="hybrid-card-head"><b>Visual Project</b><span>{project.status || "not-created"}</span></div>
-        <p>生成 outline、deck_spec、逐页 prompt 和 slide_jobs；视觉目标 PPTX 只作为中间稿。</p>
-        <div className="hybrid-facts">
-          <span>{project.slideCount || 0} 页</span>
-          <span>{project.generatedImages || 0} 张视觉图</span>
-          <span>{project.generatedSceneGraphs || 0} 个可编辑页结构</span>
-          <span>{project.visualTargetPptxPath ? "visual-target.pptx" : "待生成视觉 PPTX"}</span>
-        </div>
-        <div className="hybrid-links">
-          {project.urls?.outlineUrl ? <a href={project.urls.outlineUrl} target="_blank" rel="noreferrer">outline.md</a> : null}
-          {project.urls?.deckSpecUrl ? <a href={project.urls.deckSpecUrl} target="_blank" rel="noreferrer">deck_spec.json</a> : null}
-          {project.urls?.slideJobsUrl ? <a href={project.urls.slideJobsUrl} target="_blank" rel="noreferrer">slide_jobs.json</a> : null}
-          {project.urls?.slideSceneGraphManifestUrl ? <a href={project.urls.slideSceneGraphManifestUrl} target="_blank" rel="noreferrer">slide_scenegraphs.json</a> : null}
-          {project.urls?.contactSheetUrl ? <a href={project.urls.contactSheetUrl} target="_blank" rel="noreferrer">contact sheet</a> : null}
-          {project.urls?.visualTargetPptxUrl ? <a href={project.urls.visualTargetPptxUrl} target="_blank" rel="noreferrer">visual-target.pptx</a> : null}
-        </div>
-        {onGenerateSlides ? (
-          <div className="button-row tight">
-            <button className="btn primary" type="button" onClick={() => onGenerateSlides(3)}>生成 3 页视觉图</button>
-            <button className="btn ghost" type="button" onClick={() => onGenerateSlides("all")}>全量生成</button>
-          </div>
-        ) : null}
-        {project.warnings?.length ? <small>{project.warnings.slice(0, 3).join(" / ")}</small> : null}
-        {project.originImages?.length ? (
-          <div className="origin-image-strip">
-            {project.originImages.slice(0, 12).map((item) => <img key={item.name} src={item.url} alt={item.name} title={item.name} />)}
-          </div>
-        ) : null}
-      </div>
-      <div className="hybrid-card wide">
-        <div className="hybrid-card-head"><b>逐页 Worker 任务</b><span>{slideJobs.length || project.slideCount || 0}</span></div>
-        <div className="hybrid-job-grid">
-          {(slideJobs.length ? slideJobs : Array.from({ length: project.slideCount || 0 }, (_, index) => ({ id: `slide_${String(index + 1).padStart(2, "0")}`, index: index + 1, status: "pending" }))).slice(0, 16).map((item) => (
-            <span className={item.status || "pending"} key={item.id}>
-              <strong>{String(item.index || item.slide || "").padStart(2, "0")}</strong>
-              {item.layout || item.role || item.status || "pending"}
-            </span>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function HybridQaWorkspace({ job, selectedSlide = 0, setSelectedSlide, currentImage }) {
-  if (!job) return <div className="visual-project-empty">生成后这里会显示视觉目标与可编辑结果的双轨 QA。</div>;
-  const target = job.visualTarget || {};
-  const project = job.visualProject || {};
-  const compare = job.visualCompare || {};
-  const edit = job.quality?.pptxEditability || {};
-  const sceneQa = job.sceneGraphQa || {};
-  const hybridQa = job.hybridQa || {};
-  const sample = target.sample || {};
-  const sceneSlides = Array.isArray(job.sceneGraph?.slides) ? job.sceneGraph.slides : [];
-  const slideCount = Math.max(sceneSlides.length, (project.originImages || []).length, (job.previewImages || []).length, project.slideCount || 0);
-  const currentOriginImage = (project.originImages || []).find((item) => Number(item.slide) === selectedSlide + 1);
-  const visualImage = currentOriginImage?.url || sample.imageUrl || null;
-  const currentSceneSlide = sceneSlides[selectedSlide] || null;
-  const categories = hybridQa.categories || {};
-  const qaItems = [
-    { label: "内容完整度", value: categories.content?.blockers?.length ? "阻断" : categories.content?.warnings?.length ? "需复核" : "通过", state: categories.content?.status || (sceneQa.warnings?.length ? "warn" : "pass") },
-    { label: "素材完整度", value: `${job.assetManifest?.criticalCount || 0} 关键素材`, state: categories.assets?.status || (job.assetManifestQa?.status === "block" ? "block" : "pass") },
-    { label: "视觉一致性", value: compare.score ? `${compare.score}/100` : "待对比", state: categories.visual?.status || compare.status || "warn" },
-    { label: "可编辑完整度", value: `${edit.nativeTextBoxes || 0} 文本 / ${edit.nativeShapes || 0} shape`, state: categories.editable?.status || (edit.editable === false ? "block" : "pass") }
-  ];
-  return (
-    <div className="dual-preview-workspace">
-      {slideCount > 1 ? (
-        <div className="dual-slide-selector" aria-label="选择双轨 QA 页码">
-          {Array.from({ length: slideCount }, (_, index) => (
-            <button
-              className={index === selectedSlide ? "active" : ""}
-              key={`dual-slide-${index}`}
-              type="button"
-              onClick={() => setSelectedSlide?.(index)}
-            >
-              {String(index + 1).padStart(2, "0")}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <div className="dual-preview-grid">
-        <div className="dual-preview-pane">
-          <div className="dual-preview-head"><b>视觉目标</b><span>不可编辑 / 中间产物</span></div>
-          {visualImage ? <img src={visualImage} alt="visual target" /> : <div className="dual-preview-empty">等待 visual target sample / origin_image</div>}
-          <small>{currentOriginImage?.name || (project.visualTargetPptxPath ? "visual-target.pptx 已准备" : "origin_image 未齐，视觉目标 PPTX 待生成")}</small>
-        </div>
-        <div className="dual-preview-pane">
-          <div className="dual-preview-head"><b>可编辑结果</b><span>最终交付 / SceneGraph</span></div>
-          {currentImage ? <img src={currentImage} alt={`editable preview ${selectedSlide + 1}`} /> : <div className="dual-preview-empty">等待 PPTX 渲染预览</div>}
-          <small>editable-final.pptx：文本、shape、独立图片由 SceneGraph 渲染。</small>
-        </div>
-      </div>
-      <div className="hybrid-qa-grid">
-        {qaItems.map((item) => <div className={`hybrid-qa-item ${item.state}`} key={item.label}><span>{item.label}</span><b>{item.value}</b></div>)}
-      </div>
-      <SlideSceneGraphAssetEvidence slide={currentSceneSlide} />
-      <HybridQaDetail qa={hybridQa} />
-      {compare.items?.length ? (
-        <div className="hybrid-card wide">
-          <div className="hybrid-card-head"><b>逐页一致性</b><span>{compare.method || "structural"}</span></div>
-          <div className="hybrid-job-grid">
-            {compare.items.slice(0, 12).map((item) => <span className={item.status || "pass"} key={item.slideId}><strong>{item.slideId}</strong>{item.score || 0}</span>)}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function SlideSceneGraphAssetEvidence({ slide }) {
-  if (!slide) return null;
-  const images = Array.isArray(slide.images) ? slide.images : [];
-  const texts = Array.isArray(slide.texts) ? slide.texts : [];
-  const shapes = [...(slide.shapes || []), ...(slide.decorations || [])];
-  const background = slide.layers?.background || {};
-  const backgroundBlocked = Boolean(background.containsCriticalText || background.containsLogo || background.containsProductHero || background.containsKeyData);
-  const visualTargetName = slide.source?.visualTargetImage ? slide.source.visualTargetImage.split(/[\\/]/).pop() : "";
-  return (
-    <div className={`hybrid-card wide ${backgroundBlocked ? "block" : "pass"}`}>
-      <div className="hybrid-card-head">
-        <b>当前页 SceneGraph 素材层</b>
-        <span>{backgroundBlocked ? "背景违规" : "三层安全"}</span>
-      </div>
-      <div className="asset-evidence-grid">
-        <span><b>{texts.length}</b> 文本框</span>
-        <span><b>{shapes.length}</b> shape / 装饰</span>
-        <span><b>{images.length}</b> 独立图片</span>
-        <span><b>{background.forbiddenKinds?.length || 0}</b> 禁入底图类型</span>
-      </div>
-      <div className="asset-evidence-list">
-        {visualTargetName ? (
-          <div className="asset-evidence-row reference-only">
-            <strong>{visualTargetName}</strong>
-            <span>visual-target-reference-only</span>
-            <small>不进入最终图片层 / 不作为 PPT 背景</small>
-          </div>
-        ) : null}
-        {images.length ? images.slice(0, 4).map((image) => (
-          <div className="asset-evidence-row" key={image.id || image.path || image.name}>
-            <strong>{image.name || image.id || "image"}</strong>
-            <span>{image.provenance?.selectionReason || image.provenance?.source || "independent-image"}</span>
-            <small>
-              {[image.role, image.provenance?.mattingStatus, image.provenance?.derived ? "derived" : "", image.fullSlide ? "full-slide-risk" : "editable-object"].filter(Boolean).join(" / ")}
-            </small>
-          </div>
-        )) : <small>当前页没有独立图片对象；如果这是图片主导页，需要检查素材抽取或 imageSlots。</small>}
-      </div>
-      <small>
-        背景层只允许氛围/纹理/光影；标题、正文、价格、Logo、产品主体和关键数据必须在文本框或独立图片对象里。
-      </small>
-    </div>
-  );
-}
-
-function HybridQaDetail({ qa = {} }) {
-  const categories = qa.categories || {};
-  const rows = [
-    ["内容 QA", categories.content],
-    ["素材 QA", categories.assets],
-    ["可编辑 QA", categories.editable],
-    ["视觉 QA", categories.visual]
-  ].filter(([, item]) => item);
-  if (!rows.length) return null;
-  return (
-    <div className="hybrid-card wide">
-      <div className="hybrid-card-head"><b>四类 QA</b><span>{qa.status || "pending"}</span></div>
-      <div className="hybrid-qa-detail">
-        {rows.map(([label, item]) => (
-          <div className={`hybrid-qa-detail-row ${item.status}`} key={label}>
-            <b>{label}</b>
-            <span>{item.status}</span>
-            <small>{[...(item.blockers || []), ...(item.warnings || [])].slice(0, 3).join(" / ") || "通过"}</small>
-          </div>
-        ))}
-      </div>
-      {qa.autoRepairLog?.length ? <small>自动返工：{qa.autoRepairLog.slice(0, 4).map((item) => `${item.type}:${item.status}`).join(" / ")}</small> : null}
-    </div>
-  );
-}
-
 function PipelineCard({ pipeline }) {
   if (!pipeline?.stages?.length) return null;
   const statusText = { pass: "通过", warn: "需检查", block: "阻断", skipped: "跳过" };
@@ -3178,7 +2784,7 @@ function RenderImageQaCard({ qa }) {
 
 function StatusPanel({ job, files, fileIds, status, error, connection, localImage, skillRules, onRepairDelivery, onApplyImageSupplement, onApplyLocalImageSupplement, onRescanLocalImageQa, onGenerateVisualTargetSample }) {
   const [showDetails, setShowDetails] = useState(false);
-  const warnings = [error, job?.warning, job?.previewWarning, job?.exportWarning].filter(Boolean);
+  const warnings = uniqueList([error, job?.warning, job?.previewWarning, job?.exportWarning].filter(Boolean)).filter((item) => !isNonBlockingWarning(item));
   const ruleGroups = Object.keys(skillRules || {});
   const ruleCount = ruleGroups.reduce((sum, group) => sum + (Array.isArray(skillRules[group]) ? skillRules[group].length : 0), 0);
   const routeSummary = job?.quality?.routePlan || job?.input?.routePlan || null;
@@ -3197,30 +2803,33 @@ function StatusPanel({ job, files, fileIds, status, error, connection, localImag
       <h2>{"\u72b6\u6001"}</h2>
       {job ? <div className={`status-summary ${statusTone}`}><div><b>{statusTone === "pass" ? "\u5df2\u901a\u8fc7" : statusTone === "warn" ? "\u9700\u68c0\u67e5" : "\u9700\u4fee\u590d"}</b><span>{job.deck?.slides?.length || 0} {"\u9875"} / {"\u8def\u7531"} {Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : "-"} / {(job.previewImages || []).filter(Boolean).length} {"\u5f20\u9884\u89c8"}</span></div><button type="button" onClick={() => setShowDetails((value) => !value)}>{showDetails ? "\u6536\u8d77" : "\u8be6\u60c5"}</button></div> : null}
       <EditReadinessGate readiness={job?.editReadiness} localImage={localImage} onApplyImageSupplement={onApplyImageSupplement} onApplyLocalImageSupplement={onApplyLocalImageSupplement} onRescanLocalImageQa={onRescanLocalImageQa} />
-      {job?.agentPlan ? <div className={`agent-card ${job.agentDecision?.autoRepaired ? "repaired" : "checked"}`}><b>{job.agentPlan.name || "AI PPT Agent"}</b><p>{job.agentDecision?.intent || "PPT 生成"} / {job.agentDecision?.autoRepaired ? "已自动修复" : "已完成检查"}</p><div>{(job.agentSteps || []).slice(-5).map((step) => <span className={step.status || "done"} key={`${step.id}-${step.at}`}><strong>{step.label}</strong>{step.summary || step.status}</span>)}</div>{job.agentDecision?.finalAssessment?.hints?.length ? <small>{job.agentDecision.finalAssessment.hints.join(" / ")}</small> : null}</div> : null}
-      {job?.agentPlan ? <AgentWorkRecord job={job} files={files} /> : null}
-      {job?.agentReviews?.length ? <AgentReviewCard reviews={job.agentReviews} visualFixes={job.visualFixes || []} /> : null}
       <ImageSupplementPlanCard plan={job?.imageSupplementPlan} onApply={onApplyImageSupplement} onApplyLocal={onApplyLocalImageSupplement} localImage={localImage} />
       {showDetails ? <ul className="status-list"><li><b>{fileIds.length}</b><span>{"\u4e0a\u4f20\u6587\u4ef6"}</span></li><li><b>{job?.deck?.slides?.length || 0}</b><span>{"\u5df2\u751f\u6210\u9875"}</span></li><li><b>{job?.aiUsed ? "AI" : "\u672c\u5730"}</b><span>{"\u751f\u6210\u6a21\u5f0f"}</span></li></ul> : null}
       <div className={`health-card ${connection?.state || "checking"}`}><span className={connection?.state === "offline" ? "state-dot error" : connection?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{connection?.state === "offline" ? "\u672c\u5730\u79bb\u7ebf" : connection?.state === "online" ? "\u672c\u5730\u5728\u7ebf" : "\u68c0\u67e5\u4e2d"}</b><p>{connection?.message || "\u6b63\u5728\u68c0\u67e5..."}</p></div></div>
-      <div className={`health-card ${localImage?.state || "checking"}`}><span className={localImage?.state === "offline" ? "state-dot error" : localImage?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{localImage?.state === "online" ? "\u751f\u56fe\u5728\u7ebf" : localImage?.state === "offline" ? "\u751f\u56fe\u79bb\u7ebf" : "\u68c0\u67e5\u751f\u56fe"}</b><p>{localImage?.message || "\u68c0\u67e5 Z-Image / ComfyUI..."}</p></div></div>
       {routeSummary ? <div className="route-card"><b>{"\u667a\u80fd\u8def\u7531"}</b><p>{routeSummary.deckType || "\u672a\u77e5"} / {routeSummary.recommendedTheme || "\u672a\u8bbe\u7f6e\u98ce\u683c"}</p><div><span>{routeSummary.targetSlides || job?.deck?.slides?.length || 0} {"\u9875"}</span><span>{routeSummary.layoutSequence?.length || 0} {"\u4e2a\u7248\u5f0f"}</span><span>{routeSummary.imageStrategy?.hasImageSlides ? "\u542b\u56fe\u7247\u9875" : "\u65e0\u56fe\u7247\u9875"}</span><span>{routeSummary.riskStrategy?.includeRiskChecklist ? "\u542b\u98ce\u9669\u9875" : "\u65e0\u98ce\u9669\u9875"}</span></div></div> : null}
       <StyleProofConfirmationCard confirmation={job?.input?.styleProofConfirmation} />
-      <PipelineCard pipeline={job?.pipeline} />
-      <VisualTargetCard target={job?.visualTarget} onGenerateSample={onGenerateVisualTargetSample} localImage={localImage} />
-      <SceneGraphCard graph={job?.sceneGraph} qa={job?.sceneGraphQa} />
-      <VisualCompareCard compare={job?.visualCompare} />
-      <SceneGraphRepairCard repair={job?.sceneGraphRepair} />
-      <EditableRebuildCard plan={job?.editableRebuildPlan} />
       <SourceRecognitionCard report={sourceReport} />
       <AestheticDiagnosisCard diagnosis={aestheticDiagnosis} />
-      <AestheticPlanCard plan={job?.aestheticPlan} />
       <LocalImageQaCard qa={job?.quality?.localImageQa} onRescan={onRescanLocalImageQa} />
       <RenderImageQaCard qa={job?.quality?.renderImageQa} />
       {deliveryChecks.length ? <div className="delivery-card"><div className="delivery-card-head"><b>{"\u4ea4\u4ed8\u81ea\u68c0"}</b><span>{failChecks ? "\u672a\u901a\u8fc7" : warnChecks ? "\u9700\u68c0\u67e5" : "\u901a\u8fc7"}</span></div><div className="delivery-check-grid">{deliveryChecks.map((item) => <span className={item.state} key={item.label}><strong>{item.label}</strong>{item.value}</span>)}</div>{deliveryIssues.length ? <ul>{deliveryIssues.map((item) => <li key={item}>{item}</li>)}</ul> : null}{hasRepairableDeliveryIssues(job) && onRepairDelivery ? <button className="btn primary wide" type="button" onClick={onRepairDelivery} disabled={status === "running"}>{"\u81ea\u52a8\u4fee\u590d\u4ea4\u4ed8\u95ee\u9898"}</button> : null}</div> : null}
       {warnings.length ? <div className="warning-box"><b>{"\u63d0\u793a"}</b><span>{warnings[0]}</span></div> : null}
-      <details className="task-log"><summary>{"\u67e5\u770b\u4efb\u52a1\u65e5\u5fd7"}</summary>{(job?.events || []).map((event, index) => <div key={`${event.type}-${index}`}><strong>{event.type}</strong><span>{event.message}</span></div>)}</details>
-      {showDetails && ruleCount ? <div className="rule-summary"><b>{"\u89c4\u5219"}</b><span>{ruleGroups.length} {"\u7ec4"} / {ruleCount} {"\u6761"}</span></div> : null}
+      {showDetails ? (
+        <>
+          {job?.agentPlan ? <AgentWorkRecord job={job} files={files} /> : null}
+          {job?.agentReviews?.length ? <AgentReviewCard reviews={job.agentReviews} visualFixes={job.visualFixes || []} /> : null}
+          <PipelineCard pipeline={job?.pipeline} />
+          <VisualTargetCard target={job?.visualTarget} onGenerateSample={onGenerateVisualTargetSample} localImage={localImage} />
+          <SceneGraphCard graph={job?.sceneGraph} qa={job?.sceneGraphQa} />
+          <VisualCompareCard compare={job?.visualCompare} />
+          <SceneGraphRepairCard repair={job?.sceneGraphRepair} />
+          <EditableRebuildCard plan={job?.editableRebuildPlan} />
+          <AestheticPlanCard plan={job?.aestheticPlan} />
+          <div className={`health-card ${localImage?.state || "checking"}`}><span className={localImage?.state === "offline" ? "state-dot error" : localImage?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{localImage?.state === "online" ? "\u751f\u56fe\u5728\u7ebf" : localImage?.state === "offline" ? "\u751f\u56fe\u79bb\u7ebf" : "\u68c0\u67e5\u751f\u56fe"}</b><p>{localImage?.message || "\u68c0\u67e5 Z-Image / ComfyUI..."}</p></div></div>
+          <details className="task-log"><summary>{"\u67e5\u770b\u4efb\u52a1\u65e5\u5fd7"}</summary>{(job?.events || []).map((event, index) => <div key={`${event.type}-${index}`}><strong>{event.type}</strong><span>{event.message}</span></div>)}</details>
+          {ruleCount ? <div className="rule-summary"><b>{"\u89c4\u5219"}</b><span>{ruleGroups.length} {"\u7ec4"} / {ruleCount} {"\u6761"}</span></div> : null}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -3255,11 +2864,7 @@ function HistoryPanel({ jobs, onSelect, onDelete, onDeleteMany, onRepair }) {
   );
 }
 
-function ExportPanel({ job }) {
-  return <div className="side-section"><h2>{"\u5bfc\u51fa"}</h2><DownloadLinks job={job} compact />{!job ? <p className="empty">{"\u751f\u6210\u540e\u53ef\u4e0b\u8f7d\u6587\u4ef6"}</p> : null}</div>;
-}
-
-function SettingsPanel({ config, busy, status, models, styleReferences = [], onChange, onSave, onTest, onDetectModels, onUploadStyleReference, onDeleteStyleReference }) {
+function SettingsPanel({ config, busy, models, styleReferences = [], onChange, onSave, onTest, onDetectModels, onUploadStyleReference, onDeleteStyleReference }) {
   const [styleName, setStyleName] = useState("");
   const [styleTone, setStyleTone] = useState("");
   function update(name, value) { onChange((current) => ({ ...current, [name]: value })); }
@@ -3280,7 +2885,6 @@ function SettingsPanel({ config, busy, status, models, styleReferences = [], onC
       <Field label="Base URL"><input value={config.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.openai.com/v1" /></Field>
       <Field label="Model"><select value={config.model || ""} onChange={(event) => update("model", event.target.value)}>{models?.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value={config.model || "gpt-4.1-mini"}>{config.model || "gpt-4.1-mini"}</option>}</select></Field>
       <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>{"\u4fdd\u5b58\u914d\u7f6e"}</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>{"\u6d4b\u8bd5\u8fde\u63a5"}</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>{"\u68c0\u6d4b\u6a21\u578b"}</button></div>
-      {status ? <div className="settings-status">{status}</div> : null}
       <div className="settings-divider" />
       <h2>{"\u98ce\u683c\u53c2\u8003\u5e93"}</h2>
       <p className="settings-note">{"\u4e0a\u4f20\u4e00\u7ec4\u53c2\u8003\u56fe\uff0c\u7cfb\u7edf\u4f1a\u628a\u5b83\u4eec\u4f5c\u4e3a\u6574\u4f53\u8c03\u6027\u8f93\u5165\uff1a\u8272\u5f69\u3001\u7559\u767d\u3001\u8d28\u611f\u3001\u56fe\u7247\u6bd4\u4f8b\u3001\u6587\u5b57\u5bc6\u5ea6\u548c\u6392\u7248\u8282\u594f\u90fd\u4f1a\u53c2\u4e0e\u540e\u7eed PPT \u751f\u6210\u3002"}</p>
@@ -3343,61 +2947,6 @@ function GenerationProgress({ progress }) {
   const value = Math.max(0, Math.min(100, progress?.value || 0));
   const title = progress?.mode === "style-preview" ? "正在生成主视觉方向" : progress?.mode === "optimize" ? "正在优化旧 PPT" : "正在生成 PPT";
   return <div className="generation-progress"><div><b>{title}</b><span>{progress?.label || "正在处理，请稍等..."}</span></div><strong>{value}%</strong><em><i style={{ width: `${value}%` }} /></em></div>;
-}
-
-function StylePreviewGate({ busy, confirmed, job, progress, onConfirm, onCreate, onReset, canCreate = true }) {
-  const images = job?.previewImages || [];
-  const latestReview = Array.isArray(job?.agentReviews) ? job.agentReviews.at(-1) : null;
-  const latestCloudReview = Array.isArray(job?.cloudReviews) ? job.cloudReviews.at(-1) : latestReview?.cloudVisualReview || null;
-  const reviewStatus = latestReview?.status || latestCloudReview?.status || "";
-  const canConfirm = Boolean(job && !busy && reviewStatus !== "block");
-  const criteria = ["图片必须是主角", "标题层级要强", "不像普通商务套壳", "最终仍重建为可编辑对象"];
-  return (
-    <div className={`style-proof-card ${confirmed ? "confirmed" : ""}`}>
-      <div className="style-proof-head">
-        <div>
-          <b>主视觉方向审阅</b>
-          <span>{job ? `已生成 ${images.length || 0} 张视觉方向图。这些只是 visual target，不是最终可编辑 PPT。` : "先生成 3-4 页主视觉方向图，用来判断气质、构图和图片权重；不满意就重做方向，不要进入最终生成。"}</span>
-        </div>
-        <div className="button-row tight">
-          <button className="btn ghost" type="button" onClick={onCreate} disabled={busy || !canCreate}>{busy ? "正在生成方向图" : job ? "重做视觉方向" : canCreate ? "生成主视觉方向" : "先确认大纲和设计方向"}</button>
-          {job && !busy ? <button className="btn primary" type="button" onClick={onConfirm} disabled={!canConfirm}>{confirmed ? "方向已采用" : "采用此方向"}</button> : null}
-          {job ? <button className="btn ghost" type="button" onClick={onReset} disabled={busy}>撤销采用</button> : null}
-        </div>
-      </div>
-      <div className="style-proof-criteria">
-        {criteria.map((item) => <span key={item}>{item}</span>)}
-      </div>
-      {progress?.active ? <StyleProofProgress progress={progress} /> : null}
-      {latestReview ? <div className={`style-proof-qa ${latestReview.status || "pass"}`}><strong>方向自动质检：{latestReview.status === "block" ? "需处理" : latestReview.status === "warn" ? "需人工判断" : "通过"}</strong><span>{latestReview.nextGate === "human-style-confirmation" ? "只代表可进入人工审阅，不代表最终 PPT 已完成。" : "已记录质检结果。"}</span>{latestCloudReview ? <small>{latestCloudReview.used ? (latestCloudReview.summary || latestCloudReview.status) : `云端视觉复审未完成：${latestCloudReview.reason || "not available"}`}</small> : null}<div>{(latestReview.agents || []).slice(0, 5).map((agent) => <em className={agent.status || "pass"} key={agent.id || agent.name}>{agent.name}：{agent.status === "block" ? "需处理" : agent.status === "warn" ? "需确认" : "通过"}</em>)}</div></div> : null}
-      {images.length ? <div className="style-proof-grid">{images.slice(0, 4).map((url, index) => <figure key={`${url}-${index}`}><img src={url} alt={`主视觉方向 ${index + 1}`} /><figcaption>{index === 0 ? "方向基准" : `页面气质 ${index + 1}`}</figcaption></figure>)}</div> : null}
-      {job?.exports?.pptx ? <a className="style-proof-link" href={job.exports.pptx} target="_blank" rel="noreferrer">打开 visual-target.pptx 中间稿</a> : null}
-    </div>
-  );
-}
-
-function StyleProofProgress({ progress }) {
-  const value = Math.max(0, Math.min(100, progress?.value || 0));
-  const stages = [
-    { at: 10, label: "资料" },
-    { at: 35, label: "路由" },
-    { at: 60, label: "方向" },
-    { at: 82, label: "质检" },
-    { at: 95, label: "预览" }
-  ];
-  return (
-    <div className="style-proof-progress">
-      <div className="style-proof-progress-head">
-        <b>视觉方向生成进度</b>
-        <strong>{value}%</strong>
-      </div>
-      <span>{progress?.label || generationProgressLabel(value, "style-preview")}</span>
-      <em><i style={{ width: `${value}%` }} /></em>
-      <div className="style-proof-progress-steps">
-        {stages.map((stage) => <small className={value >= stage.at ? "done" : ""} key={stage.label}>{stage.label}</small>)}
-      </div>
-    </div>
-  );
 }
 
 function toggle(list, item) {
@@ -3569,17 +3118,15 @@ function getStepState({ activeStep, fileIds, job, formats }) {
     if (step.id === activeStep) return [step.id, UI.current];
     if (step.id === "materials") return [step.id, fileIds.length ? UI.done : UI.pending];
     if (step.id === "outline") return [step.id, job ? UI.done : UI.optional];
-    if (step.id === "generate") return [step.id, job?.visualTarget?.sample?.status === "generated" ? UI.done : job ? UI.optional : UI.pending];
-    if (step.id === "visual-project") return [step.id, job?.visualProject?.status ? (job.visualProject.status === "ready" ? UI.done : job.visualProject.status === "blocked" ? UI.pending : UI.pending) : UI.pending];
-    if (step.id === "visual-qa") return [step.id, blocked ? UI.pending : job?.visualCompare?.score ? UI.done : job ? UI.optional : UI.pending];
+    if (step.id === "generate") return [step.id, job ? UI.done : UI.pending];
     if (step.id === "preview") return [step.id, job ? (blocked ? UI.pending : UI.editable) : UI.waitingGenerate];
     if (step.id === "export") return [step.id, job && formats.length && !blocked ? UI.exportable : UI.pending];
-    return [step.id, job?.feedback ? UI.done : UI.optional];
+    return [step.id, UI.pending];
   }));
 }
 
 function isJobBlockedForFinal(job) {
-  return Boolean(job?.editReadiness?.ready === false || job?.editReadiness?.status === "blocked" || job?.hybridQa?.status === "block");
+  return Boolean(job?.editReadiness?.ready === false || job?.editReadiness?.status === "blocked");
 }
 
 function fileExt(name = "") { const ext = name.split(".").pop(); return ext ? ext.slice(0, 4).toUpperCase() : "FILE"; }
