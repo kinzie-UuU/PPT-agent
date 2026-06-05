@@ -24,6 +24,7 @@ Treat each PPT page as a poster-like editable composition: background or hero vi
 - Do not crop out the product center, brand mark, packaging, or critical source text.
 - One slide should carry one main message. Split dense pages instead of shrinking text into a document page.
 - Use real text objects for user-editable content; preview PNGs are evidence, not the editable source.
+- Canvas is not the editor. Editable pages must use a layer model: TextLayer, ImageLayer, ShapeLayer, selectedLayerId, property panel, and renderer all update a persistent Layer Store.
 - AI may propose structure, diagnosis, and copy; code owns coordinates, fonts, colors, image fit, and PPTX export.
 - Run checks before claiming completion: `npm.cmd run check`, `npm.cmd run build`, and visual/preview inspection when layout or rendering changes.
 
@@ -35,6 +36,7 @@ Load references only when needed:
 - `references/routing-and-layouts.md`: deterministic deck routing and layout rhythm rules.
 - `references/old-ppt-redesign.md`: SlideIR, diagnosis, page classification, and redesign strategy.
 - `references/image-composition.md`: no-distortion image handling, screenshot framing, hero/background decisions.
+- `references/editable-layers.md`: Canvas + Layer editing model for selectable TextLayer/ImageLayer/ShapeLayer objects.
 - `references/style-systems.md`: absorbed style knowledge from Guizang, frontend slides, and beautiful HTML templates.
 - `references/template-layouts.md`: template profiling, placeholder mapping, and reusable layout gates learned from PPT tooling projects.
 - `references/orchestration.md`: command layer rules for combining uploaded material preprocessing, PPT templates, style libraries, local tools, cloud review, and human confirmation.

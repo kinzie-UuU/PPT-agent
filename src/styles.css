@@ -1709,6 +1709,43 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   z-index: 3;
   pointer-events: none;
 }
+.text-layer-property-panel {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: auto repeat(6, minmax(68px, 1fr));
+  gap: 7px;
+  align-items: end;
+  padding: 8px;
+  border: 1px solid rgba(40,84,216,.24);
+  border-radius: 8px;
+  background: rgba(255,255,255,.94);
+  box-shadow: 0 14px 30px rgba(21,25,34,.16);
+  pointer-events: auto;
+}
+.text-layer-property-panel b {
+  align-self: center;
+  color: var(--blue);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.text-layer-property-panel label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+.text-layer-property-panel input,
+.text-layer-property-panel select {
+  min-height: 26px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  font-size: 11px;
+}
 .canvas-asset-layer {
   position: absolute;
   inset: 0;
@@ -1767,6 +1804,11 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   background: rgba(255,255,255,.18);
   box-shadow: 0 0 0 1px rgba(255,255,255,.28);
   pointer-events: auto;
+}
+.canvas-text-box.selected {
+  border-color: var(--blue);
+  background: rgba(255,255,255,.42);
+  box-shadow: 0 0 0 3px rgba(40,84,216,.18), 0 10px 24px rgba(21,25,34,.12);
 }
 .canvas-text-box:focus-within {
   border-color: var(--blue);

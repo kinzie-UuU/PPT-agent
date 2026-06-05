@@ -906,10 +906,22 @@ function applyCanvasEditsToTexts(texts = [], canvasEdits = null) {
   if (!canvasEdits || typeof canvasEdits !== "object") return texts;
   for (const text of texts) {
     const edit = canvasEdits[canvasKeyForText(text)];
-    if (!edit?.box) continue;
-    text.box = percentBoxToInches(edit.box);
+    if (edit?.box) text.box = percentBoxToInches(edit.box);
+    if (edit?.style) text.style = { ...(text.style || {}), ...normalizeCanvasStyleForSceneGraph(edit.style) };
   }
   return texts;
+}
+
+function normalizeCanvasStyleForSceneGraph(style = {}) {
+  const color = String(style.color || "").replace(/^#/, "").toUpperCase();
+  return {
+    fontSize: Math.max(6, Math.min(72, Number(style.fontSize || 11))),
+    bold: ["600", "700", "800", "900", "bold", true].includes(style.fontWeight),
+    color: /^[0-9A-F]{6}$/.test(color) ? color : undefined,
+    align: ["left", "center", "right"].includes(style.textAlign) ? style.textAlign : undefined,
+    lineSpacingMultiple: Math.max(1, Math.min(2.4, Number(style.lineHeight || 1.2))),
+    letterSpacing: Math.max(0, Math.min(8, Number(style.letterSpacing || 0)))
+  };
 }
 
 function canvasKeyForText(text = {}) {

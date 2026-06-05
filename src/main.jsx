@@ -2039,15 +2039,29 @@ const CANVAS_LAYOUT_BOXES = {
 
 function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
   const [drag, setDrag] = useState(null);
+  const [selectedLayerId, setSelectedLayerId] = useState("");
   const canvasObjects = useMemo(() => buildCanvasObjects(draft, slide), [draft, slide]);
   const edits = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, canvasObjects);
+  const selectedObject = canvasObjects.find((item) => item.key === selectedLayerId) || canvasObjects[0] || null;
+  const selectedEdit = selectedObject ? edits[selectedObject.key] || { box: selectedObject.box, style: selectedObject.style } : null;
+
+  useEffect(() => {
+    if (!selectedLayerId && canvasObjects[0]?.key) setSelectedLayerId(canvasObjects[0].key);
+    if (selectedLayerId && !canvasObjects.some((item) => item.key === selectedLayerId)) setSelectedLayerId(canvasObjects[0]?.key || "");
+  }, [canvasObjects, selectedLayerId]);
 
   function patchCanvasEdit(key, patch) {
-    const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits);
+    const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, canvasObjects);
     updateDraft?.("canvasEdits", {
       ...current,
       [key]: { ...current[key], ...patch }
     });
+  }
+
+  function patchLayerStyle(key, patch) {
+    const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, canvasObjects);
+    const base = current[key] || {};
+    patchCanvasEdit(key, { style: { ...(base.style || {}), ...patch } });
   }
 
   function patchText(object, value) {
@@ -2102,13 +2116,26 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
 
   return (
     <div className="canvas-text-layer">
+      {selectedObject ? (
+        <div className="text-layer-property-panel">
+          <b>{selectedObject.label}</b>
+          <label>字号<input type="number" min="6" max="72" value={selectedEdit?.style?.fontSize || selectedObject.style.fontSize} onChange={(event) => patchLayerStyle(selectedObject.key, { fontSize: Number(event.target.value) })} /></label>
+          <label>颜色<input type="color" value={selectedEdit?.style?.color || selectedObject.style.color} onChange={(event) => patchLayerStyle(selectedObject.key, { color: event.target.value })} /></label>
+          <label>字重<select value={selectedEdit?.style?.fontWeight || selectedObject.style.fontWeight} onChange={(event) => patchLayerStyle(selectedObject.key, { fontWeight: event.target.value })}><option value="400">常规</option><option value="600">半粗</option><option value="800">粗体</option></select></label>
+          <label>对齐<select value={selectedEdit?.style?.textAlign || selectedObject.style.textAlign} onChange={(event) => patchLayerStyle(selectedObject.key, { textAlign: event.target.value })}><option value="left">左</option><option value="center">中</option><option value="right">右</option></select></label>
+          <label>行距<input type="number" min="1" max="2.4" step="0.1" value={selectedEdit?.style?.lineHeight || selectedObject.style.lineHeight} onChange={(event) => patchLayerStyle(selectedObject.key, { lineHeight: Number(event.target.value) })} /></label>
+          <label>字距<input type="number" min="0" max="8" step="0.2" value={selectedEdit?.style?.letterSpacing || selectedObject.style.letterSpacing} onChange={(event) => patchLayerStyle(selectedObject.key, { letterSpacing: Number(event.target.value) })} /></label>
+        </div>
+      ) : null}
       {canvasObjects.map((field) => {
-        const edit = edits[field.key] || { box: field.box };
+        const edit = edits[field.key] || { box: field.box, style: field.style };
         const box = edit.box || field.box;
+        const style = { ...field.style, ...(edit.style || {}) };
         return (
           <div
-            className={`canvas-text-box canvas-${field.key}`}
+            className={`canvas-text-box canvas-${field.key} canvas-role-${field.role} ${selectedLayerId === field.key ? "selected" : ""}`}
             key={field.key}
+            onClick={(event) => { event.stopPropagation(); setSelectedLayerId(field.key); }}
             style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}
           >
             <button type="button" className="canvas-drag-handle" onPointerDown={(event) => startDrag(event, field.key)} title="拖动位置">{field.label}</button>
@@ -2116,7 +2143,16 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
               value={field.value || ""}
               onChange={(event) => patchText(field, event.target.value)}
               onBlur={onSave}
-              onClick={(event) => event.stopPropagation()}
+              onFocus={() => setSelectedLayerId(field.key)}
+              onClick={(event) => { event.stopPropagation(); setSelectedLayerId(field.key); }}
+              style={{
+                fontSize: `${style.fontSize}px`,
+                fontWeight: style.fontWeight,
+                color: style.color,
+                textAlign: style.textAlign,
+                lineHeight: style.lineHeight,
+                letterSpacing: `${style.letterSpacing}px`
+              }}
             />
           </div>
         );
@@ -2146,7 +2182,16 @@ function buildCanvasObjects(draft = {}, slide = {}) {
 }
 
 function buildCanvasObject(key, label, value, box, path = key, index = null) {
-  return { key, label, value: String(value || ""), box, path, index };
+  const role = key === "title" ? "title" : key === "subtitle" ? "subtitle" : path === "dataPoint" ? "data" : "body";
+  const style = defaultCanvasTextStyle(role);
+  return { key, label, value: String(value || ""), box, path, index, role, style };
+}
+
+function defaultCanvasTextStyle(role = "body") {
+  if (role === "title") return { fontSize: 30, fontWeight: "800", color: "#1f261f", textAlign: "left", lineHeight: 1.08, letterSpacing: 0 };
+  if (role === "subtitle") return { fontSize: 14, fontWeight: "400", color: "#667085", textAlign: "left", lineHeight: 1.25, letterSpacing: 0 };
+  if (role === "data") return { fontSize: 15, fontWeight: "700", color: "#2854d8", textAlign: "left", lineHeight: 1.15, letterSpacing: 0 };
+  return { fontSize: 12, fontWeight: "400", color: "#263238", textAlign: "left", lineHeight: 1.28, letterSpacing: 0 };
 }
 
 function stackBox(startBox, index) {
@@ -2173,10 +2218,23 @@ function normalizeCanvasEdits(value = {}, canvasObjects = []) {
         y: clamp(Number(box.y ?? field?.box?.y), 0, 96),
         w: clamp(Number(box.w ?? field?.box?.w), 8, 96),
         h: clamp(Number(box.h ?? field?.box?.h), 4, 96)
-      }
+      },
+      style: normalizeCanvasTextStyle(edits[key]?.style, field?.style)
     };
     return acc;
   }, {});
+}
+
+function normalizeCanvasTextStyle(value = {}, fallback = {}) {
+  const style = { ...defaultCanvasTextStyle("body"), ...(fallback || {}), ...(value || {}) };
+  return {
+    fontSize: clamp(Number(style.fontSize), 6, 72),
+    fontWeight: String(style.fontWeight || "400"),
+    color: /^#[0-9a-f]{6}$/i.test(style.color || "") ? style.color : "#263238",
+    textAlign: ["left", "center", "right"].includes(style.textAlign) ? style.textAlign : "left",
+    lineHeight: clamp(Number(style.lineHeight), 1, 2.4),
+    letterSpacing: clamp(Number(style.letterSpacing), 0, 8)
+  };
 }
 
 function clamp(value, min, max) {
