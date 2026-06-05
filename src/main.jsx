@@ -347,6 +347,7 @@ function App() {
   const templateHit = getTemplateRenderHit(currentTemplate, dirty ? liveSlide : currentSlide);
   const selectedFileNames = useMemo(() => files.map((file) => file.originalName).join("、"), [files]);
   const hasUploadedMaterials = files.length > 0;
+  const intakeReadiness = useMemo(() => getIntakeReadiness(form.notes, files), [form.notes, files]);
   const inferredMaterials = useMemo(() => inferMaterialTypes(files), [files]);
   const completion = useMemo(() => getCompletion({ form, fileIds, job }), [form, fileIds, job]);
   const stepState = useMemo(() => getStepState({ activeStep, fileIds, job, formats }), [activeStep, fileIds, job, formats]);
@@ -398,19 +399,19 @@ function App() {
     const text = intakeDraft.trim();
     if (!text && fileIds.length === 0) return;
     const userText = text || "我已上传资料，请先理解内容。";
-    const actionable = text ? !isMetaIntakeQuestion(text) : fileIds.length > 0;
+    const intent = analyzeIntakeMessage(userText, { files, notes: form.notes });
     const now = Date.now();
     setIntakeMessages((current) => [
       ...current,
       { id: `user-${now}`, role: "user", text: userText },
-      { id: `assistant-${now}`, role: "assistant", text: buildIntakeReply(userText, files) }
+      { id: `assistant-${now}`, role: "assistant", text: intent.reply, kind: intent.kind }
     ]);
-    if (text && actionable) {
+    if (text && intent.actionable) {
       setForm((current) => ({ ...current, notes: [current.notes, text].filter(Boolean).join("\n") }));
     }
     setIntakeDraft("");
     setError("");
-    setStatus(actionable ? "已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。" : "已回答这条问题，没有把它当成 PPT 需求。");
+    setStatus(intent.actionable ? "已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。" : "已作为对话处理，没有把它当成 PPT 需求。");
   }
 
   function handleIntakeKeyDown(event) {
@@ -1127,12 +1128,26 @@ function App() {
           {activeStep === "materials" && (
             <SectionCard className="intake-card">
               <div className="chat-intake">
+                <div className="intake-agent-panel">
+                  <div>
+                    <b>PPT Agent</b>
+                    <span>{intakeReadiness.label}</span>
+                  </div>
+                  <small>{intakeReadiness.hint}</small>
+                </div>
                 {intakeMessages.length > 0 && (
                   <div className="intake-thread" aria-live="polite">
                     {intakeMessages.map((message) => (
                       <div className={`intake-message ${message.role}`} key={message.id}>
                         {message.text}
                       </div>
+                    ))}
+                  </div>
+                )}
+                {!intakeMessages.length && (
+                  <div className="intake-suggestions">
+                    {["你可以干嘛？", "我要从零做一份提案 PPT", "我想优化旧 PPT", "先问我几个问题"].map((item) => (
+                      <button type="button" key={item} onClick={() => setIntakeDraft(item)}>{item}</button>
                     ))}
                   </div>
                 )}
@@ -1169,10 +1184,10 @@ function App() {
                 )}
                 {(form.notes.trim() || fileIds.length > 0) && (
                   <div className="intake-next-actions">
-                    <button className="btn primary" type="button" onClick={() => planOutline()} disabled={outlineBusy}>
+                    <button className="btn primary" type="button" onClick={() => planOutline()} disabled={outlineBusy || !intakeReadiness.ready}>
                       {outlineBusy ? "正在理解资料" : "开始理解并生成大纲"}
                     </button>
-                    <span>不会直接生成完整 PPT，会先出可确认的大纲。</span>
+                    <span>{intakeReadiness.ready ? "不会直接生成完整 PPT，会先出可确认的大纲。" : intakeReadiness.nextQuestion}</span>
                   </div>
                 )}
                 {files.length > 0 && (
@@ -3313,6 +3328,54 @@ function inferMaterialTypes(files = []) {
   return [...types];
 }
 
+function analyzeIntakeMessage(text = "", context = {}) {
+  const normalized = String(text || "").trim();
+  const files = context.files || [];
+  const readiness = getIntakeReadiness([context.notes, normalized].filter(Boolean).join("\n"), files);
+  if (isMetaIntakeQuestion(normalized)) {
+    return {
+      kind: "meta",
+      actionable: false,
+      reply: "我是一个 PPT 设计智能体。你可以直接和我聊：从零做 PPT、优化旧 PPT、提炼 PDF/文档、统一风格、先出大纲、先出样稿、再导出可编辑 PPTX。你不用先填表，我会先追问关键信息。"
+    };
+  }
+  if (/先问|问我|引导|不知道怎么说|帮我梳理/.test(normalized)) {
+    return {
+      kind: "question",
+      actionable: false,
+      reply: "可以。先回答三个点就够：1. 这份 PPT 给谁看？2. 想让对方做什么决定？3. 偏商务、科技、东方自然、画册，还是你有参考图？"
+    };
+  }
+  if (/开始|继续|生成大纲|出大纲|下一步/.test(normalized) && readiness.ready) {
+    return {
+      kind: "ready",
+      actionable: false,
+      reply: "信息已经够我先规划。点击下面的“开始理解并生成大纲”，我会先给你可确认的大纲，不会直接生成整套 PPT。"
+    };
+  }
+  if (isVaguePptRequest(normalized) && !files.length) {
+    return {
+      kind: "question",
+      actionable: false,
+      reply: "可以做，但这句话还太宽。请补一句：主题是什么、给谁看、希望几页左右、偏什么风格。比如：做一份给销售团队看的端午礼盒提案，12 页，东方自然风。"
+    };
+  }
+  if (/优化|重塑|重做|改旧稿|旧\s*PPT|原稿/.test(normalized) && !files.length) {
+    return {
+      kind: "upload-needed",
+      actionable: true,
+      reply: "我理解你想优化旧稿。请先上传 PPT/PDF/图片资料，我会识别原文字、图片、素材身份，再让你选择“保留结构优化”还是“重新规划”。"
+    };
+  }
+  return {
+    kind: readiness.ready ? "ready" : "collecting",
+    actionable: true,
+    reply: readiness.ready
+      ? "我已经记录需求，信息足够先生成一版可确认的大纲。你也可以继续补充风格、受众或参考资料。"
+      : `我已记录这条需求。还差一步：${readiness.nextQuestion}`
+  };
+}
+
 function buildIntakeReply(text = "", files = []) {
   const normalized = String(text || "").trim();
   const hasFiles = files.length > 0;
@@ -3327,6 +3390,47 @@ function buildIntakeReply(text = "", files = []) {
 
 function isMetaIntakeQuestion(text = "") {
   return /你可以干嘛|你能干嘛|能干嘛|怎么用|如何使用|可以做什么|有什么功能|help/i.test(String(text || ""));
+}
+
+function isVaguePptRequest(text = "") {
+  const value = String(text || "").trim();
+  if (!/ppt|PPT|幻灯片|演示|提案|汇报|路演/.test(value)) return false;
+  return value.length < 18 && !/[，,。；;：:]/.test(value);
+}
+
+function getIntakeReadiness(notes = "", files = []) {
+  const text = String(notes || "").trim();
+  const hasFiles = files.length > 0;
+  const hasTopic = /[\u4e00-\u9fa5A-Za-z0-9]{4,}/.test(text);
+  const hasAudience = /客户|老板|领导|销售|团队|投资人|用户|渠道|内部|外部|评审|招商|经销商|学校|学生|老师|政府|甲方|乙方/.test(text);
+  const hasGoal = /提案|汇报|介绍|路演|培训|发布|复盘|招商|销售|成交|说明|展示|优化|重塑|生成|制作|做一份|做个/.test(text);
+  const hasStyle = /风格|参考|东方|自然|科技|画册|黑白|蓝白|暗黑|轻盈|渐变|高级|简洁|商务|品牌/.test(text);
+  if (hasFiles) {
+    return {
+      ready: true,
+      label: "已收到资料",
+      hint: "可以先理解资料，再进入大纲确认。",
+      nextQuestion: "可以补充目标、受众或风格，也可以先生成大纲。"
+    };
+  }
+  if (hasTopic && hasGoal && (hasAudience || hasStyle)) {
+    return {
+      ready: true,
+      label: "需求基本够用",
+      hint: "可以先生成大纲，后面再补风格和素材。",
+      nextQuestion: "信息够用。"
+    };
+  }
+  const missing = [];
+  if (!hasTopic || !hasGoal) missing.push("主题和用途");
+  if (!hasAudience) missing.push("给谁看");
+  if (!hasStyle) missing.push("希望的风格或参考");
+  return {
+    ready: false,
+    label: text ? "正在收集需求" : "等待你发起对话",
+    hint: text ? "我会先追问必要信息，再进入大纲。" : "你可以问能力，也可以直接说要做什么 PPT。",
+    nextQuestion: `请补充${missing.slice(0, 2).join("、")}。`
+  };
 }
 
 function formatBytes(value) { if (!value) return "-"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }

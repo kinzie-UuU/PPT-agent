@@ -394,6 +394,40 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
   min-height: calc(100vh - 252px);
 }
 
+.intake-agent-panel {
+  display: flex;
+  width: min(760px, 100%);
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(25,32,48,.08);
+  border-radius: 12px;
+  background: rgba(255,255,255,.72);
+  box-shadow: 0 12px 32px rgba(21,25,34,.05);
+}
+
+.intake-agent-panel div {
+  display: grid;
+  gap: 2px;
+}
+
+.intake-agent-panel b {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.intake-agent-panel span,
+.intake-agent-panel small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.intake-agent-panel small {
+  text-align: right;
+}
+
 .chat-box {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -503,6 +537,28 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
   max-height: min(42vh, 360px);
   overflow: auto;
   padding: 2px 2px 4px;
+}
+
+.intake-suggestions {
+  display: flex;
+  width: min(760px, 100%);
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.intake-suggestions button {
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid rgba(40,84,216,.2);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--blue);
+  font-size: 12px;
+}
+
+.intake-suggestions button:hover {
+  background: #eef3ff;
 }
 
 .intake-message {
