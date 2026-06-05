@@ -7,17 +7,25 @@ import fsSync from "fs";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
 import { addStyleGroup, addStyleReference, addUpload, deleteJob, deleteStyleGroup, deleteStyleReference, deleteUpload, ensureDirs, getJob, getUploads, listJobs, listStyleGroups, listStyleReferences, makeId, outputDir, rootDir, saveJob, updateStyleReference, uploadDir } from "./store.js";
-import { buildDeck, exportWithPowerPoint, extractPptxImages, extractText, renderPptxPreview } from "./ppt.js";
+import { auditPptxIntake, buildDeck, exportWithPowerPoint, extractPptxImages, extractText, renderPptxPreview } from "./ppt.js";
 import { generateDeckPlan, reviseSlide } from "./ai.js";
 import { validateDeck } from "./validateDeck.js";
 import { getDesignSystem } from "./designSystem.js";
 import { buildMaterialBrief } from "./materialBrief.js";
 import { routeDeck } from "./deckRouter.js";
 import { addEvent, makeEvent } from "./events.js";
-import { reviewDeckVisuals } from "./visualReview.js";
+import { reviewDeckVisuals, reviewSourceIntake } from "./visualReview.js";
 import { checkLocalImageStatus, generateLocalImage } from "./localImage.js";
+import { generateCloudImage } from "./cloudImage.js";
 import { analyzeGeneratedImage } from "./imageQa.js";
 import { analyzePptxAesthetic, compactAestheticReport } from "./pptAesthetic.js";
+import { analyzePptxTemplate, compactTemplateProfile } from "./templateProfile.js";
+import { cutoutImage } from "./matting.js";
+import { buildEditableRebuildPlan } from "./editableManifest.js";
+import { buildSceneGraphRepairRecord, buildVisualTargetSamplePrompt, compareRenderedPreviewToVisualTarget, ensureSceneGraphForJob } from "./sceneGraph.js";
+import { buildAssetManifest, validateAssetManifest } from "./assetManifest.js";
+import { ensureVisualProjectForJob, generateVisualProjectSlides } from "./visualProject.js";
+import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -184,7 +192,7 @@ app.post("/api/uploads", upload.array("files"), async (req, res, next) => {
   try {
     const records = [];
     for (const file of req.files || []) records.push(await addUpload(file));
-    res.json({ files: records });
+    res.json({ files: records.map(normalizeUploadRecord) });
   } catch (error) {
     next(error);
   }
@@ -222,7 +230,7 @@ app.post("/api/style-references", upload.array("files"), async (req, res, next) 
 app.patch("/api/style-references/:id", async (req, res, next) => {
   try {
     const updated = await updateStyleReference(req.params.id, req.body || {});
-    if (!updated) return res.status(404).json({ error: "风格参考图不存在" });
+    if (!updated) return res.status(404).json({ error: "风格参考图不存在。" });
     res.json({ reference: normalizeStyleReference(updated) });
   } catch (error) {
     next(error);
@@ -260,7 +268,7 @@ app.post("/api/style-groups", async (req, res, next) => {
 app.delete("/api/style-groups/:id", async (req, res, next) => {
   try {
     const deleted = await deleteStyleGroup(req.params.id);
-    if (!deleted) return res.status(404).json({ error: "自定义风格库不存在" });
+    if (!deleted) return res.status(404).json({ error: "自定义风格库不存在。" });
     res.json({ ok: true, deleted: normalizeStyleGroup(deleted) });
   } catch (error) {
     next(error);
@@ -285,6 +293,31 @@ async function expandUploadsWithPptxImages(uploads = []) {
         };
         console.warn(`PPTX aesthetic analysis failed for ${file.originalName || file.id}: ${error.message}`);
       }
+      try {
+        nextFile.templateProfile = compactTemplateProfile(await analyzePptxTemplate(file));
+      } catch (error) {
+        nextFile.templateProfile = {
+          version: 1,
+          deckName: file.originalName || path.basename(file.path || ""),
+          error: error.message || "PPTX template profile failed",
+          layouts: [],
+          slides: []
+        };
+        console.warn(`PPTX template profile failed for ${file.originalName || file.id}: ${error.message}`);
+      }
+      try {
+        nextFile.extractionAudit = await auditPptxIntake(file);
+      } catch (error) {
+        nextFile.extractionAudit = {
+          version: 1,
+          deckName: file.originalName || path.basename(file.path || ""),
+          error: error.message || "PPTX intake audit failed",
+          slideCount: 0,
+          slides: [],
+          warnings: ["pptx-intake-audit-failed"]
+        };
+        console.warn(`PPTX intake audit failed for ${file.originalName || file.id}: ${error.message}`);
+      }
     }
     enrichedUploads.push(nextFile);
     try {
@@ -299,7 +332,7 @@ async function expandUploadsWithPptxImages(uploads = []) {
 function makeAestheticDiagnosisEvent(materialBrief = {}) {
   const diagnosis = materialBrief.sourceReport?.aestheticDiagnosis;
   if (!diagnosis) return null;
-  return makeEvent("aesthetic-diagnosis", `旧稿美学诊断：${diagnosis.overallScore ?? "-"} 分 / 低分页 ${(diagnosis.lowScoreSlides || []).length} 页`, {
+  return makeEvent("aesthetic-diagnosis", `Old deck aesthetic diagnosis: ${diagnosis.overallScore ?? "-"} / low-score ${(diagnosis.lowScoreSlides || []).length} slides`, {
     overallScore: diagnosis.overallScore,
     lowScoreSlides: diagnosis.lowScoreSlides || [],
     highDensitySlides: diagnosis.highDensitySlides || [],
@@ -316,7 +349,7 @@ async function createJob(req, res, mode) {
     try {
       extracted.push({ name: file.originalName, text: await extractText(file) });
     } catch (error) {
-      extracted.push({ name: file.originalName, text: `资料抽取失败：${error.message}` });
+      extracted.push({ name: file.originalName, text: `Extraction failed: ${error.message}` });
     }
   }
   const materialBrief = buildMaterialBrief([
@@ -324,11 +357,11 @@ async function createJob(req, res, mode) {
     {
       name: "输入说明",
       text: [
-        req.body.projectName ? `项目名称：${req.body.projectName}` : "",
-        req.body.audience ? `目标对象：${req.body.audience}` : "",
-        req.body.copyMode ? `生成类型：${req.body.copyMode}` : "",
-        req.body.notes ? `补充说明：${req.body.notes}` : "",
-        Array.isArray(req.body.materials) && req.body.materials.length ? `资料类型：${req.body.materials.join("、")}` : ""
+        req.body.projectName ? `Project: ${req.body.projectName}` : "",
+        req.body.audience ? `Audience: ${req.body.audience}` : "",
+        req.body.copyMode ? `Mode: ${req.body.copyMode}` : "",
+        req.body.notes ? `Notes: ${req.body.notes}` : "",
+        Array.isArray(req.body.materials) && req.body.materials.length ? `Materials: ${req.body.materials.join(", ")}` : ""
       ].filter(Boolean).join("\n")
     }
   ]);
@@ -338,33 +371,26 @@ async function createJob(req, res, mode) {
     includeRiskChecklist: req.body.includeRiskChecklist !== false
   };
   attachSourceRecognitionReport(materialBrief, uploads);
+  await attachCloudSourceAnalysis(materialBrief, uploads, "source-intake");
   const baseRoutePlan = routeDeck({ mode, input: { ...req.body, styleReferences }, materialBrief, uploads });
   const routePlan = applyOutlinePlan(baseRoutePlan, req.body.outlinePlan);
   const input = { ...req.body, extracted, materialBrief, routePlan, styleReferences: styleReferences.map(compactStyleReference) };
-  if (false && materialBrief.sourceReport?.aestheticDiagnosis) {
-    const diagnosis = materialBrief.sourceReport.aestheticDiagnosis;
-    recordStep?.("aesthetic-diagnosis", "旧稿美学诊断", "done", `${diagnosis.overallScore ?? "-"} 分 / 低分页 ${(diagnosis.lowScoreSlides || []).length} 页`, {
-      overallScore: diagnosis.overallScore,
-      lowScoreSlides: diagnosis.lowScoreSlides || [],
-      highDensitySlides: diagnosis.highDensitySlides || []
-    });
-  }
   const ai = await generateDeckPlan(input, mode);
   let validated = validateDeck(ai.deck, routePlan);
   const imageBinding = applySourceImageSlots(validated.deck, routePlan, uploads);
   if (imageBinding.report.changedSlides) validated = validateDeck(imageBinding.deck, routePlan);
   materialBrief.imageSlotReport = imageBinding.report;
   const events = [
-    makeEvent("route", `智能路由：${routePlan.deckType} / ${routePlan.targetSlides} 页 / ${routePlan.layoutSequence.map((step) => step.layout).join(" > ")}`, {
+    makeEvent("route", `Route: ${routePlan.deckType} / ${routePlan.targetSlides} slides / ${routePlan.layoutSequence.map((step) => step.layout).join(" > ")}`, {
       deckType: routePlan.deckType,
       targetSlides: routePlan.targetSlides,
       layoutSequence: routePlan.layoutSequence.map((step) => step.layout),
       reasons: routePlan.routingReasons
     }),
-    makeEvent("upload", `读取 ${uploads.length} 个上传文件`, { files: uploads.map((file) => file.originalName) }),
+    makeEvent("upload", `Read ${uploads.length} uploaded files`, { files: uploads.map((file) => file.originalName) }),
     makeEvent("extract", materialBrief.summary || "资料已抽取", { inputStrength: materialBrief.inputStrength, charCount: materialBrief.charCount, pageCount: materialBrief.pageCount, confirmationFields: materialBrief.confirmationFields }),
-    makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `已使用 AI 生成设计计划：${ai.provider?.model || "unknown"}` : "未使用 AI，已采用本地资料驱动 fallback", { warning: ai.warning || null, provider: ai.provider || null }),
-    makeEvent("validate", `校验完成，${validated.warnings.length} 个提示`, { warnings: validated.warnings }),
+    makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `AI design plan generated: ${ai.provider?.model || "unknown"}` : "Local fallback design plan generated", { warning: ai.warning || null, provider: ai.provider || null }),
+    makeEvent("validate", `Validation completed: ${validated.warnings.length} warnings`, { warnings: validated.warnings }),
     makeEvent("render", "开始生成 PPTX")
   ];
   const aestheticEvent = makeAestheticDiagnosisEvent(materialBrief);
@@ -378,7 +404,7 @@ async function createJob(req, res, mode) {
     quality: enrichQuality(validated.quality, uploads, materialBrief, routePlan),
     aiUsed: ai.aiUsed,
     aiProvider: ai.provider || null,
-    warning: [ai.warning, ...validated.warnings].filter(Boolean).join("；") || null,
+    warning: [ai.warning, ...validated.warnings].filter(Boolean).join("; ") || null,
     files: uploads,
     exports: {},
     previewImages: [],
@@ -386,7 +412,13 @@ async function createJob(req, res, mode) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
+  attachAssetFirstState(job, materialBrief, routePlan);
+  await ensureVisualTargetSampleForJob(job, { steps: req.body?.visualTargetSteps || 8 });
+  await ensureVisualProjectForJob(job);
+  await maybeRunOneClickVisualProject(job, req.body || {});
   job.exports.pptx = await buildDeck(job);
+  job.exports.editablePptx = job.exports.pptx;
+  if (job.visualProject?.visualTargetPptxPath) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
   job.exportMeta = collectExportMeta(job.exports);
   addEvent(job, "rendered", "PPTX 已生成", { pptx: job.exports.pptx });
   await refreshPreview(job, "已生成");
@@ -403,7 +435,7 @@ async function buildAgentContext(req, mode) {
     try {
       extracted.push({ name: file.originalName, text: await extractText(file) });
     } catch (error) {
-      extracted.push({ name: file.originalName, text: `资料抽取失败：${error.message}` });
+      extracted.push({ name: file.originalName, text: `Extraction failed: ${error.message}` });
     }
   }
   const materialBrief = buildMaterialBrief([
@@ -411,11 +443,11 @@ async function buildAgentContext(req, mode) {
     {
       name: "输入说明",
       text: [
-        req.body.projectName ? `项目名称：${req.body.projectName}` : "",
-        req.body.audience ? `目标对象：${req.body.audience}` : "",
-        req.body.copyMode ? `生成类型：${req.body.copyMode}` : "",
-        req.body.notes ? `补充说明：${req.body.notes}` : "",
-        Array.isArray(req.body.materials) && req.body.materials.length ? `资料类型：${req.body.materials.join("、")}` : ""
+        req.body.projectName ? `Project: ${req.body.projectName}` : "",
+        req.body.audience ? `Audience: ${req.body.audience}` : "",
+        req.body.copyMode ? `Mode: ${req.body.copyMode}` : "",
+        req.body.notes ? `Notes: ${req.body.notes}` : "",
+        Array.isArray(req.body.materials) && req.body.materials.length ? `Materials: ${req.body.materials.join(", ")}` : ""
       ].filter(Boolean).join("\n")
     }
   ]);
@@ -425,6 +457,7 @@ async function buildAgentContext(req, mode) {
     includeRiskChecklist: req.body.includeRiskChecklist !== false
   };
   attachSourceRecognitionReport(materialBrief, uploads);
+  await attachCloudSourceAnalysis(materialBrief, uploads, "agent-source-intake");
   const baseRoutePlan = routeDeck({ mode, input: { ...req.body, styleReferences }, materialBrief, uploads });
   const routePlan = applyOutlinePlan(baseRoutePlan, req.body.outlinePlan);
   const input = { ...req.body, extracted, materialBrief, routePlan, styleReferences: styleReferences.map(compactStyleReference) };
@@ -438,9 +471,10 @@ async function runAgentJob(req, res, mode) {
     agentSteps.push({ id, label, status, summary, details, at: new Date().toISOString() });
   };
 
-  recordStep("intent", "识别任务意图", "done", mode === "optimize" ? "优化旧 PPT" : "生成新 PPT");
+  recordStep("intent", "识别任务意图", "done", mode === "optimize" ? "优化 PPT" : "生成 PPT");
   recordStep("extract", "读取资料", "running", "正在抽取上传资料和用户需求");
-  const { uploads, materialBrief, routePlan, input } = await buildAgentContext(req, mode);
+  const { uploads, materialBrief, routePlan: initialRoutePlan, input } = await buildAgentContext(req, mode);
+  let routePlan = initialRoutePlan;
   const styleProofConfirmation = await buildStyleProofConfirmation(req.body.styleProofJobId);
   if (styleProofConfirmation) {
     input.styleProofConfirmation = styleProofConfirmation;
@@ -452,7 +486,7 @@ async function runAgentJob(req, res, mode) {
   const agentPlan = buildAgentPlan(agentDecision, routePlan);
   agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: materialBrief.summary || "资料已读取" };
 
-  recordStep("route", "规划页面路线", "done", `${routePlan.deckType} / ${routePlan.targetSlides} 页`, {
+  recordStep("route", "Plan route", "done", `${routePlan.deckType} / ${routePlan.targetSlides} slides`, {
     layouts: routePlan.layoutSequence?.map((item) => item.layout) || []
   });
   recordStep("generate", "生成结构化 Deck", "running", "正在调用 AI 或本地 fallback");
@@ -469,7 +503,7 @@ async function runAgentJob(req, res, mode) {
     details: { warning: ai.warning || null }
   };
 
-  recordStep("validate", "交付自检", "done", `${validated.deck.slides?.length || 0} 页 / ${validated.warnings.length} 条提示`);
+  recordStep("validate", "Delivery QA", "done", `${validated.deck.slides?.length || 0} slides / ${validated.warnings.length} warnings`);
   const firstAssessment = classifyAgentQuality(validated.deck, quality, routePlan, materialBrief);
   const agentFixes = [];
   if (shouldAgentAutoRepair(firstAssessment)) {
@@ -491,25 +525,25 @@ async function runAgentJob(req, res, mode) {
       afterIssues: afterAssessment
     };
     agentFixes.push(fix);
-    agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: `已自动修复 ${fix.changes.length || 1} 类问题`, details: fix };
+    agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: `Auto repaired ${fix.changes.length || 1} issue groups`, details: fix };
   } else {
     recordStep("repair", "自动修复", "skipped", "未发现需要自动修复的阻断问题");
   }
 
   const events = [
-    makeEvent("route", `智能路由：${routePlan.deckType} / ${routePlan.targetSlides} 页 / ${routePlan.layoutSequence.map((step) => step.layout).join(" > ")}`, {
+    makeEvent("route", `Route: ${routePlan.deckType} / ${routePlan.targetSlides} slides / ${routePlan.layoutSequence.map((step) => step.layout).join(" > ")}`, {
       deckType: routePlan.deckType,
       targetSlides: routePlan.targetSlides,
       layoutSequence: routePlan.layoutSequence.map((step) => step.layout),
       reasons: routePlan.routingReasons
     }),
-    makeEvent("upload", `读取 ${uploads.length} 个上传文件`, { files: uploads.map((file) => file.originalName) }),
+    makeEvent("upload", `Read ${uploads.length} uploaded files`, { files: uploads.map((file) => file.originalName) }),
     makeEvent("extract", materialBrief.summary || "资料已抽取", { inputStrength: materialBrief.inputStrength, charCount: materialBrief.charCount, pageCount: materialBrief.pageCount, confirmationFields: materialBrief.confirmationFields }),
-    makeEvent("agent", `Agent 计划：${agentDecision.intent} / ${agentDecision.autonomy}`, { agentPlan, agentDecision }),
+    makeEvent("agent", `Agent plan: ${agentDecision.intent} / ${agentDecision.autonomy}`, { agentPlan, agentDecision }),
     ...(styleProofConfirmation ? [makeEvent("style-confirmed", `已继承确认样稿：${styleProofConfirmation.title || styleProofConfirmation.id}`, styleProofConfirmation)] : []),
     ...(agentFixes.length ? [makeEvent("agent-repair", "Agent 已自动修复 1 轮", agentFixes[0])] : []),
-    makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `已使用 AI 生成设计计划：${ai.provider?.model || "unknown"}` : "未使用 AI，已采用本地资料驱动 fallback", { warning: ai.warning || null, provider: ai.provider || null }),
-    makeEvent("validate", `校验完成：${validated.warnings.length} 条提示`, { warnings: validated.warnings }),
+    makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `AI design plan generated: ${ai.provider?.model || "unknown"}` : "Local fallback design plan generated", { warning: ai.warning || null, provider: ai.provider || null }),
+    makeEvent("validate", `Validation completed: ${validated.warnings.length} warnings`, { warnings: validated.warnings }),
     makeEvent("render", "开始生成 PPTX")
   ];
   const job = {
@@ -527,7 +561,7 @@ async function runAgentJob(req, res, mode) {
     agentFinishedAt: null,
     aiUsed: ai.aiUsed,
     aiProvider: ai.provider || null,
-    warning: [ai.warning, ...validated.warnings].filter(Boolean).join("；") || null,
+    warning: [ai.warning, ...validated.warnings].filter(Boolean).join("; ") || null,
     files: uploads,
     exports: {},
     previewImages: [],
@@ -535,15 +569,37 @@ async function runAgentJob(req, res, mode) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
+  attachAssetFirstState(job, materialBrief, routePlan);
+  recordStep("visual-target", "生成视觉目标样稿", "running", "正在尝试本地 img2 视觉目标样稿");
+  const visualTargetSample = await ensureVisualTargetSampleForJob(job, { steps: req.body?.visualTargetSteps || 8 });
+  agentSteps[agentSteps.length - 1] = {
+    ...agentSteps[agentSteps.length - 1],
+    status: visualTargetSample.generated ? "done" : "warn",
+    summary: visualTargetSample.generated ? "视觉目标样稿已生成；最终 PPTX 仍从 SceneGraph 渲染" : `视觉目标样稿未生成：${visualTargetSample.reason || visualTargetSample.status}`,
+    details: visualTargetSample
+  };
+  await ensureVisualProjectForJob(job);
+  recordStep("visual-project", "生成逐页视觉目标", "running", "按 codex-ppt 式 prompts 生成 origin_image，并保持最终 PPTX 可编辑");
+  const visualProjectRun = await maybeRunOneClickVisualProject(job, req.body || {});
+  agentSteps[agentSteps.length - 1] = {
+    ...agentSteps[agentSteps.length - 1],
+    status: visualProjectRun?.status === "blocked" ? "warn" : visualProjectRun?.skipped ? "skipped" : "done",
+    summary: visualProjectRun?.skipped
+      ? visualProjectRun.reason
+      : `origin_image ${job.visualProject?.generatedImages || 0}/${job.visualProject?.slideCount || 0}; visual-target.pptx ${job.visualProject?.visualTargetPptxPath ? "ready" : "pending"}`,
+    details: visualProjectRun || {}
+  };
   recordStep("render", "生成 PPTX", "running", "正在生成 PPTX 文件");
   job.exports.pptx = await buildDeck(job);
+  job.exports.editablePptx = job.exports.pptx;
+  if (job.visualProject?.visualTargetPptxPath) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
   job.exportMeta = collectExportMeta(job.exports);
   agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: "PPTX 已生成", details: { pptx: job.exports.pptx } };
   addEvent(job, "rendered", "PPTX 已生成", { pptx: job.exports.pptx });
   recordStep("preview", "刷新预览", "running", "正在生成预览图");
   await refreshPreview(job, "已生成");
   const cloudVisualReview = await reviewDeckVisuals({ stage: "final-deck", deck: job.deck, quality: job.quality, routePlan, materialBrief, previewImages: job.previewImages || [] });
-  addEvent(job, "cloud-visual-review", cloudVisualReview.used ? `云端视觉复审：${cloudVisualReview.status}` : `云端视觉复审跳过：${cloudVisualReview.reason || "not available"}`, cloudVisualReview);
+  addEvent(job, "cloud-visual-review", cloudVisualReview.used ? "Cloud visual review: " + cloudVisualReview.status : "Cloud visual review skipped: " + (cloudVisualReview.reason || "not available"), cloudVisualReview);
   job.cloudReviews = [...(job.cloudReviews || []), cloudVisualReview];
   job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan, materialBrief, files: uploads, cloudReviews: job.cloudReviews, visualFixes: [] });
   let latestCloudVisualReview = cloudVisualReview;
@@ -556,11 +612,11 @@ async function runAgentJob(req, res, mode) {
       materialBrief.imageSlotReport = repairedImageBinding.report;
       job.deck = repairedValidation.deck;
       job.quality = enrichQuality(repairedValidation.quality, uploads, materialBrief, routePlan);
-      job.warning = [ai.warning, ...repairedValidation.warnings].filter(Boolean).join("；") || null;
+      job.warning = [ai.warning, ...repairedValidation.warnings].filter(Boolean).join("; ") || null;
       job.exports.pptx = await buildDeck(job);
       job.exportMeta = collectExportMeta(job.exports);
-      addEvent(job, "visual-auto-repair", "整稿已按云端视觉复审自动修复 1 轮", repair.summary);
-      await refreshPreview(job, "整稿已自动修复");
+      addEvent(job, "visual-auto-repair", "Final deck auto-repaired after cloud visual review", repair.summary);
+      await refreshPreview(job, "visual auto repair applied");
       const repairedCloudVisualReview = await reviewDeckVisuals({ stage: "final-deck-repaired", deck: job.deck, quality: job.quality, routePlan, materialBrief, previewImages: job.previewImages || [] });
       job.cloudReviews.push(repairedCloudVisualReview);
       latestCloudVisualReview = repairedCloudVisualReview;
@@ -572,20 +628,28 @@ async function runAgentJob(req, res, mode) {
         imagePlanChanges: repair.summary.imagePlanChanges || [],
         at: new Date().toISOString()
       }];
-      addEvent(job, "cloud-visual-review", repairedCloudVisualReview.used ? `整稿修复后云端视觉复审：${repairedCloudVisualReview.status}` : `整稿修复后云端视觉复审跳过：${repairedCloudVisualReview.reason || "not available"}`, repairedCloudVisualReview);
+      addEvent(job, "cloud-visual-review", repairedCloudVisualReview.used ? "Cloud visual review after repair: " + repairedCloudVisualReview.status : "Cloud visual review after repair skipped: " + (repairedCloudVisualReview.reason || "not available"), repairedCloudVisualReview);
     }
   }
-  const finalAssessment = classifyAgentQuality(job.deck, job.quality, routePlan, materialBrief, job.previewImages || []);
-  const finalReview = buildAgentReview("final-deck", job.deck, job.quality, routePlan, materialBrief, uploads, job.previewImages || [], latestCloudVisualReview);
+  let finalAssessment = classifyAgentQuality(job.deck, job.quality, routePlan, materialBrief, job.previewImages || []);
+  let finalReview = buildAgentReview("final-deck", job.deck, job.quality, routePlan, materialBrief, uploads, job.previewImages || [], latestCloudVisualReview);
   job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan, materialBrief, files: uploads, cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
   if (job.imageSupplementPlan?.needed) addEvent(job, "image-supplement-plan", "视觉复审后生成补图/复用原图计划", job.imageSupplementPlan);
-  agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: `${(job.previewImages || []).filter(Boolean).length} 张预览图`, details: { ...finalAssessment, cloudVisualReview: latestCloudVisualReview, visualFixes: job.visualFixes || [] } };
+  const autoLocal = await maybeAutoApplyLocalImageSupplement(job, routePlan, materialBrief, job.imageSupplementPlan, { stage: "final-deck-auto-local" });
+  if (autoLocal.generated) {
+    latestCloudVisualReview = autoLocal.cloudVisualReview || latestCloudVisualReview;
+    routePlan = autoLocal.routePlan || routePlan;
+    job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan, materialBrief, files: job.files || [], cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
+    finalAssessment = classifyAgentQuality(job.deck, job.quality, routePlan, materialBrief, job.previewImages || []);
+    finalReview = buildAgentReview("final-deck", job.deck, job.quality, routePlan, materialBrief, job.files || uploads, job.previewImages || [], latestCloudVisualReview);
+  }
+  agentSteps[agentSteps.length - 1] = { ...agentSteps[agentSteps.length - 1], status: "done", summary: (job.previewImages || []).filter(Boolean).length + " preview images", details: { ...finalAssessment, cloudVisualReview: latestCloudVisualReview, visualFixes: job.visualFixes || [] } };
   job.agentSteps = agentSteps;
   job.agentReviews = [...(job.agentReviews || []), finalReview];
   job.agentDecision = { ...agentDecision, finalAssessment, autoRepaired: agentFixes.length > 0 || Boolean(job.visualFixes?.length) };
   job.agentFinishedAt = new Date().toISOString();
   if (finalAssessment.blocking.length) {
-    job.warning = [job.warning, `Agent 自检仍有阻断问题：${finalAssessment.blocking.join("；")}`].filter(Boolean).join("；");
+    job.warning = [job.warning, "Agent QA still has blocking issues: " + finalAssessment.blocking.join("; ")].filter(Boolean).join("; ");
   }
   await saveJob(job);
   res.json(toClientJob(job));
@@ -608,7 +672,7 @@ async function createStylePreviewJob(req, res, mode) {
     }))
   };
   const proofDeck = {
-    title: `${validated.deck.title || input.projectName || "PPT"} 风格样张`,
+    title: `${validated.deck.title || input.projectName || "PPT"} 风格样稿`,
     summary: "用于确认整套 PPT 的视觉调性、图片处理、标题层级和信息密度。",
     slides: proofSlides
   };
@@ -627,30 +691,30 @@ async function createStylePreviewJob(req, res, mode) {
     quality: proofQuality,
     aiUsed: ai.aiUsed,
     aiProvider: ai.provider || null,
-    warning: [ai.warning, ...proofValidation.warnings].filter(Boolean).join("；") || null,
+    warning: [ai.warning, ...proofValidation.warnings].filter(Boolean).join("; ") || null,
     files: uploads,
     exports: {},
     previewImages: [],
     agentReviews: [proofReview],
     events: [
       makeEvent("agent-review", "样稿已完成多 Agent 复审", proofReview),
-      makeEvent("style-preview", `风格样张：${input.style || routePlan.recommendedTheme || ""} / ${proofSlides.length} 页`, {
+      makeEvent("style-preview", `Style preview: ${input.style || routePlan.recommendedTheme || "default"} / ${proofSlides.length} slides`, {
         style: input.style || routePlan.recommendedTheme,
         sourceSlides: proofSlides.map((slide) => slide.title),
         styleReferences: routePlan.styleReferenceStrategy?.count || 0
       }),
-      makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `已使用 AI 生成风格样张：${ai.provider?.model || "unknown"}` : "已使用本地 fallback 生成风格样张", { provider: ai.provider || null })
+      makeEvent(ai.aiUsed ? "ai" : "fallback", ai.aiUsed ? `AI style preview generated: ${ai.provider?.model || "unknown"}` : "Local fallback style preview generated", { provider: ai.provider || null })
     ],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
   job.exports.pptx = await buildDeck(job);
   job.exportMeta = collectExportMeta(job.exports);
-  addEvent(job, "rendered", "风格样张 PPTX 已生成", { pptx: job.exports.pptx });
-  await refreshPreview(job, "风格样张已生成");
+  addEvent(job, "rendered", "风格样稿 PPTX 已生成", { pptx: job.exports.pptx });
+  await refreshPreview(job, "风格样稿已生成");
   const cloudVisualReview = await reviewDeckVisuals({ stage: "style-preview", deck: job.deck, quality: job.quality, routePlan: proofRoutePlan, materialBrief, previewImages: job.previewImages || [] });
   job.cloudReviews = [cloudVisualReview];
-  addEvent(job, "cloud-visual-review", cloudVisualReview.used ? `云端视觉复审：${cloudVisualReview.status}` : `云端视觉复审跳过：${cloudVisualReview.reason || "not available"}`, cloudVisualReview);
+  addEvent(job, "cloud-visual-review", cloudVisualReview.used ? `Cloud visual review: ${cloudVisualReview.status}` : `Cloud visual review skipped: ${cloudVisualReview.reason || "not available"}`, cloudVisualReview);
   if (shouldRepairVisualReview(cloudVisualReview)) {
     const beforeReview = cloudVisualReview;
     const repair = repairStyleProofForVisualReview(job.deck, proofRoutePlan, materialBrief, uploads, cloudVisualReview);
@@ -660,8 +724,10 @@ async function createStylePreviewJob(req, res, mode) {
     materialBrief.imageSlotReport = repairedImageBinding.report;
     job.deck = repairedValidation.deck;
     job.quality = enrichQuality(repairedValidation.quality, uploads, materialBrief, proofRoutePlan);
-    job.warning = [ai.warning, ...repairedValidation.warnings].filter(Boolean).join("；") || null;
+    job.warning = [ai.warning, ...repairedValidation.warnings].filter(Boolean).join("; ") || null;
     job.exports.pptx = await buildDeck(job);
+    job.exports.editablePptx = job.exports.pptx;
+    if (job.visualProject?.visualTargetPptxPath) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
     job.exportMeta = collectExportMeta(job.exports);
     addEvent(job, "visual-auto-repair", "样稿已按云端视觉复审自动修复 1 轮", repair.summary);
     await refreshPreview(job, "样稿已自动修复");
@@ -676,12 +742,161 @@ async function createStylePreviewJob(req, res, mode) {
     }];
     addEvent(job, "cloud-visual-review", repairedCloudReview.used ? `修复后云端视觉复审：${repairedCloudReview.status}` : `修复后云端视觉复审跳过：${repairedCloudReview.reason || "not available"}`, repairedCloudReview);
   }
-  const latestCloudReview = job.cloudReviews.at(-1) || cloudVisualReview;
+  let latestCloudReview = job.cloudReviews.at(-1) || cloudVisualReview;
   job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan: proofRoutePlan, materialBrief, files: uploads, cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
   if (job.imageSupplementPlan?.needed) addEvent(job, "image-supplement-plan", "样稿视觉复审后生成补图/复用原图计划", job.imageSupplementPlan);
-  job.agentReviews = [buildAgentReview("style-preview", job.deck, job.quality, proofRoutePlan, materialBrief, uploads, job.previewImages || [], latestCloudReview)];
+  const autoLocal = await maybeAutoApplyLocalImageSupplement(job, proofRoutePlan, materialBrief, job.imageSupplementPlan, { stage: "style-preview-auto-local" });
+  if (autoLocal.generated) {
+    latestCloudReview = autoLocal.cloudVisualReview || latestCloudReview;
+    job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan: proofRoutePlan, materialBrief, files: job.files || [], cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
+  }
+  job.agentReviews = [buildAgentReview("style-preview", job.deck, job.quality, proofRoutePlan, materialBrief, job.files || uploads, job.previewImages || [], latestCloudReview)];
   await saveJob(job);
   res.json(toClientJob(job));
+}
+
+async function ensureVisualTargetSampleForJob(job, options = {}) {
+  ensureSceneGraphForJob(job);
+  if (job.visualTarget?.sample?.status === "generated" && job.visualTarget.sample.imagePath) {
+    return { status: "generated", generated: false, skipped: "already-generated", imagePath: job.visualTarget.sample.imagePath };
+  }
+  const prompt = cleanClientText(options.prompt) || buildVisualTargetSamplePrompt(job.visualTarget);
+  const status = await checkLocalImageStatus();
+  if (!status.ok && options.allowCloudFallback !== false) {
+    const cloudResult = await tryCloudVisualTargetSample(job, prompt, {
+      ...options,
+      localReason: status.reason || "local image backend unavailable"
+    });
+    if (cloudResult.generated) return cloudResult;
+  }
+  if (!status.ok) {
+    job.visualTarget = {
+      ...(job.visualTarget || {}),
+      sample: {
+        ...(job.visualTarget?.sample || {}),
+        status: "pending-local-image",
+        prompt,
+        reason: status.reason || "local image backend unavailable"
+      }
+    };
+    job.sceneGraphRepair = {
+      ...(job.sceneGraphRepair || {}),
+      status: job.sceneGraphRepair?.status || "planned",
+      actions: [
+        ...(job.sceneGraphRepair?.actions || []),
+        { slideId: "deck", action: "generate-visual-target-sample", status: "pending", reason: job.visualTarget.sample.reason }
+      ],
+      pendingCount: Number(job.sceneGraphRepair?.pendingCount || 0) + 1
+    };
+    addEvent(job, "visual-target-sample", "Visual target sample pending: local image backend unavailable", { reason: job.visualTarget.sample.reason });
+    return { status: "pending-local-image", generated: false, reason: job.visualTarget.sample.reason };
+  }
+  try {
+    const record = await generateLocalImage({
+      prompt,
+      width: options.width || 1280,
+      height: options.height || 720,
+      steps: Number(options.steps || 8),
+      seed: options.seed || Date.now(),
+      prefix: `visual_target_${job.id}`,
+      textSafeArea: "No readable text should be generated; this is composition-only."
+    });
+    const visualRecord = { ...record, materialRole: "visual-target-reference" };
+    job.files = [...(job.files || []), visualRecord];
+    job.visualTarget = {
+      ...(job.visualTarget || {}),
+      sample: {
+        ...(job.visualTarget?.sample || {}),
+        status: "generated",
+        prompt,
+        imageId: record.id,
+        imagePath: record.path,
+        imageName: record.originalName,
+        provider: record.provider,
+        createdAt: record.createdAt,
+        purpose: "visual reference only; not used as final PPT background"
+      }
+    };
+    job.sceneGraphRepair = {
+      ...(job.sceneGraphRepair || {}),
+      completed: [
+        ...(job.sceneGraphRepair?.completed || []),
+        { slideId: "deck", action: "generate-visual-target-sample", status: "done", imageId: record.id }
+      ]
+    };
+    addEvent(job, "visual-target-sample", "Visual target sample generated as SceneGraph reference only", { image: record.originalName, provider: record.provider });
+    ensureSceneGraphForJob(job);
+    return { status: "generated", generated: true, imageId: record.id, imageName: record.originalName, provider: record.provider };
+  } catch (error) {
+    if (options.allowCloudFallback !== false) {
+      const cloudResult = await tryCloudVisualTargetSample(job, prompt, {
+        ...options,
+        localReason: error.message || "local image generation failed"
+      });
+      if (cloudResult.generated) return cloudResult;
+    }
+    job.visualTarget = {
+      ...(job.visualTarget || {}),
+      sample: {
+        ...(job.visualTarget?.sample || {}),
+        status: "pending-cloud-image",
+        prompt,
+        reason: error.message || "local image generation failed"
+      }
+    };
+    job.sceneGraphRepair = {
+      ...(job.sceneGraphRepair || {}),
+      status: "planned",
+      actions: [
+        ...(job.sceneGraphRepair?.actions || []),
+        { slideId: "deck", action: "cloud-visual-target-sample", status: "pending", reason: job.visualTarget.sample.reason }
+      ],
+      pendingCount: Number(job.sceneGraphRepair?.pendingCount || 0) + 1
+    };
+    addEvent(job, "visual-target-sample-error", "Visual target sample failed locally; cloud handling is pending", { reason: job.visualTarget.sample.reason });
+    return { status: "pending-cloud-image", generated: false, reason: job.visualTarget.sample.reason };
+  }
+}
+
+async function tryCloudVisualTargetSample(job, prompt, options = {}) {
+  try {
+    const record = await generateCloudImage({
+      prompt,
+      width: options.width || 1280,
+      height: options.height || 720,
+      prefix: `visual_target_cloud_${job.id}`,
+      textSafeArea: "No readable text should be generated; this is composition-only.",
+      materialRole: "visual-target-reference"
+    });
+    job.files = [...(job.files || []), record];
+    job.visualTarget = {
+      ...(job.visualTarget || {}),
+      sample: {
+        ...(job.visualTarget?.sample || {}),
+        status: "generated",
+        prompt,
+        imageId: record.id,
+        imagePath: record.path,
+        imageName: record.originalName,
+        provider: record.provider,
+        createdAt: record.createdAt,
+        purpose: "visual reference only; not used as final PPT background",
+        fallback: { from: "local-image", reason: options.localReason || "" }
+      }
+    };
+    job.sceneGraphRepair = {
+      ...(job.sceneGraphRepair || {}),
+      completed: [
+        ...(job.sceneGraphRepair?.completed || []),
+        { slideId: "deck", action: "cloud-visual-target-sample", status: "done", imageId: record.id }
+      ]
+    };
+    addEvent(job, "visual-target-sample", "Cloud visual target sample generated as SceneGraph reference only", { image: record.originalName, provider: record.provider, localReason: options.localReason || "" });
+    ensureSceneGraphForJob(job);
+    return { status: "generated", generated: true, fallback: "cloud-image", imageId: record.id, imageName: record.originalName, provider: record.provider, localReason: options.localReason || "" };
+  } catch (error) {
+    return { status: "pending-cloud-image", generated: false, reason: error.message || "cloud image generation failed", localReason: options.localReason || "" };
+  }
 }
 
 async function buildStyleProofConfirmation(styleProofJobId = "") {
@@ -766,21 +981,21 @@ function buildStyleProofSlides(deck = {}, routePlan = {}, uploads = []) {
   add(slides.find((slide) => slide.layout === "closing") || slides.at(-1));
   const proof = picked.filter(Boolean).slice(0, 4).map((slide, index) => ({
     ...slide,
-    storyRole: slide.storyRole || "风格确认样张",
+    storyRole: slide.storyRole || "风格确认样稿",
     imageSlots: (slide.imageSlots && slide.imageSlots.length ? slide.imageSlots : imageNames.slice(index, index + 2)).filter(Boolean)
   }));
   if (imageNames.length && !proof.some((slide) => slide.layout === "visual")) {
     proof.splice(Math.min(1, proof.length), 0, {
       layout: "visual",
-      title: routePlan.deckType ? `${routePlan.deckType}视觉调性` : "视觉调性样张",
-      subtitle: "确认图片呈现、留白、色彩和标题层级。",
-      storyRole: "风格确认样张",
+      title: routePlan.deckType ? `${routePlan.deckType} visual style sample` : "Visual style sample",
+      subtitle: "Confirm image presentation, whitespace, color, and title hierarchy",
+      storyRole: "风格确认样稿",
       contentSource: "用户图片",
-      visualIntent: "使用原 PPT 或上传素材验证图片展示方式。",
-      bullets: ["保留原图主体", "控制文字密度", "统一东方自然风调性"],
+      visualIntent: "Use uploaded PPT/images to validate image presentation style.",
+      bullets: ["Keep source image subject", "Control text density", "Keep one visual system"],
       dataPoints: [],
       imageSlots: imageNames.slice(0, 3),
-      speakerNotes: "这一页用于确认整套 PPT 的图片处理方式。"
+      speakerNotes: "This page validates image treatment for the whole PPT."
     });
   }
   return proof.slice(0, 4);
@@ -806,8 +1021,8 @@ function repairStyleProofForVisualReview(deck = {}, routePlan = {}, materialBrie
   }, new Map());
   const sourcePages = Array.isArray(sourceReport.pages) ? sourceReport.pages : [];
   const reviewText = [review.summary, ...(review.findings || []), ...(review.fixSuggestions || [])].join(" ");
-  const needsStrongerStyle = /风格|东方|自然|节日|礼盒|文化|色彩|太素|识别不足|不像/.test(reviewText);
-  const needsImageRepair = /占位|缺图|图片|产品|原图|灰白|纯色块/.test(reviewText);
+  const needsStrongerStyle = /style|tone|weak|generic|match|visual|festival|culture|color|plain/i.test(reviewText);
+  const needsImageRepair = /placeholder|image|photo|visual|product|source|missing|empty|material/i.test(reviewText);
   const changes = [];
   const slides = (deck.slides || []).map((slide, index) => {
     const routeStep = routePlan?.layoutSequence?.[index] || {};
@@ -823,25 +1038,25 @@ function repairStyleProofForVisualReview(deck = {}, routePlan = {}, materialBrie
     if (needsStrongerStyle) {
       next.visualIntent = [
         cleanClientText(next.visualIntent),
-        styleFingerprint.prompt ? `按风格指纹强化：${styleFingerprint.prompt}` : "",
-        "避免通用灰白占位感，增加东方自然、节日礼盒、文化产品的识别度。"
+        styleFingerprint.prompt ? "Strengthen style fingerprint: " + styleFingerprint.prompt : "",
+        "Avoid generic gray-white placeholder feel; strengthen recognizable visual direction."
       ].filter(Boolean).join(" ");
       next.speakerNotes = [
         cleanClientText(next.speakerNotes),
-        "这一页要证明风格方向，而不是只呈现普通商务模板。"
+        "This page should prove the style direction instead of looking like a generic business template."
       ].filter(Boolean).join(" ");
-      if (index === 0) next.subtitle = `${next.subtitle || ""}｜东方自然风修正版`.replace(/^｜/, "");
+      if (index === 0) next.subtitle = (next.subtitle || "") + " | style refined";
     }
     if (needsImageRepair && next.imageSlots.length) {
       next.bullets = uniqueTextList([
         ...(next.bullets || []),
         "优先使用原稿产品图，减少占位感。",
-        "让图片承担案例和产品信息，而不是只做装饰。"
+        "让图片承载案例和产品信息，而不是只做装饰。"
       ]).slice(0, 4);
     }
     if (needsImageRepair && index === slidesVisualRepairIndex(deck.slides || [])) {
       next.layout = "visual";
-      next.title = next.title || "原稿产品视觉样张";
+      next.title = next.title || "原稿产品视觉样稿";
       next.storyRole = "视觉风格确认";
     }
     return next;
@@ -862,8 +1077,8 @@ function repairStyleProofForVisualReview(deck = {}, routePlan = {}, materialBrie
 function repairFinalDeckForVisualReview(deck = {}, routePlan = {}, materialBrief = {}, files = [], review = {}, imagePlan = null) {
   const reviewText = cleanClientText([review.summary, ...(review.findings || []), ...(review.fixSuggestions || [])].join(" "));
   const styleFingerprint = routePlan?.styleReferenceStrategy?.fingerprint || {};
-  const needsStrongerStyle = /风格|东方|自然|节日|礼盒|文化|色彩|太素|识别不足|不像|匹配不足|不够强|调性/i.test(reviewText);
-  const needsImageRepair = /占位|缺图|图片|产品图|原图|主视觉|视觉|纯色块|素材|说服力/i.test(reviewText);
+  const needsStrongerStyle = /style|tone|weak|generic|match|visual|festival|culture|color|plain/i.test(reviewText);
+  const needsImageRepair = /placeholder|image|photo|visual|product|source|missing|empty|material/i.test(reviewText);
   const needsDensityRepair = /文字|太密|密度|拥挤|层级|阅读压力/i.test(reviewText);
   const sourceReport = materialBrief.sourceReport || {};
   const sourcePages = Array.isArray(sourceReport.pages) ? sourceReport.pages : [];
@@ -889,7 +1104,7 @@ function repairFinalDeckForVisualReview(deck = {}, routePlan = {}, materialBrief
       ...slide,
       bullets: normalizeClientList(slide.bullets),
       dataPoints: normalizeClientList(slide.dataPoints),
-      imageSlots: normalizeClientList(slide.imageSlots)
+      imageSlots: normalizeImageSlotsForLayout(slide.layout || routeStep.layout || "", slide.imageSlots)
     };
     const sourcePage = inferSourcePage(routeStep, slide, index);
     const pageImages = sourcePage ? sourceImagesByPage.get(sourcePage) || [] : [];
@@ -899,15 +1114,16 @@ function repairFinalDeckForVisualReview(deck = {}, routePlan = {}, materialBrief
       .concat(chooseVisualSourceImages(fallbackImages, files, slide, routeStep))
       .map((file) => cleanClientText(file.originalName || path.basename(file.path || "")))
       .filter(Boolean);
-    const shouldCarryImage = ["cover", "visual", "product-detail", "bundle", "cards"].includes(next.layout || routeStep.layout)
-      || /图|视觉|产品|包装|礼盒|案例|主视觉/i.test([next.title, next.subtitle, next.visualIntent, routeStep.purpose].join(" "));
+    const shouldCarryImage = ["cover", "visual", "product-detail", "bundle"].includes(next.layout || routeStep.layout)
+      || /image|visual|product|pack|case|hero/i.test([next.title, next.subtitle, next.visualIntent, routeStep.purpose].join(" "));
     if (needsImageRepair && shouldCarryImage) {
-      const nextSlots = uniqueTextList([...preferredImages, ...next.imageSlots, ...allImageNames]).slice(0, next.layout === "cover" ? 2 : 4);
+      const targetLayout = imageSlotLimitForLayout(next.layout || routeStep.layout || "") ? (next.layout || routeStep.layout) : "visual";
+      const nextSlots = uniqueTextList([...preferredImages, ...next.imageSlots, ...allImageNames]).slice(0, imageSlotLimitForLayout(targetLayout));
       if (nextSlots.length && nextSlots.join("|") !== next.imageSlots.join("|")) {
         next.imageSlots = nextSlots;
         changes.push("strengthened-source-image-use");
       }
-      if (!["cover", "closing", "pricing"].includes(next.layout) && next.imageSlots.length && !["visual", "product-detail", "bundle", "cards"].includes(next.layout)) {
+      if (!["cover", "closing"].includes(next.layout) && next.imageSlots.length && !["visual", "product-detail", "bundle"].includes(next.layout)) {
         next.layout = index <= 1 ? "visual" : "product-detail";
         changes.push("converted-to-image-led-layout");
       }
@@ -915,16 +1131,16 @@ function repairFinalDeckForVisualReview(deck = {}, routePlan = {}, materialBrief
     if (needsStrongerStyle) {
       next.visualIntent = uniqueTextList([
         cleanClientText(next.visualIntent),
-        styleFingerprint.prompt ? `按已确认风格指纹强化：${styleFingerprint.prompt}` : "",
-        routePlan?.recommendedTheme ? `保持 ${routePlan.recommendedTheme} 的色彩、留白、质感和装饰节奏。` : "",
-        "避免通用灰白商务模板感，让背景、图片和小装饰共同承担风格识别。"
+        styleFingerprint.prompt ? "Strengthen confirmed style fingerprint: " + styleFingerprint.prompt : "",
+        routePlan?.recommendedTheme ? "Keep " + routePlan.recommendedTheme + " colors, whitespace, texture, and decoration rhythm." : "",
+        "Avoid generic business-template feeling; use background, imagery, and details to carry style."
       ]).join(" ");
       next.speakerNotes = uniqueTextList([
         cleanClientText(next.speakerNotes),
-        "这一页要同时保留原始事实，并强化已确认样稿的视觉调性。"
+        "Keep source facts while strengthening the confirmed visual direction."
       ]).join(" ");
       if (index === 0 && routePlan?.recommendedTheme && !String(next.subtitle || "").includes(routePlan.recommendedTheme)) {
-        next.subtitle = [cleanClientText(next.subtitle), routePlan.recommendedTheme].filter(Boolean).join("｜");
+        next.subtitle = [cleanClientText(next.subtitle), routePlan.recommendedTheme].filter(Boolean).join("; ");
       }
       changes.push("strengthened-confirmed-style");
     }
@@ -942,7 +1158,7 @@ function repairFinalDeckForVisualReview(deck = {}, routePlan = {}, materialBrief
     return next;
   });
   return {
-    deck: { ...imagePlanResult.deck, slides, summary: cleanClientText(imagePlanResult.deck.summary) || cleanClientText(deck.summary) || "已按整稿视觉复审修复。" },
+    deck: { ...imagePlanResult.deck, slides, summary: cleanClientText(imagePlanResult.deck.summary) || cleanClientText(deck.summary) || "已按整套视觉复审修复" },
     summary: {
       changes: uniqueTextList(changes),
       imagePlanChanges: imagePlanResult.summary?.changes || [],
@@ -968,15 +1184,16 @@ function buildImageSupplementPlan({ deck = {}, routePlan = {}, materialBrief = {
   const sourceReport = materialBrief.sourceReport || {};
   const imageSlotReport = materialBrief.imageSlotReport || {};
   const styleFingerprint = routePlan?.styleReferenceStrategy?.fingerprint || {};
-  const sourceImagesByPage = files.filter(isImageUpload).reduce((map, file) => {
+  const reusableImageFiles = files.filter(isReusableSourceImage);
+  const sourceImagesByPage = reusableImageFiles.reduce((map, file) => {
     const page = Number(file.sourceSlide || 0);
     if (!page) return map;
     if (!map.has(page)) map.set(page, []);
     map.get(page).push(file);
     return map;
   }, new Map());
-  const looseImages = files
-    .filter((file) => isImageUpload(file) && !Number(file.sourceSlide || 0))
+  const looseImages = reusableImageFiles
+    .filter((file) => !Number(file.sourceSlide || 0))
     .map((file) => cleanClientText(file.originalName || path.basename(file.path || "")))
     .filter(Boolean);
   const slides = Array.isArray(deck.slides) ? deck.slides : [];
@@ -985,38 +1202,48 @@ function buildImageSupplementPlan({ deck = {}, routePlan = {}, materialBrief = {
       const routeStep = routePlan?.layoutSequence?.[index] || {};
       const sourcePage = inferSourcePage(routeStep, slide, index);
       const sourceImageFiles = sourcePage ? sourceImagesByPage.get(sourcePage) || [] : [];
-      const sourceImages = chooseVisualSourceImages(sourceImageFiles, files, slide, routeStep).map((file) => cleanClientText(file.originalName || path.basename(file.path || "")));
+      const sourceImages = chooseVisualSourceImages(sourceImageFiles, reusableImageFiles, slide, routeStep).map((file) => cleanClientText(file.originalName || path.basename(file.path || "")));
       const currentSlots = normalizeClientList(slide.imageSlots);
-      const shouldHaveVisual = ["cover", "visual", "product-detail", "bundle", "cards"].includes(slide.layout || routeStep.layout) || sourceImages.length || /图|视觉|产品|包装|礼盒|image|photo/i.test([slide.title, slide.subtitle, slide.visualIntent, routeStep.purpose].join(" "));
+      const layout = slide.layout || routeStep.layout;
+      const shouldHaveVisual = ["cover", "visual", "product-detail", "bundle"].includes(layout) || sourceImages.length || currentSlots.length;
+      if (!shouldHaveVisual && !sourceImages.length && !currentSlots.length) return null;
+      if (currentSlots.length && !sourceImages.length) return null;
       const lacksReliableImage = shouldHaveVisual && !sourceImages.length && !currentSlots.length;
       const hasSourceButWeak = shouldHaveVisual && sourceImages.length && (!currentSlots.length || !currentSlots.some((slot) => sourceImages.includes(slot)) || reviewNeedsImages);
       if (!reviewNeedsImages && !lacksReliableImage && !hasSourceButWeak) return null;
       const action = sourceImages.length ? "use-source-image" : looseImages.length ? "use-uploaded-image" : "need-remote-generation";
+      const foregroundCandidate = action !== "need-remote-generation" && /product-detail|bundle|visual|产品|单品|礼盒|包装|主图|抠图|前景|cutout|foreground/i.test([slide.layout, slide.title, slide.subtitle, slide.visualIntent, routeStep.purpose].join(" "));
+      const materialRole = foregroundCandidate
+        ? "foreground-cutout-candidate"
+        : "background-atmosphere";
       return {
         slide: index + 1,
-        title: cleanClientText(slide.title) || `Slide ${index + 1}`,
+        title: cleanClientText(slide.title) || "Slide " + (index + 1),
         layout: slide.layout || routeStep.layout || "",
         sourcePage,
         currentImageSlots: currentSlots,
         availableSourceImages: sourceImages.slice(0, 6),
         availableUploadedImages: sourceImages.length ? [] : looseImages.slice(0, 6),
         action,
+        materialRole,
+        needsCutout: materialRole === "foreground-cutout-candidate",
+        mattingStatus: materialRole === "foreground-cutout-candidate" ? "planned-not-implemented" : "not-needed",
         reason: sourceImages.length
-          ? "原稿该页有图片；应先复用原图并重新渲染验证，不直接跳到远端补图。"
+          ? "Source page has reusable images; reuse them before generating new material."
           : looseImages.length
-            ? "该页需要更强视觉素材，可先从用户上传图片中挑选。"
-            : "该页缺少可复用图片，优先调用本地 Z-Image 生成底图；远端只作为兜底。",
+            ? "Slide needs stronger visual material; select from uploaded images first."
+            : "Slide lacks reusable images; use local Z-Image first and cloud only as fallback.",
         remotePrompt: buildRemoteImagePrompt(slide, routePlan, styleFingerprint)
       };
     })
     .filter(Boolean)
     .slice(0, 8);
-  const needed = Boolean(reviewNeedsImages || candidateSlides.length);
+  const needed = Boolean(candidateSlides.length);
   return {
     needed,
     status: needed ? "needs-human-confirmation" : "not-needed",
     stage: latestReview?.stage || null,
-    trigger: latestReview?.used ? `${latestReview.status || "unknown"}:${latestReview.summary || ""}` : "local-structure-check",
+    trigger: latestReview?.used ? String(latestReview.status || "unknown") + ":" + String(latestReview.summary || "") : "local-structure-check",
     sourceFacts: {
       oldDeck: Boolean(sourceReport.hasOldDeck),
       sourcePages: sourceReport.pageCount || 0,
@@ -1025,15 +1252,15 @@ function buildImageSupplementPlan({ deck = {}, routePlan = {}, materialBrief = {
       visualFixRounds: visualFixes.length || 0
     },
     policy: [
-      "风格参考图只用于色彩、留白、质感和版式调性，不作为内容事实图直接使用。",
-      "旧 PPT 优化优先复用原稿图片；从零生成优先使用用户上传素材。",
-      "本地 Z-Image 优先补底图和氛围图；远端补图必须由用户确认，且生成图在交付记录中标记为 AI 补图。",
-      "补图不得虚构品牌、价格、产品规格和承诺。"
+      "Style reference images are for color, whitespace, texture, and layout only; they are not factual source images.",
+      "PPT optimization should reuse original-deck images first; zero-shot generation should prefer uploaded user material.",
+      "Local Z-Image is preferred for background and atmosphere supplements; cloud image is fallback and must be marked.",
+      "Supplement images must not fabricate brands, prices, specifications, or promises."
     ],
     items: candidateSlides,
     nextActions: needed
-      ? ["先确认是否复用原稿图", "缺图页优先调用本地 Z-Image 或上传素材", "补图后重新跑样稿视觉质检"]
-      : ["当前未发现阻断级补图需求"]
+      ? ["Confirm whether to reuse original images", "For missing-image slides use local Z-Image or uploaded material first", "Run visual QA again after supplementing images"]
+      : ["No blocking image supplement need found"]
   };
 }
 
@@ -1046,11 +1273,11 @@ function buildRemoteImagePrompt(slide = {}, routePlan = {}, styleFingerprint = {
     || null;
   const facts = uniqueTextList([slide.title, slide.subtitle, ...(slide.bullets || []), ...(slide.dataPoints || [])]).slice(0, 5).join("; ");
   return [
-    pagePlan?.comfyPrompt || `Create a PPT visual asset for: ${cleanClientText(slide.title) || "presentation slide"}.`,
-    `Style: ${theme}${style ? `; ${style}` : ""}.`,
-    pagePlan?.textSafeArea ? `Keep this text-safe area visually quiet: ${pagePlan.textSafeArea}.` : "Leave a clear empty text-safe area.",
-    pagePlan?.layers ? `Layer plan: background=${pagePlan.layers.background}, text=${pagePlan.layers.text}, image=${pagePlan.layers.image}, ornament=${pagePlan.layers.ornament}.` : "",
-    facts ? `Must preserve factual content only as abstract context, do not invent product specs/prices: ${facts}.` : "Do not invent product specs, prices, logos, certifications, or brand claims.",
+    pagePlan?.comfyPrompt || "Create a PPT visual asset for: " + (cleanClientText(slide.title) || "presentation slide") + ".",
+    "Style: " + theme + (style ? "; " + style : "") + ".",
+    pagePlan?.textSafeArea ? "Keep this text-safe area visually quiet: " + pagePlan.textSafeArea + "." : "Leave a clear empty text-safe area.",
+    pagePlan?.layers ? "Layer plan: background=" + pagePlan.layers.background + ", text=" + pagePlan.layers.text + ", image=" + pagePlan.layers.image + ", ornament=" + pagePlan.layers.ornament + "." : "",
+    facts ? "Must preserve factual content only as abstract context, do not invent product specs/prices: " + facts + "." : "Do not invent product specs, prices, logos, certifications, or brand claims.",
     "No readable fake text, no fake logos, no misleading product claims."
   ].filter(Boolean).join(" ");
 }
@@ -1059,19 +1286,218 @@ function buildLocalImagePrompt(item = {}, routePlan = {}) {
   const pagePlan = findAestheticPagePlan(routePlan, item);
   const theme = routePlan?.aestheticPlan?.theme || routePlan?.recommendedTheme || "premium business presentation";
   return [
-    pagePlan?.comfyPrompt || routePlan?.aestheticPlan?.comfy?.basePrompt || `premium ${theme} presentation background`,
-    pagePlan?.textSafeArea ? `keep the planned text-safe area visually quiet: ${pagePlan.textSafeArea}` : "large clean empty area reserved for text overlay",
-    pagePlan?.layers ? `poster-like PPT layer plan: background ${pagePlan.layers.background}, image area ${pagePlan.layers.image}, ornament ${pagePlan.layers.ornament}` : "",
+    pagePlan?.comfyPrompt || routePlan?.aestheticPlan?.comfy?.basePrompt || "premium " + theme + " presentation background",
+    pagePlan?.textSafeArea ? "keep the planned text-safe area visually quiet: " + pagePlan.textSafeArea : "large clean empty area reserved for text overlay",
+    pagePlan?.layers ? "poster-like PPT layer plan: background " + pagePlan.layers.background + ", image area " + pagePlan.layers.image + ", ornament " + pagePlan.layers.ornament : "",
     "abstract visual support only, no factual product claims",
     "no readable text, no letters, no numbers, no Chinese characters, no captions, no labels, no logo, no watermark",
     "clean editable PPT background, 16:9 composition"
   ].filter(Boolean).join(", ");
 }
 
+function buildCloudCutoutPrompt(item = {}, routePlan = {}) {
+  return [
+    "Remove the background and return a transparent PNG cutout for PowerPoint composition.",
+    "Slide: " + (item.title || item.slide || "") + ".",
+    "Deck style: " + (routePlan?.recommendedTheme || routePlan?.aestheticPlan?.theme || "presentation") + ".",
+    "Preserve the main subject edges. Do not add new text, logos, products, labels, shadows, or claims."
+  ].filter(Boolean).join(" ");
+}
+
 function findAestheticPagePlan(routePlan = {}, item = {}) {
   return (routePlan?.aestheticPlan?.pagePlans || []).find((plan) => Number(plan.index) === Number(item.slide || 0))
     || (routePlan?.aestheticPlan?.pagePlans || []).find((plan) => plan.layout === item.layout)
     || null;
+}
+
+function localImageAutoConfig() {
+  const env = globalThis.process?.env || {};
+  return {
+    enabled: env.LOCAL_IMAGE_AUTO_SUPPLEMENT !== "false",
+    maxTargets: Math.max(0, Math.min(6, Number(env.LOCAL_IMAGE_AUTO_LIMIT || 3))),
+    width: Number(env.LOCAL_IMAGE_AUTO_WIDTH || 768),
+    height: Number(env.LOCAL_IMAGE_AUTO_HEIGHT || 768),
+    steps: Number(env.LOCAL_IMAGE_AUTO_STEPS || 8)
+  };
+}
+
+function needsCutoutAsset(item = {}) {
+  const text = cleanClientText([item.title, item.layout, item.reason, item.remotePrompt].join(" "));
+  return /product-detail|bundle|cards|visual|产品|单品|礼盒|包装|主图|抠图|透明|前景|cutout|transparent|foreground|hero/i.test(text)
+    && !/background|底图|氛围|纹理/i.test(text);
+}
+
+function annotateMaterialTarget(item = {}) {
+  const cutout = needsCutoutAsset(item);
+  return {
+    ...item,
+    materialRole: cutout ? "foreground-cutout-candidate" : "background-atmosphere",
+    needsCutout: cutout,
+    mattingStatus: cutout ? "planned-not-implemented" : "not-needed"
+  };
+}
+
+async function generateSupplementImageForItem(job, item, routePlan = {}, options = {}) {
+  const pagePlan = findAestheticPagePlan(routePlan, item);
+  const localPrompt = buildLocalImagePrompt(item, routePlan);
+  try {
+    const status = await checkLocalImageStatus();
+    if (!status.ok) throw new Error(status.reason || "local image backend unavailable");
+    const record = await generateLocalImage({
+      prompt: localPrompt,
+      width: options.width || 768,
+      height: options.height || 768,
+      steps: options.steps || 8,
+      seed: options.seed || Date.now() + Number(item.slide || 0),
+      textSafeArea: pagePlan?.textSafeArea || "",
+      prefix: "job_" + job.id + "_slide_" + item.slide + "_zimage"
+    });
+    annotateGeneratedSupplementRecord(record, item, "local-zimage");
+    return { record, provider: record.provider || "local-zimage", fallback: false };
+  } catch (localError) {
+    if (options.allowCloudFallback === false) throw localError;
+    try {
+      const record = await generateCloudImage({
+        prompt: item.remotePrompt || localPrompt,
+        width: options.width || 1024,
+        height: options.height || 1024,
+        prefix: "job_" + job.id + "_slide_" + item.slide + "_cloud",
+        textSafeArea: pagePlan?.textSafeArea || "",
+        materialRole: item.materialRole || "background-atmosphere"
+      });
+      annotateGeneratedSupplementRecord(record, item, "cloud-image");
+      record.fallback = { from: "local-image", reason: localError.message || "local image generation failed" };
+      addEvent(job, "cloud-image-fallback", "云端补图已执行：本地不可用或失败", {
+        slide: item.slide,
+        title: item.title,
+        localReason: record.fallback.reason,
+        image: record.originalName
+      });
+      return { record, provider: record.provider || "cloud-image", fallback: true, localReason: record.fallback.reason };
+    } catch (cloudError) {
+      const failure = {
+        slide: item.slide,
+        title: item.title,
+        action: "need-remote-generation",
+        status: "pending-cloud-image",
+        localReason: localError.message || "local image generation failed",
+        cloudReason: cloudError.message || "cloud image generation failed",
+        at: new Date().toISOString()
+      };
+      job.imageSupplementFailures = [...(job.imageSupplementFailures || []), failure];
+      job.sceneGraphRepair = {
+        ...(job.sceneGraphRepair || {}),
+        status: "planned",
+        actions: [
+          ...(job.sceneGraphRepair?.actions || []),
+          { slideId: "slide_" + String(item.slide || 0).padStart(2, "0"), action: "bind-or-generate-independent-image", status: "pending", reason: failure.cloudReason }
+        ],
+        pendingCount: Number(job.sceneGraphRepair?.pendingCount || 0) + 1
+      };
+      addEvent(job, "cloud-image-fallback-failed", "本地和云端补图均未完成，已记录待处理", failure);
+      return { record: null, provider: "none", fallback: true, failed: true, failure };
+    }
+  }
+}
+
+function annotateGeneratedSupplementRecord(record, item, source = "") {
+  record.sourceSlide = Number(item.slide || 0);
+  record.materialRole = item.materialRole;
+  record.needsCutout = item.needsCutout;
+  record.mattingStatus = item.mattingStatus;
+  if (source) record.source = source;
+  return record;
+}
+
+async function maybeAutoApplyLocalImageSupplement(job, routePlan, materialBrief, plan, options = {}) {
+  const config = localImageAutoConfig();
+  if (!config.enabled || !plan?.needed || !config.maxTargets) return { generated: 0, skipped: "disabled-or-not-needed" };
+  const status = await checkLocalImageStatus();
+  if (!status.ok) {
+    addEvent(job, "local-image-auto-skip", "Local image auto supplement skipped: " + (status.reason || "offline"), { status });
+  }
+  const targets = (plan.items || [])
+    .filter((item) => item.action === "need-remote-generation")
+    .map(annotateMaterialTarget)
+    .slice(0, config.maxTargets);
+  if (!targets.length) return { generated: 0, skipped: "no-local-generation-targets" };
+  const generated = [];
+  for (const item of targets) {
+    const generatedRecord = await generateSupplementImageForItem(job, item, routePlan, {
+      width: options.width || config.width,
+      height: options.height || config.height,
+      steps: options.steps || config.steps,
+      seed: (options.seed || Date.now()) + Number(item.slide || 0),
+      allowCloudFallback: options.allowCloudFallback !== false
+    });
+    const record = generatedRecord.record;
+    if (!record) {
+      generated.push({ item, failed: true, failure: generatedRecord.failure });
+      continue;
+    }
+    let slotRecord = record;
+    let matting = null;
+    if (item.needsCutout) {
+      matting = await cutoutImage(record, { prompt: buildCloudCutoutPrompt(item, routePlan) });
+      record.matting = matting;
+      record.mattingStatus = matting.status || "failed";
+      if (matting.record) {
+        slotRecord = matting.record;
+        job.files = [...(job.files || []), record, slotRecord];
+      } else {
+        job.files = [...(job.files || []), record];
+      }
+    } else {
+      job.files = [...(job.files || []), record];
+    }
+    generated.push({ item, record: slotRecord, originalRecord: record, matting });
+    const slideIndex = Number(item.slide || 0) - 1;
+    if (job.deck?.slides?.[slideIndex]) {
+      const slide = job.deck.slides[slideIndex];
+      const slotLimit = imageSlotLimitForLayout(slide.layout || "");
+      slide.imageSlots = slotLimit
+        ? uniqueTextList([slotRecord.originalName, ...normalizeClientList(slide.imageSlots)]).slice(0, slotLimit)
+        : [];
+      slide.visualIntent = [
+        cleanClientText(slide.visualIntent),
+        item.needsCutout
+          ? "Local Z-Image generated a foreground material candidate; local matting was attempted first, with cloud matting fallback only if needed."
+          : "Local Z-Image generated a background or atmosphere material; it is visual material, not a factual source."
+      ].filter(Boolean).join(" ");
+    }
+  }
+  const nextRoutePlan = syncRoutePlanWithSlides(routePlan, job.deck.slides || [], options.stage || "auto-local-image-supplement");
+  if (job.input) {
+    job.input.routePlan = nextRoutePlan;
+    job.input.materialBrief = materialBrief;
+  }
+  const validated = validateDeck(job.deck, nextRoutePlan);
+  job.deck = validated.deck;
+  job.quality = enrichQuality(validated.quality, job.files || [], materialBrief, nextRoutePlan);
+  job.warning = validated.warnings.length ? validated.warnings.join("; ") : job.warning;
+  addEvent(job, "local-image-auto-supplement", "Auto supplement generated " + generated.filter((entry) => !entry.failed && entry.record).length + " PPT materials", {
+    provider: "local-first-cloud-fallback",
+    generated: generated.filter((entry) => !entry.failed && entry.record).map(({ item, record, originalRecord }) => ({
+      slide: item.slide,
+      title: item.title,
+      image: originalRecord?.originalName || record.originalName,
+      materialRole: originalRecord?.materialRole || record.materialRole,
+      needsCutout: originalRecord?.needsCutout || false,
+      mattingStatus: originalRecord?.mattingStatus || record.mattingStatus,
+      finalImage: record.originalName,
+      mattingMethod: originalRecord?.matting?.method || null,
+      prompt: originalRecord?.prompt || record.prompt,
+      seed: originalRecord?.seed || record.seed,
+      visualQa: originalRecord?.visualQa || record.visualQa || null
+    }))
+  });
+  job.exports.pptx = await buildDeck(job);
+  job.exportMeta = collectExportMeta(job.exports);
+  await refreshPreview(job, "Auto image supplement applied");
+  const cloudVisualReview = await reviewDeckVisuals({ stage: options.stage || String(job.mode || "job") + "-auto-local-image", deck: job.deck, quality: job.quality, routePlan: nextRoutePlan, materialBrief, previewImages: job.previewImages || [] });
+  job.cloudReviews = [...(job.cloudReviews || []), cloudVisualReview];
+  addEvent(job, "cloud-visual-review", cloudVisualReview.used ? "Cloud visual review after local materials: " + cloudVisualReview.status : "Cloud visual review after local materials skipped: " + (cloudVisualReview.reason || "not available"), cloudVisualReview);
+  return { generated: generated.filter((entry) => !entry.failed && entry.record).length, failed: generated.filter((entry) => entry.failed || !entry.record).length, generatedRecords: generated, routePlan: nextRoutePlan, cloudVisualReview };
 }
 
 function applyImageSupplementPlanToDeck(deck = {}, plan = {}, files = [], routePlan = null) {
@@ -1081,6 +1507,12 @@ function applyImageSupplementPlanToDeck(deck = {}, plan = {}, files = [], routeP
     const item = itemsBySlide.get(index + 1);
     if (!item) return slide;
     const routeStep = routePlan?.layoutSequence?.[index] || {};
+    const currentLayout = slide.layout || routeStep.layout || "";
+    const targetLayout = ["cover", "closing"].includes(currentLayout)
+      ? currentLayout
+      : imageSlotLimitForLayout(currentLayout) ? currentLayout : "visual";
+    const slotLimit = imageSlotLimitForLayout(targetLayout);
+    if (!slotLimit) return { ...slide, imageSlots: [] };
     const sourcePage = Number(item.sourcePage || inferSourcePage(routeStep, slide, index) || 0);
     const sourceFiles = files.filter((file) => isImageUpload(file) && Number(file.sourceSlide || 0) === sourcePage);
     const preferred = chooseVisualSourceImages(sourceFiles, files, slide, routeStep)
@@ -1088,7 +1520,7 @@ function applyImageSupplementPlanToDeck(deck = {}, plan = {}, files = [], routeP
       .filter(Boolean)
       .slice(0, 3);
     const fallback = normalizeClientList(item.availableSourceImages).slice(0, 3);
-    const nextSlots = uniqueTextList([...preferred, ...fallback, ...normalizeClientList(slide.imageSlots)]).slice(0, 4);
+    const nextSlots = uniqueTextList([...preferred, ...fallback, ...normalizeClientList(slide.imageSlots)]).slice(0, slotLimit);
     if (!nextSlots.length) return slide;
     changes.push({
       slide: index + 1,
@@ -1100,7 +1532,7 @@ function applyImageSupplementPlanToDeck(deck = {}, plan = {}, files = [], routeP
     });
     return {
       ...slide,
-      layout: ["cover", "closing"].includes(slide.layout) ? slide.layout : slide.layout || "visual",
+      layout: targetLayout,
       imageSlots: nextSlots,
       visualIntent: [
         cleanClientText(slide.visualIntent),
@@ -1126,7 +1558,7 @@ app.post("/api/jobs/outline", async (req, res, next) => {
       try {
         extracted.push({ name: file.originalName, text: await extractText(file) });
       } catch (error) {
-        extracted.push({ name: file.originalName, text: `资料抽取失败：${error.message}` });
+        extracted.push({ name: file.originalName, text: "Extraction failed: " + error.message });
       }
     }
     const materialBrief = buildMaterialBrief([
@@ -1134,11 +1566,11 @@ app.post("/api/jobs/outline", async (req, res, next) => {
       {
         name: "输入说明",
         text: [
-          req.body.projectName ? `项目名称：${req.body.projectName}` : "",
-          req.body.audience ? `目标对象：${req.body.audience}` : "",
-          req.body.copyMode ? `生成类型：${req.body.copyMode}` : "",
-          req.body.notes ? `补充说明：${req.body.notes}` : "",
-          Array.isArray(req.body.materials) && req.body.materials.length ? `资料类型：${req.body.materials.join("、")}` : ""
+          req.body.projectName ? "Project: " + req.body.projectName : "",
+          req.body.audience ? "Audience: " + req.body.audience : "",
+          req.body.copyMode ? "Mode: " + req.body.copyMode : "",
+          req.body.notes ? "Notes: " + req.body.notes : "",
+          Array.isArray(req.body.materials) && req.body.materials.length ? "Materials: " + req.body.materials.join(", ") : ""
         ].filter(Boolean).join("\n")
       }
     ]);
@@ -1148,7 +1580,9 @@ app.post("/api/jobs/outline", async (req, res, next) => {
       includeRiskChecklist: req.body.includeRiskChecklist !== false
     };
     attachSourceRecognitionReport(materialBrief, uploads);
-    const routePlan = routeDeck({ mode: req.body.mode || "generate", input: req.body, materialBrief, uploads });
+    const allStyleReferences = await listStyleReferences();
+    const styleReferences = filterStyleReferencesForInput(allStyleReferences, req.body);
+    const routePlan = routeDeck({ mode: req.body.mode || "generate", input: { ...req.body, styleReferences }, materialBrief, uploads });
     res.json({
       ok: true,
       outlinePlan: routePlan,
@@ -1198,7 +1632,17 @@ app.post("/api/jobs/style-preview", async (req, res, next) => {
 app.get("/api/jobs", async (_req, res, next) => {
   try {
     const jobs = await listJobs();
-    res.json({ jobs: jobs.map(toClientJob) });
+    const normalized = [];
+    const errors = [];
+    for (const job of jobs) {
+      try {
+        normalized.push(toClientJob(job));
+      } catch (error) {
+        errors.push({ id: job?.id || "unknown", error: error.message || "job normalization failed" });
+        normalized.push(toSafeClientJob(job, error));
+      }
+    }
+    res.json({ jobs: normalized, errors });
   } catch (error) {
     next(error);
   }
@@ -1217,7 +1661,7 @@ app.get("/api/design-system", async (_req, res, next) => {
 app.get("/api/jobs/:id", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     res.json(toClientJob(job));
   } catch (error) {
     next(error);
@@ -1227,7 +1671,7 @@ app.get("/api/jobs/:id", async (req, res, next) => {
 app.delete("/api/jobs/:id", async (req, res, next) => {
   try {
     const deleted = await deleteJob(req.params.id);
-    if (!deleted) return res.status(404).json({ error: "任务不存在" });
+    if (!deleted) return res.status(404).json({ error: "任务不存在。" });
     res.json({ ok: true, deleted: { id: deleted.id, title: deleted.deck?.title || "" } });
   } catch (error) {
     next(error);
@@ -1237,25 +1681,97 @@ app.delete("/api/jobs/:id", async (req, res, next) => {
 app.post("/api/jobs/:id/slides/:slideIndex/revise", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const slideIndex = Number(req.params.slideIndex);
     const beforeLayout = job.deck?.slides?.[slideIndex]?.layout || null;
     const result = await reviseSlide(job.deck, slideIndex, req.body.instruction || "");
     const routePlan = job.input?.routePlan || null;
     const validated = validateDeck(result.deck, routePlan);
-    pushUndo(job, `撤销第 ${slideIndex + 1} 页指令改写`);
+    pushUndo(job, "Undo revise slide " + (slideIndex + 1));
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
     job.aiUsed = job.aiUsed || result.aiUsed;
     job.aiProvider = result.provider || job.aiProvider || null;
-    job.warning = [result.warning, ...validated.warnings].filter(Boolean).join("；") || job.warning;
+    job.warning = [result.warning, ...validated.warnings].filter(Boolean).join("; ") || job.warning;
     const afterLayout = job.deck?.slides?.[slideIndex]?.layout || null;
-    addEvent(job, result.aiUsed ? "revise" : "fallback", `第 ${slideIndex + 1} 页已应用修改指令`, { instruction: req.body.instruction || "", beforeLayout, afterLayout, warnings: validated.warnings });
+    addEvent(job, result.aiUsed ? "revise" : "fallback", "Slide " + (slideIndex + 1) + " revision applied", { instruction: req.body.instruction || "", beforeLayout, afterLayout, warnings: validated.warnings });
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    addEvent(job, "rendered", "修改后 PPTX 已重新生成", { pptx: job.exports.pptx });
-    await refreshPreview(job, "已刷新");
+    addEvent(job, "rendered", "PPTX regenerated after revision", { pptx: job.exports.pptx });
+    await refreshPreview(job, "regenerated");
+    await saveJob(job);
+    res.json(toClientJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/jobs/:id/visual-target/sample", async (req, res, next) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    ensureSceneGraphForJob(job);
+    const prompt = cleanClientText(req.body?.prompt) || buildVisualTargetSamplePrompt(job.visualTarget);
+    const status = await checkLocalImageStatus();
+    if (!status.ok) {
+      job.visualTarget = {
+        ...(job.visualTarget || {}),
+        sample: {
+          ...(job.visualTarget?.sample || {}),
+          status: "pending-local-image",
+          prompt,
+          reason: status.reason || "local image backend unavailable"
+        }
+      };
+      job.sceneGraphRepair = {
+        ...(job.sceneGraphRepair || {}),
+        status: job.sceneGraphRepair?.status || "planned",
+        actions: [
+          ...(job.sceneGraphRepair?.actions || []),
+          { slideId: "deck", action: "generate-visual-target-sample", status: "pending", reason: job.visualTarget.sample.reason }
+        ],
+        pendingCount: Number(job.sceneGraphRepair?.pendingCount || 0) + 1
+      };
+      addEvent(job, "visual-target-sample", "Visual target sample pending: local image backend unavailable", { reason: job.visualTarget.sample.reason });
+      job.updatedAt = new Date().toISOString();
+      await saveJob(job);
+      res.json(toClientJob(job));
+      return;
+    }
+    const record = await generateLocalImage({
+      prompt,
+      width: 1280,
+      height: 720,
+      steps: Number(req.body?.steps || 8),
+      seed: req.body?.seed || Date.now(),
+      prefix: "visual_target_" + job.id,
+      textSafeArea: "No readable text should be generated; this is composition-only."
+    });
+    job.files = [...(job.files || []), { ...record, materialRole: "visual-target-reference" }];
+    job.visualTarget = {
+      ...(job.visualTarget || {}),
+      sample: {
+        ...(job.visualTarget?.sample || {}),
+        status: "generated",
+        prompt,
+        imageId: record.id,
+        imagePath: record.path,
+        imageName: record.originalName,
+        provider: record.provider,
+        createdAt: record.createdAt,
+        purpose: "visual reference only; not used as final PPT background"
+      }
+    };
+    job.sceneGraphRepair = {
+      ...(job.sceneGraphRepair || {}),
+      completed: [
+        ...(job.sceneGraphRepair?.completed || []),
+        { slideId: "deck", action: "generate-visual-target-sample", status: "done", imageId: record.id }
+      ]
+    };
+    addEvent(job, "visual-target-sample", "Visual target sample generated as SceneGraph reference only", { image: record.originalName, provider: record.provider });
+    job.updatedAt = new Date().toISOString();
     await saveJob(job);
     res.json(toClientJob(job));
   } catch (error) {
@@ -1266,11 +1782,12 @@ app.post("/api/jobs/:id/slides/:slideIndex/revise", async (req, res, next) => {
 app.post("/api/jobs/:id/slides/:slideIndex/update", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const slideIndex = Number(req.params.slideIndex);
     const currentSlide = job.deck?.slides?.[slideIndex];
-    if (!currentSlide) return res.status(404).json({ error: "页面不存在" });
+    if (!currentSlide) return res.status(404).json({ error: "页面不存在。" });
     const incoming = req.body.slide || {};
+    const canvasEdits = normalizeCanvasEdits(incoming.canvasEdits || currentSlide.canvasEdits);
     const nextSlide = {
       ...currentSlide,
       layout: cleanClientText(incoming.layout) || currentSlide.layout,
@@ -1282,10 +1799,11 @@ app.post("/api/jobs/:id/slides/:slideIndex/update", async (req, res, next) => {
       speakerNotes: cleanClientText(incoming.speakerNotes),
       bullets: normalizeClientList(incoming.bullets),
       dataPoints: normalizeClientList(incoming.dataPoints),
-      imageSlots: normalizeClientList(incoming.imageSlots),
-      canvasEdits: normalizeCanvasEdits(incoming.canvasEdits || currentSlide.canvasEdits)
+      imageSlots: normalizeImageSlotsForLayout(incoming.layout || currentSlide.layout, incoming.imageSlots),
+      canvasEdits,
+      canvasEditsEnabled: Boolean(canvasEdits) || Boolean(currentSlide.canvasEditsEnabled)
     };
-    pushUndo(job, `撤销第 ${slideIndex + 1} 页手动编辑`);
+    pushUndo(job, "Undo manual edit slide " + (slideIndex + 1));
     job.deck = {
       ...job.deck,
       slides: job.deck.slides.map((slide, index) => (index === slideIndex ? nextSlide : slide))
@@ -1294,13 +1812,14 @@ app.post("/api/jobs/:id/slides/:slideIndex/update", async (req, res, next) => {
     if (job.input) job.input.routePlan = routePlan;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
+    job.sceneGraphOverrides = buildSceneGraphOverridesForSlide(job.sceneGraphOverrides, slideIndex, job.deck.slides[slideIndex], incoming);
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : job.warning;
-    addEvent(job, "manual-edit", `第 ${slideIndex + 1} 页文字已手动保存`, { warnings: validated.warnings });
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : job.warning;
+    addEvent(job, "manual-edit", "Slide " + (slideIndex + 1) + " manual edit saved", { warnings: validated.warnings });
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "已刷新");
+    await refreshPreview(job, "refreshed");
     await saveJob(job);
     res.json(toClientJob(job));
   } catch (error) {
@@ -1311,18 +1830,18 @@ app.post("/api/jobs/:id/slides/:slideIndex/update", async (req, res, next) => {
 app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const slideIndex = Number(req.params.slideIndex);
     const action = cleanClientText(req.body.action);
     const slides = job.deck?.slides || [];
-    if (!slides[slideIndex]) return res.status(404).json({ error: "页面不存在" });
+    if (!slides[slideIndex]) return res.status(404).json({ error: "页面不存在。" });
     let nextSlides = [...slides];
     let nextIndex = slideIndex;
     if (action === "duplicate") {
       const source = slides[slideIndex];
       nextSlides.splice(slideIndex + 1, 0, {
         ...source,
-        title: `${source.title || "未命名页面"} 副本`
+        title: (source.title || "Untitled slide") + " copy"
       });
       nextIndex = slideIndex + 1;
     } else if (action === "insert-after" || action === "insert-before") {
@@ -1334,7 +1853,7 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
         title: defaults.title,
         subtitle: defaults.subtitle,
         storyRole: defaults.storyRole,
-        contentSource: "用户输入",
+        contentSource: "User input",
         bullets: defaults.bullets,
         dataPoints: defaults.dataPoints,
         imageSlots: [],
@@ -1343,7 +1862,7 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
       });
       nextIndex = insertIndex;
     } else if (action === "delete") {
-      if (slides.length <= 1) return res.status(400).json({ error: "至少需要保留 1 页" });
+      if (slides.length <= 1) return res.status(400).json({ error: "At least one slide is required" });
       nextSlides.splice(slideIndex, 1);
       nextIndex = Math.max(0, Math.min(slideIndex, nextSlides.length - 1));
     } else if (action === "move-up") {
@@ -1362,24 +1881,21 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
       nextSlides.splice(toIndex, 0, moved);
       nextIndex = toIndex;
     } else {
-      return res.status(400).json({ error: "未知页面操作" });
+      return res.status(400).json({ error: "Unknown slide action" });
     }
-    pushUndo(job, `撤销页面操作：${action}`);
-    const previousPreviewImages = [...(job.previewImages || [])];
-    job.skipPreviewRender = true;
+    pushUndo(job, "Undo slide action: " + action);
     job.deck = { ...job.deck, slides: nextSlides };
     const routePlan = syncRoutePlanWithSlides(job.input?.routePlan || null, nextSlides, action);
     if (job.input) job.input.routePlan = routePlan;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : job.warning;
-    addEvent(job, "slide-action", `页面操作完成：${action}`, { action, from: slideIndex, to: nextIndex, slideCount: job.deck.slides.length });
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : job.warning;
+    addEvent(job, "slide-action", "Slide action completed: " + action, { action, from: slideIndex, to: nextIndex, slideCount: job.deck.slides.length });
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "页面结构已刷新");
-    syncPreviewAfterSlideAction(job, previousPreviewImages, action, slideIndex, nextIndex);
+    await refreshPreview(job, "slide structure refreshed");
     await saveJob(job);
     res.json({ ...toClientJob(job), selectedSlide: nextIndex });
   } catch (error) {
@@ -1390,17 +1906,29 @@ app.post("/api/jobs/:id/slides/:slideIndex/action", async (req, res, next) => {
 app.post("/api/jobs/:id/export", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const formats = req.body.formats || ["pptx"];
     if (formats.includes("pdf") || formats.includes("png")) {
+      ensureSceneGraphForJob(job);
+      const exportQuality = enrichQuality(job.quality || {}, job.files || [], job.input?.materialBrief || {}, job.input?.routePlan || null);
+      const exportQa = buildHybridQa(job, { ...exportQuality, sceneGraphQa: job.sceneGraphQa, visualCompare: job.visualCompare }, job.previewImages || []);
+      const exportGate = buildFinalExportGate({ formats, hybridQa: exportQa, allowBlockedExport: req.body.allowBlockedExport });
+      if (exportGate.blocked) {
+        job.exportWarning = exportGate.reason;
+        addEvent(job, "export-blocked", job.exportWarning, { formats, hybridQa: exportQa, exportGate });
+        job.updatedAt = new Date().toISOString();
+        await saveJob(job);
+        res.status(409).json({ ...toClientJob(job), error: job.exportWarning, exportBlocked: true });
+        return;
+      }
       try {
         const result = await exportWithPowerPoint(job.exports.pptx, formats.filter((item) => item !== "pptx"));
         job.exports = { ...job.exports, ...result };
         job.exportMeta = collectExportMeta(job.exports);
         job.exportWarning = null;
-        addEvent(job, "export", `导出完成：${formats.join(", ")}`, result);
+        addEvent(job, "export", "Export completed: " + formats.join(", "), result);
       } catch (error) {
-        job.exportWarning = `PDF/PNG 导出失败：${error.message}`;
+        job.exportWarning = "PDF/PNG export failed: " + error.message;
         addEvent(job, "export-error", job.exportWarning, { formats });
       }
     }
@@ -1415,9 +1943,9 @@ app.post("/api/jobs/:id/export", async (req, res, next) => {
 app.post("/api/jobs/:id/preview", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
-    if (!job.exports?.pptx) return res.status(400).json({ error: "当前任务还没有 PPTX 文件" });
-    await refreshPreview(job, "已重新生成");
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
+    if (!job.exports?.pptx) return res.status(400).json({ error: "当前任务还没有 PPTX 文件。" });
+    await refreshPreview(job, "regenerated");
     job.updatedAt = new Date().toISOString();
     await saveJob(job);
     res.json(toClientJob(job));
@@ -1429,16 +1957,16 @@ app.post("/api/jobs/:id/preview", async (req, res, next) => {
 app.post("/api/jobs/:id/template", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const style = cleanClientText(req.body.style);
-    if (!style) return res.status(400).json({ error: "请选择模板" });
+    if (!style) return res.status(400).json({ error: "请选择模板。" });
     const nextInput = { ...(job.input || {}), style };
     const materialBrief = nextInput.materialBrief || {};
     const routePlan = routeDeck({ mode: job.mode || "generate", input: nextInput, materialBrief, uploads: job.files || [] });
-    pushUndo(job, `撤销切换模板：${routePlan.templatePack?.name || style}`);
+    pushUndo(job, "Undo template switch: " + (routePlan.templatePack?.name || style));
     job.input = { ...nextInput, routePlan };
     job.quality = enrichQuality(job.quality || {}, job.files || [], materialBrief, routePlan);
-    addEvent(job, "template", `已切换模板并重新渲染：${routePlan.templatePack?.name || style}`, {
+    addEvent(job, "template", "Template switched and rerendered: " + (routePlan.templatePack?.name || style), {
       style,
       templatePack: routePlan.templatePack || null,
       layouts: routePlan.layoutSequence?.map((step) => step.layout) || []
@@ -1446,7 +1974,7 @@ app.post("/api/jobs/:id/template", async (req, res, next) => {
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "已按新模板刷新");
+    await refreshPreview(job, "template refreshed");
     await saveJob(job);
     res.json(toClientJob(job));
   } catch (error) {
@@ -1457,18 +1985,18 @@ app.post("/api/jobs/:id/template", async (req, res, next) => {
 app.post("/api/jobs/:id/rewrite", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const instruction = cleanClientText(req.body.instruction);
-    if (!instruction) return res.status(400).json({ error: "请输入整份改写指令" });
+    if (!instruction) return res.status(400).json({ error: "Please enter rewrite instruction" });
     const beforeLayouts = (job.deck?.slides || []).map((slide) => slide.layout);
-    pushUndo(job, `撤销整份批量改写：${instruction}`);
+    pushUndo(job, "Undo deck rewrite: " + instruction);
     job.deck = rewriteDeckLocally(job.deck, instruction);
     const routePlan = job.input?.routePlan || null;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : job.warning;
-    addEvent(job, "deck-rewrite", "整份 PPT 已按指令批量改写", {
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : job.warning;
+    addEvent(job, "deck-rewrite", "Deck rewritten by instruction", {
       instruction,
       beforeLayouts,
       afterLayouts: job.deck.slides.map((slide) => slide.layout)
@@ -1476,7 +2004,7 @@ app.post("/api/jobs/:id/rewrite", async (req, res, next) => {
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "整份改写已刷新");
+    await refreshPreview(job, "deck rewrite refreshed");
     await saveJob(job);
     res.json(toClientJob(job));
   } catch (error) {
@@ -1487,8 +2015,8 @@ app.post("/api/jobs/:id/rewrite", async (req, res, next) => {
 app.post("/api/jobs/:id/repair", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
-    pushUndo(job, "撤销交付自检修复");
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
+    pushUndo(job, "Undo delivery QA repair");
     let routePlan = job.input?.routePlan || null;
     const report = repairDeckForDelivery(job.deck, routePlan, job.files || [], job.input?.materialBrief || {});
     job.deck = report.deck;
@@ -1497,12 +2025,12 @@ app.post("/api/jobs/:id/repair", async (req, res, next) => {
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : null;
-    addEvent(job, "delivery-repair", "交付自检修复已完成", report.summary);
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : null;
+    addEvent(job, "delivery-repair", "Delivery QA repair completed", report.summary);
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "交付自检修复已刷新");
+    await refreshPreview(job, "delivery repair refreshed");
     await saveJob(job);
     res.json(toClientJob(job));
   } catch (error) {
@@ -1513,8 +2041,8 @@ app.post("/api/jobs/:id/repair", async (req, res, next) => {
 app.post("/api/jobs/:id/apply-image-supplement", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
-    pushUndo(job, "撤销补图计划执行");
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
+    pushUndo(job, "Undo image supplement plan");
     let routePlan = job.input?.routePlan || null;
     const materialBrief = job.input?.materialBrief || {};
     const report = applyImageSupplementPlanToDeck(job.deck, job.imageSupplementPlan, job.files || [], routePlan);
@@ -1530,15 +2058,15 @@ app.post("/api/jobs/:id/apply-image-supplement", async (req, res, next) => {
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : null;
-    addEvent(job, "image-supplement-apply", "已按补图计划复用原稿图并重绘", report.summary);
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : null;
+    addEvent(job, "image-supplement-apply", "Image supplement plan applied and rerendered", report.summary);
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "补图计划已执行");
-    const cloudVisualReview = await reviewDeckVisuals({ stage: `${job.mode || "job"}-image-supplement`, deck: job.deck, quality: job.quality, routePlan, materialBrief, previewImages: job.previewImages || [] });
+    await refreshPreview(job, "image supplement applied");
+    const cloudVisualReview = await reviewDeckVisuals({ stage: String(job.mode || "job") + "-image-supplement", deck: job.deck, quality: job.quality, routePlan, materialBrief, previewImages: job.previewImages || [] });
     job.cloudReviews = [...(job.cloudReviews || []), cloudVisualReview];
-    addEvent(job, "cloud-visual-review", cloudVisualReview.used ? `补图后云端视觉复审：${cloudVisualReview.status}` : `补图后云端视觉复审跳过：${cloudVisualReview.reason || "not available"}`, cloudVisualReview);
+    addEvent(job, "cloud-visual-review", cloudVisualReview.used ? "Cloud visual review after image supplement: " + cloudVisualReview.status : "Cloud visual review after image supplement skipped: " + (cloudVisualReview.reason || "not available"), cloudVisualReview);
     job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan, materialBrief, files: job.files || [], cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
     job.agentReviews = [...(job.agentReviews || []), buildAgentReview(job.mode === "style-preview" ? "style-preview" : "final-deck", job.deck, job.quality, routePlan, materialBrief, job.files || [], job.previewImages || [], cloudVisualReview)];
     await saveJob(job);
@@ -1551,11 +2079,11 @@ app.post("/api/jobs/:id/apply-image-supplement", async (req, res, next) => {
 app.post("/api/jobs/:id/apply-local-image-supplement", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const routePlan = job.input?.routePlan || null;
     const materialBrief = job.input?.materialBrief || {};
     const plan = job.imageSupplementPlan || buildImageSupplementPlan({ deck: job.deck, routePlan, materialBrief, files: job.files || [], cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
-    const targets = (plan.items || []).filter((item) => item.action === "need-remote-generation").slice(0, 3);
+    const targets = (plan.items || []).filter((item) => item.action === "need-remote-generation").map(annotateMaterialTarget).slice(0, 3);
     if (!targets.length) {
       res.status(400).json({ error: "当前补图计划没有需要本地生成的页面；可先复用原稿图或重新跑视觉质检。" });
       return;
@@ -1563,26 +2091,46 @@ app.post("/api/jobs/:id/apply-local-image-supplement", async (req, res, next) =>
     pushUndo(job, "撤销本地 Z-Image 补图");
     const generated = [];
     for (const item of targets) {
-      const pagePlan = findAestheticPagePlan(routePlan, item);
-      const record = await generateLocalImage({
-        prompt: buildLocalImagePrompt(item, routePlan),
+      const generatedRecord = await generateSupplementImageForItem(job, item, routePlan, {
         width: req.body?.width || 768,
         height: req.body?.height || 768,
         steps: req.body?.steps || 8,
         seed: req.body?.seed || Date.now() + Number(item.slide || 0),
-        textSafeArea: pagePlan?.textSafeArea || "",
-        prefix: `job_${job.id}_slide_${item.slide}_zimage`
+        allowCloudFallback: req.body?.allowCloudFallback !== false
       });
-      record.sourceSlide = Number(item.slide || 0);
-      generated.push({ item, record });
-      job.files = [...(job.files || []), record];
+      const record = generatedRecord.record;
+      if (!record) {
+        generated.push({ item, failed: true, failure: generatedRecord.failure });
+        continue;
+      }
+      let slotRecord = record;
+      let matting = null;
+      if (item.needsCutout) {
+        matting = await cutoutImage(record, { prompt: buildCloudCutoutPrompt(item, routePlan) });
+        record.matting = matting;
+        record.mattingStatus = matting.status || "failed";
+        if (matting.record) {
+          slotRecord = matting.record;
+          job.files = [...(job.files || []), record, slotRecord];
+        } else {
+          job.files = [...(job.files || []), record];
+        }
+      } else {
+        job.files = [...(job.files || []), record];
+      }
+      generated.push({ item, record: slotRecord, originalRecord: record, matting });
       const slideIndex = Number(item.slide || 0) - 1;
       if (job.deck?.slides?.[slideIndex]) {
         const slide = job.deck.slides[slideIndex];
-        slide.imageSlots = uniqueTextList([record.originalName, ...normalizeClientList(slide.imageSlots)]).slice(0, 4);
+        const slotLimit = imageSlotLimitForLayout(slide.layout || "");
+        slide.imageSlots = slotLimit
+          ? uniqueTextList([slotRecord.originalName, ...normalizeClientList(slide.imageSlots)]).slice(0, slotLimit)
+          : [];
         slide.visualIntent = [
           cleanClientText(slide.visualIntent),
-          "已由本地 Z-Image 生成 AI 补图；该图仅作为视觉素材，不作为事实来源。"
+          item.needsCutout
+            ? "Foreground material generated local-first; matting is local-first and cloud only as fallback."
+            : "AI supplement image generated as visual material only, not a factual source."
         ].filter(Boolean).join(" ");
       }
     }
@@ -1594,26 +2142,31 @@ app.post("/api/jobs/:id/apply-local-image-supplement", async (req, res, next) =>
     const validated = validateDeck(job.deck, nextRoutePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], materialBrief, nextRoutePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : null;
-    addEvent(job, "local-image-supplement", `本地 Z-Image 已生成 ${generated.length} 张补图`, {
-      provider: "comfyui-zimage",
-      generated: generated.map(({ item, record }) => ({
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : null;
+    addEvent(job, "local-image-supplement", "Manual supplement generated " + generated.filter((entry) => !entry.failed && entry.record).length + " PPT materials", {
+      provider: "local-first-cloud-fallback",
+      generated: generated.filter((entry) => !entry.failed && entry.record).map(({ item, record, originalRecord }) => ({
         slide: item.slide,
         title: item.title,
-        image: record.originalName,
-        prompt: record.prompt,
-        seed: record.seed,
-        workflowPath: record.comfy?.workflowPath || null,
-        visualQa: record.visualQa || null
+        image: originalRecord?.originalName || record.originalName,
+        prompt: originalRecord?.prompt || record.prompt,
+        seed: originalRecord?.seed || record.seed,
+        materialRole: originalRecord?.materialRole || record.materialRole,
+        needsCutout: originalRecord?.needsCutout || false,
+        mattingStatus: originalRecord?.mattingStatus || record.mattingStatus,
+        finalImage: record.originalName,
+        mattingMethod: originalRecord?.matting?.method || null,
+        workflowPath: originalRecord?.comfy?.workflowPath || record.comfy?.workflowPath || null,
+        visualQa: originalRecord?.visualQa || record.visualQa || null
       }))
     });
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
-    await refreshPreview(job, "本地 Z-Image 补图已执行");
-    const cloudVisualReview = await reviewDeckVisuals({ stage: `${job.mode || "job"}-local-image-supplement`, deck: job.deck, quality: job.quality, routePlan: nextRoutePlan, materialBrief, previewImages: job.previewImages || [] });
+    await refreshPreview(job, "local image supplement applied");
+    const cloudVisualReview = await reviewDeckVisuals({ stage: String(job.mode || "job") + "-local-image-supplement", deck: job.deck, quality: job.quality, routePlan: nextRoutePlan, materialBrief, previewImages: job.previewImages || [] });
     job.cloudReviews = [...(job.cloudReviews || []), cloudVisualReview];
-    addEvent(job, "cloud-visual-review", cloudVisualReview.used ? `本地补图后云端视觉复审：${cloudVisualReview.status}` : `本地补图后云端视觉复审跳过：${cloudVisualReview.reason || "not available"}`, cloudVisualReview);
+    addEvent(job, "cloud-visual-review", cloudVisualReview.used ? "Cloud visual review after local image supplement: " + cloudVisualReview.status : "Cloud visual review after local image supplement skipped: " + (cloudVisualReview.reason || "not available"), cloudVisualReview);
     job.imageSupplementPlan = buildImageSupplementPlan({ deck: job.deck, routePlan: nextRoutePlan, materialBrief, files: job.files || [], cloudReviews: job.cloudReviews || [], visualFixes: job.visualFixes || [] });
     job.agentReviews = [...(job.agentReviews || []), buildAgentReview(job.mode === "style-preview" ? "style-preview" : "final-deck", job.deck, job.quality, nextRoutePlan, materialBrief, job.files || [], job.previewImages || [], cloudVisualReview)];
     await saveJob(job);
@@ -1623,10 +2176,133 @@ app.post("/api/jobs/:id/apply-local-image-supplement", async (req, res, next) =>
   }
 });
 
+async function maybeRunOneClickVisualProject(job = {}, body = {}) {
+  if (body.autoVisualProject === false || body.visualProjectMode === "manual") {
+    addEvent(job, "visual-project", "Visual project auto generation skipped by request", { mode: "manual" });
+    return { status: "skipped", skipped: true, reason: "visual project generation is manual for this request" };
+  }
+  attachAssetFirstState(job, job.input?.materialBrief || {}, job.input?.routePlan || {});
+  await ensureVisualProjectForJob(job);
+  const maxSlides = resolveVisualProjectMaxSlides(body, job.deck?.slides?.length || 0);
+  if (maxSlides === 0) {
+    addEvent(job, "visual-project", "Visual project prepared without slide image generation", { maxSlides });
+    return { status: "prepared", skipped: true, reason: "visual project prepared; origin_image generation deferred" };
+  }
+  try {
+    const generation = await generateVisualProjectSlides(job, {
+      maxSlides,
+      overwrite: Boolean(body.visualProjectOverwrite),
+      generateImage: (slideJob) => generateVisualProjectSlideImage(job, slideJob, body || {})
+    });
+    normalizeExportAliases(job);
+    if (job.visualProject?.visualTargetPptxPath) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
+    job.exportMeta = collectExportMeta(job.exports || {});
+    addEvent(job, "visual-project-generate", "One-click visual project generation " + generation.status, {
+      ...generation,
+      maxSlides: maxSlides === Infinity ? "all" : maxSlides
+    });
+    return generation;
+  } catch (error) {
+    const generation = {
+      status: "blocked",
+      blockerCount: 1,
+      blockers: [{ id: "visual-project", reason: error.message || "visual project generation failed" }],
+      updatedAt: new Date().toISOString()
+    };
+    job.visualProject = {
+      ...(job.visualProject || {}),
+      status: "blocked",
+      generation,
+      warnings: [...(job.visualProject?.warnings || []), generation.blockers[0].reason]
+    };
+    addEvent(job, "visual-project-blocked", "One-click visual project generation blocked", generation);
+    return generation;
+  }
+}
+
+function resolveVisualProjectMaxSlides(body = {}, slideCount = 0) {
+  const raw = body.visualProjectMaxSlides ?? body.maxVisualProjectSlides ?? body.maxSlides;
+  if (raw === "all" || raw === undefined || raw === null || raw === "") return Infinity;
+  if (raw === "none" || raw === "manual" || raw === false) return 0;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return Infinity;
+  return Math.max(0, Math.min(Math.max(slideCount || 0, 1), Math.floor(value)));
+}
+
+app.post("/api/jobs/:id/visual-project/generate", async (req, res, next) => {
+  try {
+    const job = await getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    attachAssetFirstState(job, job.input?.materialBrief || {}, job.input?.routePlan || {});
+    const maxSlides = req.body?.maxSlides === "all" ? Infinity : Math.max(1, Math.min(12, Number(req.body?.maxSlides || 3)));
+    const overwrite = Boolean(req.body?.overwrite);
+    const generation = await generateVisualProjectSlides(job, {
+      maxSlides,
+      overwrite,
+      generateImage: (slideJob) => generateVisualProjectSlideImage(job, slideJob, req.body || {})
+    });
+    normalizeExportAliases(job);
+    if (job.visualProject?.visualTargetPptxPath) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
+    job.exportMeta = collectExportMeta(job.exports || {});
+    addEvent(job, "visual-project-generate", "Visual project slide generation " + generation.status, generation);
+    job.updatedAt = new Date().toISOString();
+    await saveJob(job);
+    res.json(toClientJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function generateVisualProjectSlideImage(job = {}, slideJob = {}, options = {}) {
+  const prompt = cleanClientText(options.prompt || slideJob.prompt);
+  const prefix = `visual_project_${job.id}_${slideJob.id}`;
+  const seedBase = Number(options.seed || Date.now());
+  const seed = seedBase + Number(slideJob.index || slideJob.id?.match(/\d+/)?.[0] || 0);
+  const cloudPreferred = options.cloudVisualProject !== false && options.visualProjectBackend !== "local-first";
+  if (cloudPreferred && process.env.OPENAI_API_KEY) {
+    try {
+      return await generateCloudImage({
+        prompt,
+        width: Number(options.width || 1280),
+        height: Number(options.height || 720),
+        prefix: `visual_project_cloud_${job.id}_${slideJob.id}`,
+        textSafeArea: "Avoid readable text; reserve safe title/body regions for editable PPT text.",
+        materialRole: "visual-target-reference"
+      });
+    } catch (error) {
+      addEvent(job, "visual-project-cloud-fallback", "Cloud visual target generation failed; trying local image backend", {
+        slideId: slideJob.id,
+        reason: error.message || "cloud image generation failed"
+      });
+    }
+  }
+  const localStatus = await checkLocalImageStatus();
+  if (localStatus.ok) {
+    return generateLocalImage({
+      prompt,
+      width: Number(options.width || 1280),
+      height: Number(options.height || 720),
+      steps: Number(options.steps || 8),
+      seed,
+      prefix,
+      textSafeArea: "Avoid readable text; reserve safe title/body regions for editable PPT text."
+    });
+  }
+  if (options.allowCloudFallback === false) throw new Error(localStatus.reason || "local image backend unavailable");
+  return generateCloudImage({
+    prompt,
+    width: Number(options.width || 1280),
+    height: Number(options.height || 720),
+    prefix: `visual_project_cloud_${job.id}_${slideJob.id}`,
+    textSafeArea: "Avoid readable text; reserve safe title/body regions for editable PPT text.",
+    materialRole: "visual-target-reference"
+  });
+}
+
 app.post("/api/jobs/:id/rescan-local-image-qa", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const routePlan = job.input?.routePlan || null;
     let checked = 0;
     let warned = 0;
@@ -1646,7 +2322,7 @@ app.post("/api/jobs/:id/rescan-local-image-qa", async (req, res, next) => {
     }
     const materialBrief = job.input?.materialBrief || {};
     job.quality = enrichQuality(job.quality || {}, job.files || [], materialBrief, routePlan);
-    addEvent(job, "local-image-qa", `本地图片 QA 已重扫 ${checked} 张，${warned} 张有风险`, { checked, warned, localImageQa: job.quality.localImageQa });
+    addEvent(job, "local-image-qa", "Local image QA rerun: " + checked + " checked, " + warned + " warned", { checked, warned, localImageQa: job.quality.localImageQa });
     job.updatedAt = new Date().toISOString();
     await saveJob(job);
     res.json(toClientJob(job));
@@ -1658,17 +2334,17 @@ app.post("/api/jobs/:id/rescan-local-image-qa", async (req, res, next) => {
 app.post("/api/jobs/:id/undo", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     const snapshot = (job.undoStack || []).pop();
-    if (!snapshot) return res.status(400).json({ error: "没有可撤销的操作" });
+    if (!snapshot) return res.status(400).json({ error: "No undo snapshot available" });
     job.deck = snapshot.deck;
     if (snapshot.input) job.input = snapshot.input;
     const routePlan = job.input?.routePlan || null;
     const validated = validateDeck(job.deck, routePlan);
     job.deck = validated.deck;
     job.quality = enrichQuality(validated.quality, job.files || [], job.input?.materialBrief, routePlan);
-    job.warning = validated.warnings.length ? validated.warnings.join("；") : job.warning;
-    addEvent(job, "undo", snapshot.label || "已撤销上一步操作", { remaining: job.undoStack.length });
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : job.warning;
+    addEvent(job, "undo", snapshot.label || "Undid previous action", { remaining: job.undoStack.length });
     job.updatedAt = new Date().toISOString();
     job.exports.pptx = await buildDeck(job);
     job.exportMeta = collectExportMeta(job.exports);
@@ -1683,7 +2359,7 @@ app.post("/api/jobs/:id/undo", async (req, res, next) => {
 app.post("/api/jobs/:id/feedback", async (req, res, next) => {
   try {
     const job = await getJob(req.params.id);
-    if (!job) return res.status(404).json({ error: "任务不存在" });
+    if (!job) return res.status(404).json({ error: "任务不存在。" });
     job.feedback = { rating: req.body.rating, comment: req.body.comment || "", createdAt: new Date().toISOString() };
     job.updatedAt = new Date().toISOString();
     await saveJob(job);
@@ -1706,16 +2382,43 @@ if (fsSync.existsSync(distIndex)) {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(500).json({ error: error.message || "服务器错误" });
+  res.status(500).json({ error: error.message || "Server error" });
 });
 
 app.listen(port, () => {
-  console.log(`PPT Design Tool running at http://127.0.0.1:${port}`);
+  console.log("PPT Design Tool running at http://127.0.0.1:" + port);
 });
 
 function toClientJob(job) {
   const { undoStack: _undoStack, ...publicJob } = job;
+  normalizeExportAliases(job);
   const derivedQuality = enrichQuality(job.quality || {}, job.files || [], job.input?.materialBrief || {}, job.input?.routePlan || null);
+  const normalizedDeck = normalizeDeckImageSlotsForLayouts(job.deck);
+  const derivedImageSupplementPlan = buildImageSupplementPlan({
+    deck: normalizedDeck,
+    routePlan: job.input?.routePlan || null,
+    materialBrief: job.input?.materialBrief || {},
+    files: job.files || [],
+    cloudReviews: job.cloudReviews || [],
+    visualFixes: job.visualFixes || []
+  });
+  const editableRebuildPlan = buildEditableRebuildPlan({
+    uploads: job.files || [],
+    materialBrief: job.input?.materialBrief || {},
+    routePlan: job.input?.routePlan || {},
+    deck: normalizedDeck
+  });
+  const assetManifest = job.assetManifest || buildAssetManifest({
+    files: job.files || [],
+    materialBrief: job.input?.materialBrief || {},
+    deck: normalizedDeck
+  });
+  const assetManifestQa = job.assetManifestQa || validateAssetManifest(assetManifest);
+  const sceneJob = { ...job, deck: normalizedDeck, imageSupplementPlan: derivedImageSupplementPlan, editableRebuildPlan };
+  sceneJob.assetManifest = assetManifest;
+  sceneJob.assetManifestQa = assetManifestQa;
+  ensureSceneGraphForJob(sceneJob);
+  const visualTargetForClient = attachVisualTargetSampleUrl(sceneJob.visualTarget, sceneJob.files || []);
   const toOutputUrl = (file, options = {}) => {
     if (!file) return file;
     if (Array.isArray(file)) return file.map((item) => toOutputUrl(item, options));
@@ -1723,21 +2426,395 @@ function toClientJob(job) {
     const normalized = path.normalize(file);
     if (!normalized.startsWith(outputDir) || !fsSync.existsSync(normalized)) return null;
     const relative = path.relative(outputDir, normalized).split(path.sep).map(encodeURIComponent).join("/");
-    const version = options.cacheBust ? `?v=${Math.round(fsSync.statSync(normalized).mtimeMs)}` : "";
-    return `/outputs/${relative}${version}`;
+    const version = options.cacheBust ? "?v=" + Math.round(fsSync.statSync(normalized).mtimeMs) : "";
+    return "/outputs/" + relative + version;
   };
   const previewImages = (job.previewImages || []).map((file) => toOutputUrl(file, { cacheBust: true }));
+  const visualProject = normalizeVisualProjectForClient(sceneJob.visualProject, toOutputUrl);
   const slideCount = job.deck?.slides?.length || 0;
+  const repairedPreviewImages = previewImages.length === slideCount ? previewImages : previewImages.length && previewImages.every(Boolean) ? previewImages : repairPreviewImages(job, { cacheBust: true });
+  const hybridQa = buildHybridQa(sceneJob, { ...derivedQuality, sceneGraphQa: sceneJob.sceneGraphQa, visualCompare: sceneJob.visualCompare }, repairedPreviewImages);
   return {
     ...publicJob,
+    deck: normalizedDeck,
     quality: derivedQuality,
+    imageSupplementPlan: derivedImageSupplementPlan,
+    assetManifest,
+    assetManifestQa,
+    editableRebuildPlan,
+    visualProject,
+    visualTarget: visualTargetForClient,
+    sceneGraph: sceneJob.sceneGraph,
+    sceneGraphQa: sceneJob.sceneGraphQa,
+    sceneGraphOverrides: sceneJob.sceneGraphOverrides || null,
+    visualCompare: sceneJob.visualCompare,
+    sceneGraphRepair: sceneJob.sceneGraphRepair,
+    hybridQa,
+    pipeline: buildPipelineSnapshot(sceneJob, { ...derivedQuality, sceneGraphQa: sceneJob.sceneGraphQa, visualCompare: sceneJob.visualCompare }, repairedPreviewImages),
+    editReadiness: buildEditReadiness(sceneJob, { ...derivedQuality, sceneGraphQa: sceneJob.sceneGraphQa, visualCompare: sceneJob.visualCompare }, repairedPreviewImages),
     canUndo: Boolean(job.undoStack?.length),
     undoLabel: job.undoStack?.at(-1)?.label || null,
     input: normalizeInput(job.input),
     files: (job.files || []).map(normalizeUploadRecord),
     exports: Object.fromEntries(Object.entries(job.exports || {}).map(([key, value]) => [key, toOutputUrl(value)])),
     exportMeta: job.exportMeta || collectExportMeta(job.exports || {}),
-    previewImages: previewImages.length === slideCount ? previewImages : previewImages.length && previewImages.every(Boolean) ? previewImages : repairPreviewImages(job, { cacheBust: true })
+    previewImages: repairedPreviewImages
+  };
+}
+
+function buildPipelineSnapshot(job = {}, quality = {}, previewImages = []) {
+  const routePlan = job.input?.routePlan || {};
+  const materialBrief = job.input?.materialBrief || {};
+  const sourceReport = materialBrief.sourceReport || {};
+  const deckSlides = Array.isArray(job.deck?.slides) ? job.deck.slides : [];
+  const imagePlan = job.imageSupplementPlan || {};
+  const editablePlan = job.editableRebuildPlan || {};
+  const assetManifest = job.assetManifest || {};
+  const assetManifestQa = job.assetManifestQa || {};
+  const visualProject = job.visualProject || {};
+  const sceneGraphQa = job.sceneGraphQa || quality.sceneGraphQa || {};
+  const visualCompare = job.visualCompare || quality.visualCompare || {};
+  const pptxEditability = quality.pptxEditability || job.quality?.pptxEditability || {};
+  const sceneGraphRepair = job.sceneGraphRepair || {};
+  const cloudReviews = Array.isArray(job.cloudReviews) ? job.cloudReviews : [];
+  const editReadiness = buildEditReadiness(job, quality, previewImages);
+  const hasSource = Boolean(sourceReport.hasOldDeck || materialBrief.charCount || (job.files || []).length);
+  const sourceWarnings = [...(sourceReport.warnings || []), ...(sourceReport.extractionAudit?.warnings || [])].filter(Boolean);
+  const visualReview = cloudReviews.at(-1) || null;
+  const stage = (id, label, status, summary, extra = {}) => ({
+    id,
+    label,
+    status,
+    summary,
+    warnings: extra.warnings || [],
+    errors: extra.errors || [],
+    metrics: extra.metrics || {}
+  });
+  const stages = [
+    stage("source-intake", "Source intake", hasSource ? (sourceWarnings.length ? "warn" : "pass") : "skipped", hasSource ? "Extracted text, images, and source records" : "No uploaded source; generate from conversation", {
+      warnings: sourceWarnings,
+      metrics: {
+        files: (job.files || []).length,
+        pages: sourceReport.pageCount || materialBrief.pageCount || 0,
+        extractedImages: sourceReport.extractedImageCount || sourceReport.imageCount || 0
+      }
+    }),
+    stage("source-analysis", "Local/cloud analysis", sourceReport.cloudSourceAnalysis?.status === "block" ? "block" : sourceReport.cloudSourceAnalysis?.status === "warn" ? "warn" : "pass", sourceReport.cloudSourceAnalysis ? "Merged local diagnosis and cloud review" : "Used local rules and material brief", {
+      warnings: sourceReport.cloudSourceAnalysis?.findings || [],
+      metrics: {
+        aestheticScore: sourceReport.aestheticDiagnosis?.overallScore || null,
+        textPages: sourceReport.textPageCount || 0
+      }
+    }),
+    stage("asset-manifest", "Asset manifest", assetManifestQa.status === "block" ? "block" : assetManifestQa.status === "warn" ? "warn" : assetManifest.assets?.length ? "pass" : "warn", assetManifest.assets?.length ? "Locked asset identity and background rules" : "Asset manifest is waiting for source/material content", {
+      warnings: [...(assetManifestQa.errors || []), ...(assetManifestQa.warnings || []), ...(assetManifest.warnings || [])],
+      metrics: {
+        assets: assetManifest.assets?.length || 0,
+        critical: assetManifest.criticalCount || 0,
+        backgroundBlocked: assetManifest.backgroundBlockedCount || 0
+      }
+    }),
+    stage("route-plan", "Smart routing", routePlan.layoutSequence?.length ? "pass" : "block", routePlan.designDirectorStrategy ? "Design-first route generated" : "Standard route generated", {
+      metrics: {
+        deckType: routePlan.deckType || "",
+        theme: routePlan.recommendedTheme || "",
+        slides: routePlan.layoutSequence?.length || 0
+      }
+    }),
+    stage("visual-project", "Visual project", visualProject.status === "ready" ? "pass" : visualProject.status ? "warn" : "skipped", visualProject.status ? "codex-ppt style outline/spec/prompts prepared" : "Visual project not initialized yet", {
+      warnings: visualProject.warnings || [],
+      metrics: {
+        slides: visualProject.slideCount || 0,
+        generatedImages: visualProject.generatedImages || 0,
+        visualTargetPptx: visualProject.visualTargetPptxPath ? "yes" : "no"
+      }
+    }),
+    stage("asset-pipeline", "Asset pipeline", imagePlan.needed ? (editReadiness.ready ? "pass" : "warn") : "skipped", imagePlan.needed ? "Generated reuse/supplement/cutout plan" : "No extra asset processing needed", {
+      warnings: editReadiness.blockingIssues || [],
+      metrics: {
+        targets: imagePlan.targets?.length || imagePlan.items?.length || 0,
+        actions: imagePlan.actions?.length || 0
+      }
+    }),
+    stage("editable-manifest", "Editable manifest", editablePlan.candidate ? (editablePlan.status === "active" ? "pass" : "warn") : "skipped", editablePlan.candidate ? "Generated per-page object manifest and fake-editable QA" : "Not an image-to-editable rebuild case", {
+      warnings: editablePlan.warnings || [],
+      metrics: {
+        pages: editablePlan.pageCount || 0,
+        inputType: editablePlan.inputType || "",
+        riskyPages: (editablePlan.pages || []).filter((page) => page.qa?.fakeEditableRisk).length
+      }
+    }),
+    stage("scene-graph", "Editable SceneGraph", sceneGraphQa.status === "block" ? "block" : sceneGraphQa.status === "warn" ? "warn" : "pass", sceneGraphQa.slideCount ? "Editable source generated; PPTX renders from SceneGraph" : "SceneGraph not generated yet", {
+      warnings: [...(sceneGraphQa.errors || []), ...(sceneGraphQa.warnings || [])],
+      metrics: {
+        slides: sceneGraphQa.slideCount || 0,
+        textBoxes: sceneGraphQa.textBoxes || 0,
+        shapes: sceneGraphQa.shapeCount || 0,
+        images: sceneGraphQa.imageCount || 0
+      }
+    }),
+    stage("visual-target-qa", "Visual target QA", visualCompare.status === "warn" ? "warn" : "pass", visualCompare.score ? "Structure consistency score " + visualCompare.score : "Visual target brief generated; preview-level compare pending", {
+      warnings: (visualCompare.items || []).flatMap((item) => (item.warnings || []).map((warning) => String(item.slideId) + ":" + warning)).slice(0, 8),
+      metrics: {
+        score: visualCompare.score || 0,
+        method: visualCompare.method || ""
+      }
+    }),
+    stage("scene-repair", "Repair log", sceneGraphRepair.status === "blocked" ? "block" : sceneGraphRepair.status === "planned" ? "warn" : "pass", sceneGraphRepair.status === "planned" ? "Planned " + (sceneGraphRepair.pendingCount || sceneGraphRepair.actions?.length || 0) + " SceneGraph repairs" : "No SceneGraph auto repair needed", {
+      warnings: [...(sceneGraphRepair.blockers || []), ...(sceneGraphRepair.actions || []).map((item) => String(item.slideId) + ":" + item.action)].slice(0, 8),
+      metrics: {
+        pending: sceneGraphRepair.pendingCount || 0,
+        completed: sceneGraphRepair.completed?.length || 0
+      }
+    }),
+    stage("pptx-editability", "PPTX editability", pptxEditability.status === "warn" ? "warn" : "pass", pptxEditability.slideCount ? "Text boxes " + (pptxEditability.nativeTextBoxes || 0) + " / shapes " + (pptxEditability.nativeShapes || 0) + " / pictures " + (pptxEditability.nativePictures || 0) : "Waiting for PPTX OpenXML inspection", {
+      warnings: pptxEditability.warnings || [],
+      metrics: {
+        slides: pptxEditability.slideCount || 0,
+        textBoxes: pptxEditability.nativeTextBoxes || 0,
+        shapes: pptxEditability.nativeShapes || 0,
+        pictures: pptxEditability.nativePictures || 0,
+        fullSlidePictures: pptxEditability.fullSlidePictures || 0
+      }
+    }),
+    stage("editable-render", "Editable render", deckSlides.length ? "pass" : "block", deckSlides.length ? "Editable PPTX structure and preview generated" : "Deck not generated yet", {
+      metrics: {
+        slides: deckSlides.length,
+        previewImages: (previewImages || []).filter(Boolean).length
+      }
+    }),
+    stage("visual-review", "Visual review", visualReview?.status || (quality.agentReview?.status === "block" ? "block" : quality.agentReview?.status === "warn" ? "warn" : "pass"), visualReview?.summary || "Rule QA completed", {
+      warnings: [...(visualReview?.findings || []), ...(quality.agentReview?.repairable || [])].filter(Boolean),
+      metrics: visualReview?.scores || {}
+    }),
+    stage("edit-readiness", "Edit readiness", editReadiness.ready ? "pass" : "block", editReadiness.ready ? "Materials and preview are ready for online editing" : "Material/preview/quality issues still need handling", {
+      warnings: editReadiness.blockingIssues || [],
+      metrics: {
+        actions: editReadiness.actions?.length || 0
+      }
+    })
+  ];
+  return {
+    stages,
+    slideJobs: buildSlideJobs(deckSlides, routePlan, imagePlan, editablePlan),
+    blockingReasons: stages.filter((item) => item.status === "block").flatMap((item) => item.errors.length ? item.errors : item.warnings.length ? item.warnings : [item.summary]),
+    lastCompletedStage: [...stages].reverse().find((item) => item.status === "pass")?.id || null
+  };
+}
+
+function toSafeClientJob(job = {}, error = null) {
+  return {
+    id: job.id || "unknown",
+    mode: job.mode || "unknown",
+    status: "normalization-error",
+    deck: job.deck || { title: "Unreadable job", slides: [] },
+    files: (job.files || []).map((file) => {
+      try {
+        return normalizeUploadRecord(file);
+      } catch {
+        return file;
+      }
+    }),
+    exports: {},
+    previewImages: [],
+    warning: error?.message || "Job could not be normalized",
+    createdAt: job.createdAt || "",
+    updatedAt: job.updatedAt || "",
+    editReadiness: {
+      status: "blocked",
+      ready: false,
+      summary: "This historical job could not be normalized after schema changes.",
+      blockingIssues: [error?.message || "job normalization failed"],
+      actions: ["create-new-job"]
+    }
+  };
+}
+
+function normalizeExportAliases(job = {}) {
+  job.exports = job.exports || {};
+  if (job.exports.pptx && !job.exports.editablePptx) job.exports.editablePptx = job.exports.pptx;
+  if (job.visualProject?.visualTargetPptxPath && !job.exports.visualTargetPptx) job.exports.visualTargetPptx = job.visualProject.visualTargetPptxPath;
+  return job.exports;
+}
+
+function buildSceneGraphOverridesForSlide(existing = {}, slideIndex = 0, slide = {}, incoming = {}) {
+  const id = `slide_${String(slideIndex + 1).padStart(2, "0")}`;
+  const dataPoints = normalizeClientList(incoming.dataPoints ?? slide.dataPoints);
+  const bullets = normalizeClientList(incoming.bullets ?? slide.bullets);
+  const texts = {
+    title: cleanClientText(incoming.title ?? slide.title),
+    subtitle: cleanClientText(incoming.subtitle ?? slide.subtitle ?? slide.visualIntent),
+    ...Object.fromEntries(bullets.map((value, index) => [`bullet_${index + 1}`, value])),
+    ...Object.fromEntries(dataPoints.map((value, index) => [`data_${index + 1}`, value]))
+  };
+  return {
+    ...(existing || {}),
+    slides: {
+      ...((existing || {}).slides || {}),
+      [id]: {
+        source: "online-editor",
+        updatedAt: new Date().toISOString(),
+        texts,
+        meta: {
+          slideIndex: slideIndex + 1,
+          reason: "manual-slide-save"
+        }
+      }
+    }
+  };
+}
+
+function attachAssetFirstState(job = {}, materialBrief = {}, routePlan = {}) {
+  job.assetManifest = buildAssetManifest({
+    files: job.files || [],
+    materialBrief,
+    deck: job.deck || {}
+  });
+  job.assetManifestQa = validateAssetManifest(job.assetManifest);
+  job.input = {
+    ...(job.input || {}),
+    materialBrief,
+    routePlan,
+    assetManifestSummary: {
+      status: job.assetManifest.status,
+      assetCount: job.assetManifest.assets?.length || 0,
+      criticalCount: job.assetManifest.criticalCount || 0,
+      backgroundBlockedCount: job.assetManifest.backgroundBlockedCount || 0
+    }
+  };
+  return job;
+}
+
+function buildSlideJobs(slides = [], routePlan = {}, imagePlan = {}, editablePlan = {}) {
+  const planItems = Array.isArray(imagePlan.items) ? imagePlan.items : [];
+  const editablePages = Array.isArray(editablePlan.pages) ? editablePlan.pages : [];
+  return slides.map((slide, index) => {
+    const routeStep = routePlan.layoutSequence?.[index] || {};
+    const materialActions = planItems.filter((item) => Number(item.slideIndex) === index || Number(item.slideNumber) === index + 1);
+    const editablePage = editablePages[index] || null;
+    return {
+      id: "slide_" + String(index + 1).padStart(2, "0"),
+      index: index + 1,
+      title: slide.title || routeStep.title || "Slide " + (index + 1),
+      role: slide.storyRole || routeStep.storyRole || routeStep.kind || "",
+      layout: slide.layout || routeStep.layout || "",
+      status: editablePage?.qa?.fakeEditableRisk ? "needs-editable-qa" : materialActions.some((item) => /need|pending|failed/i.test(item.status || item.action || "")) ? "needs-asset" : "editable-ready",
+      sourcePage: routeStep.evidence || "",
+      requiredAssets: [...(slide.imageSlots || []), ...materialActions.map((item) => item.fileName || item.source || item.reason).filter(Boolean)].slice(0, 6),
+      qa: {
+        editable: true,
+        editableManifest: editablePage ? {
+          status: editablePage.qa?.fakeEditableRisk ? "warn" : "planned",
+          textBoxes: editablePage.editableManifest?.text_boxes?.length || 0,
+          images: editablePage.editableManifest?.images?.length || 0,
+          warnings: editablePage.qa?.warnings || []
+        } : null,
+        imageLed: ["cover", "visual", "product-detail", "bundle"].includes(slide.layout),
+        textLoad: cleanClientText([slide.subtitle, ...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")).length
+      }
+    };
+  });
+}
+
+function buildEditReadiness(job = {}, quality = {}, previewImages = []) {
+  const blockingIssues = [];
+  const suggestions = [];
+  const actions = [];
+  const plan = job.imageSupplementPlan || {};
+  const planItems = Array.isArray(plan.items) ? plan.items : [];
+  const pendingGeneration = planItems.filter((item) => item.action === "need-remote-generation");
+  const pendingReuse = planItems.filter((item) => item.action === "use-source-image" || item.action === "use-uploaded-image");
+  const plannedMatting = planItems.filter((item) => item.needsCutout && !["local-pass", "cloud-pass", "not-needed"].includes(item.mattingStatus));
+  const failedMattingFiles = (job.files || []).filter((file) => file.needsCutout && ["failed", "cloud-failed", "local-failed"].includes(file.mattingStatus));
+  const generatedWithoutMatting = (job.files || []).filter((file) => file.needsCutout && ["planned-not-implemented"].includes(file.mattingStatus));
+  const localQa = quality.localImageQa || {};
+  const renderQa = quality.renderImageQa || {};
+  const latestCloud = Array.isArray(job.cloudReviews) ? job.cloudReviews.at(-1) : null;
+  const slideCount = job.deck?.slides?.length || 0;
+  const previewCount = (previewImages || []).filter(Boolean).length;
+  const editablePlan = job.editableRebuildPlan || {};
+  const sceneGraphQa = job.sceneGraphQa || quality.sceneGraphQa || {};
+  const visualCompare = job.visualCompare || quality.visualCompare || {};
+  const pptxEditability = quality.pptxEditability || job.quality?.pptxEditability || {};
+  if (sceneGraphQa.status === "block") {
+    blockingIssues.push("SceneGraph blocked: " + ((sceneGraphQa.errors || []).slice(0, 1).join("") || "editable source QA failed"));
+    actions.push("repair-scene-graph");
+  } else if (sceneGraphQa.status === "warn") {
+    suggestions.push("SceneGraph editability needs review: " + ((sceneGraphQa.warnings || []).slice(0, 1).join("") || "warning"));
+    actions.push("review-scene-graph");
+  }
+  if (visualCompare.status === "warn") {
+    suggestions.push("Visual target consistency needs review: score " + (visualCompare.score || 0));
+    actions.push("review-visual-compare");
+  }
+  if (pptxEditability.status === "warn" || pptxEditability.editable === false) {
+    blockingIssues.push("PPTX editability check failed: " + ((pptxEditability.warnings || []).join(" / ") || "native object check failed"));
+    actions.push("review-pptx-editability");
+  }
+  if (editablePlan.candidate) {
+    suggestions.push("Object-level editable rebuild: " + (editablePlan.pageCount || 0) + " manifest pages generated; verify text, images, and backgrounds are separated.");
+    actions.push("review-editable-manifest");
+  }
+  if (editablePlan.warnings?.length) suggestions.push(editablePlan.warnings[0]);
+  if (plan.needed && pendingReuse.length) {
+    suggestions.push("There are " + pendingReuse.length + " pages with reusable source/uploaded images that can be bound as page materials.");
+    actions.push("apply-image-supplement");
+  }
+  if (plan.needed && pendingGeneration.length) {
+    blockingIssues.push("There are " + pendingGeneration.length + " pages needing local generated material or cloud fallback.");
+    actions.push("apply-local-image-supplement");
+  }
+  if (plannedMatting.length || generatedWithoutMatting.length) {
+    blockingIssues.push("There are " + (plannedMatting.length + generatedWithoutMatting.length) + " foreground materials needing cutout confirmation.");
+    actions.push("apply-local-image-supplement");
+  }
+  if (failedMattingFiles.length) {
+    blockingIssues.push(failedMattingFiles.length + " material cutouts failed and need retry or cloud handling.");
+    actions.push("apply-local-image-supplement");
+  }
+  if (localQa.warnCount) {
+    suggestions.push("Local image QA has " + localQa.warnCount + " risks; review before formal delivery.");
+    actions.push("rescan-local-image-qa");
+  }
+  if (renderQa.warningCount) blockingIssues.push("Image placement QA has " + renderQa.warningCount + " crop/whitespace risks");
+  if (latestCloud?.status === "block") {
+    blockingIssues.push("Cloud visual review is block; apply feedback before final delivery.");
+    actions.push("repair-visual-review");
+  }
+  if (slideCount && previewCount !== slideCount) blockingIssues.push("Preview image count mismatch: " + previewCount + "/" + slideCount);
+  const uniqueActions = [...new Set(actions)];
+  const ready = blockingIssues.length === 0;
+  const status = ready ? (suggestions.length ? "ready-with-suggestions" : "ready") : "blocked";
+  return {
+    status,
+    ready,
+    summary: ready
+      ? (suggestions.length ? "Ready for online editing with QA suggestions before final export" : "Materials, preview, and image QA are ready for online editing")
+      : "Asset pipeline is incomplete; finish supplement/cutout/QA before online editing.",
+    issues: [...new Set([...blockingIssues, ...suggestions])].slice(0, 8),
+    blockingIssues: [...new Set(blockingIssues)].slice(0, 8),
+    suggestions: [...new Set(suggestions)].slice(0, 8),
+    actions: uniqueActions,
+    facts: {
+      slideCount,
+      previewCount,
+      pendingImageItems: plan.needed ? planItems.length : 0,
+      pendingGeneration: pendingGeneration.length,
+      pendingReuse: pendingReuse.length,
+      plannedMatting: plannedMatting.length + generatedWithoutMatting.length,
+      failedMatting: failedMattingFiles.length,
+      localQaWarnings: localQa.warnCount || 0,
+      renderQaWarnings: renderQa.warningCount || 0,
+      editableManifestPages: editablePlan.pageCount || 0,
+      editableManifestWarnings: editablePlan.warnings?.length || 0,
+      sceneGraphTextBoxes: sceneGraphQa.textBoxes || 0,
+      sceneGraphShapes: sceneGraphQa.shapeCount || 0,
+      visualCompareScore: visualCompare.score || 0,
+      pptxTextBoxes: pptxEditability.nativeTextBoxes || 0,
+      pptxShapes: pptxEditability.nativeShapes || 0,
+      pptxPictures: pptxEditability.nativePictures || 0,
+      pptxFullSlidePictures: pptxEditability.fullSlidePictures || 0
+    }
   };
 }
 
@@ -1747,13 +2824,24 @@ function attachSourceRecognitionReport(materialBrief = {}, uploads = []) {
   return materialBrief;
 }
 
+async function attachCloudSourceAnalysis(materialBrief = {}, uploads = [], stage = "source-intake") {
+  if (!materialBrief.sourceReport?.hasOldDeck) return null;
+  const analysis = await reviewSourceIntake({ materialBrief, uploads, stage });
+  materialBrief.sourceReport.cloudSourceAnalysis = analysis;
+  return analysis;
+}
+
 function buildSourceRecognitionReport(materialBrief = {}, uploads = []) {
   const pages = Array.isArray(materialBrief.pages) ? materialBrief.pages : [];
   const sourceDecks = (uploads || []).filter((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
   const aestheticDiagnosis = mergeAestheticDiagnostics(sourceDecks);
+  const templateProfile = mergeTemplateProfiles(sourceDecks);
+  const extractionAudit = mergeExtractionAudits(sourceDecks);
   const diagnosticSlides = new Map((aestheticDiagnosis?.slides || []).map((slide) => [Number(slide.page), slide]));
   const extractedImages = (uploads || []).filter((file) => Number(file.sourceSlide || 0) > 0);
   const looseImages = (uploads || []).filter((file) => isImageUpload(file) && !Number(file.sourceSlide || 0));
+  const mediaProfiles = (uploads || []).map((file) => file.mediaProfile).filter(Boolean);
+  const imageRoleCounts = countBy((uploads || []).filter(isImageUpload), (file) => file.materialRole || file.mediaProfile?.role || "material");
   const imagesBySlide = extractedImages.reduce((map, file) => {
     const slide = Number(file.sourceSlide || 0);
     if (!slide) return map;
@@ -1772,7 +2860,7 @@ function buildSourceRecognitionReport(materialBrief = {}, uploads = []) {
     const images = imagesBySlide.get(pageNumber) || [];
     return {
       page: pageNumber,
-      title: cleanClientText(page.title) || `第 ${pageNumber} 页`,
+      title: cleanClientText(page.title) || "Page " + pageNumber,
       textChars: pageText.length,
       textPreview: pageText.slice(0, 160),
       imageCount: images.length,
@@ -1792,9 +2880,10 @@ function buildSourceRecognitionReport(materialBrief = {}, uploads = []) {
   const warnings = [
     sourceDecks.length && !pageReports.length ? "old-deck-no-page-text" : "",
     extractedImages.length && !pages.length ? "images-without-page-text" : "",
-    emptyPages.length ? `empty-pages:${emptyPages.map((page) => page.page).slice(0, 8).join(",")}` : "",
-    imageOnlyPages.length ? `image-only-pages:${imageOnlyPages.map((page) => page.page).slice(0, 8).join(",")}` : "",
-    textOnlyPages.length && extractedImages.length ? `text-only-pages:${textOnlyPages.map((page) => page.page).slice(0, 8).join(",")}` : ""
+    emptyPages.length ? "empty-pages:" + emptyPages.map((page) => page.page).slice(0, 8).join(",") : "",
+    imageOnlyPages.length ? "image-only-pages:" + imageOnlyPages.map((page) => page.page).slice(0, 8).join(",") : "",
+    textOnlyPages.length && extractedImages.length ? "text-only-pages:" + textOnlyPages.map((page) => page.page).slice(0, 8).join(",") : "",
+    ...(extractionAudit?.warnings || [])
   ].filter(Boolean);
   return {
     hasOldDeck: Boolean(sourceDecks.length),
@@ -1809,10 +2898,62 @@ function buildSourceRecognitionReport(materialBrief = {}, uploads = []) {
     extractedImageCount: extractedImages.length,
     looseImageCount: looseImages.length,
     boundImageCount: extractedImages.filter((file) => pageNumbers.includes(Number(file.sourceSlide || 0))).length,
+    imageRoleCounts,
+    mediaProfiles: mediaProfiles.slice(0, 80),
+    extractionAudit,
     aestheticDiagnosis,
+    templateProfile,
     pages: pageReports.slice(0, 60),
     looseImages: looseImages.map((file) => cleanClientText(file.originalName || path.basename(file.path || ""))).filter(Boolean).slice(0, 24),
     warnings
+  };
+}
+
+function mergeTemplateProfiles(sourceDecks = []) {
+  const profiles = sourceDecks.map((file) => file.templateProfile).filter(Boolean);
+  if (!profiles.length) return null;
+  const layouts = profiles.flatMap((profile) => profile.layouts || []);
+  const slides = profiles.flatMap((profile) => profile.slides || []);
+  return {
+    version: 1,
+    deckCount: profiles.length,
+    deckNames: profiles.map((profile) => profile.deckName).filter(Boolean),
+    slideCount: profiles.reduce((sum, profile) => sum + Number(profile.slideCount || 0), 0),
+    layoutCount: profiles.reduce((sum, profile) => sum + Number(profile.layoutCount || 0), 0),
+    usedLayoutCount: profiles.reduce((sum, profile) => sum + Number(profile.usedLayoutCount || 0), 0),
+    reusableLayoutCount: profiles.reduce((sum, profile) => sum + Number(profile.reusableLayoutCount || 0), 0),
+    layouts: layouts.slice(0, 80),
+    slides: slides.slice(0, 80),
+    warnings: profiles.flatMap((profile) => [
+      ...(profile.warnings || []),
+      profile.error ? "template-profile-failed:" + (profile.deckName || "pptx") : ""
+    ].filter(Boolean))
+  };
+}
+
+function mergeExtractionAudits(sourceDecks = []) {
+  const audits = sourceDecks.map((file) => file.extractionAudit).filter(Boolean);
+  if (!audits.length) return null;
+  const slides = audits.flatMap((audit) => audit.slides || []);
+  const warnings = audits.flatMap((audit) => [
+    ...(audit.warnings || []),
+    audit.error ? "extraction-audit-failed:" + (audit.deckName || "pptx") : ""
+  ].filter(Boolean));
+  const missingImageRefs = audits.reduce((sum, audit) => sum + Number(audit.missingImageRefs || 0), 0);
+  const linkedImageRefs = audits.reduce((sum, audit) => sum + Number(audit.linkedImageRefs || 0), 0);
+  return {
+    version: 1,
+    deckCount: audits.length,
+    deckNames: audits.map((audit) => audit.deckName).filter(Boolean),
+    slideCount: audits.reduce((sum, audit) => sum + Number(audit.slideCount || 0), 0),
+    textSlideCount: audits.reduce((sum, audit) => sum + Number(audit.textSlideCount || 0), 0),
+    embeddedImageRefs: audits.reduce((sum, audit) => sum + Number(audit.embeddedImageRefs || 0), 0),
+    extractedImageRefs: audits.reduce((sum, audit) => sum + Number(audit.extractedImageRefs || 0), 0),
+    linkedImageRefs,
+    missingImageRefs,
+    confidence: missingImageRefs || linkedImageRefs || warnings.length ? "medium" : "high",
+    slides: slides.slice(0, 80),
+    warnings: [...new Set(warnings)].slice(0, 20)
   };
 }
 
@@ -1829,7 +2970,7 @@ function mergeAestheticDiagnostics(sourceDecks = []) {
     lowScoreSlides: uniqueNumbers(reports.flatMap((report) => report.lowScoreSlides || [])),
     highDensitySlides: uniqueNumbers(reports.flatMap((report) => report.highDensitySlides || [])),
     slides: slides.slice(0, 80),
-    warnings: reports.flatMap((report) => report.error ? [`analysis-failed:${report.deckName || "pptx"}`] : [])
+    warnings: reports.flatMap((report) => report.error ? ["analysis-failed:" + (report.deckName || "pptx")] : [])
   };
 }
 
@@ -1854,8 +2995,23 @@ function isImageUpload(file = {}) {
   return /\.(png|jpe?g|svg|webp)$/i.test(file.originalName || file.path || "") || /^image\//.test(file.mimeType || "");
 }
 
+function isReusableSourceImage(file = {}) {
+  if (!isImageUpload(file)) return false;
+  const source = String(file.source || "").toLowerCase();
+  const role = String(file.materialRole || file.mediaProfile?.role || "").toLowerCase();
+  return !file.duplicate && !["local-zimage", "cloud-image", "style-reference"].includes(source) && role !== "style-reference";
+}
+
 function uniqueNumbers(values = []) {
   return [...new Set(values.map((value) => Number(value || 0)).filter((value) => Number.isFinite(value) && value > 0))].sort((a, b) => a - b);
+}
+
+function countBy(items = [], keyFn = () => "unknown") {
+  return items.reduce((acc, item) => {
+    const key = cleanClientText(keyFn(item) || "unknown") || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
 }
 
 function applySourceImageSlots(deck = {}, routePlan = null, uploads = []) {
@@ -1877,15 +3033,18 @@ function applySourceImageSlots(deck = {}, routePlan = null, uploads = []) {
   const nextSlides = slides.map((slide, index) => {
     const current = normalizeClientList(slide.imageSlots);
     const routeStep = findBestRouteStepForSlide(slide, index, routeSteps);
+    const slotLimit = imageSlotLimitForLayout(slide.layout || routeStep?.layout || "");
     const sourcePage = inferSourcePage(routeStep, slide, index);
     const pageImageFiles = sourcePage ? sourceImagesBySlide.get(sourcePage) || [] : [];
     const pageImages = chooseVisualSourceImages(pageImageFiles, imageFiles, slide, routeStep).map((file) => cleanClientText(file.originalName || path.basename(file.path || "")));
     const routeImages = normalizeClientList(routeStep?.imageSlots);
     const titleImages = matchImagesByText(imageNames, [slide.title, slide.subtitle, slide.visualIntent, ...(slide.bullets || [])].join(" "));
     const fallbackImages = shouldHaveImages(slide, routeStep, pageImages, routeImages, titleImages) ? imageNames.slice(index % Math.max(imageNames.length, 1), index % Math.max(imageNames.length, 1) + 3) : [];
-    const recommended = uniqueTextList([...pageImages, ...routeImages, ...titleImages, ...current, ...fallbackImages]).slice(0, 8);
+    const recommended = slotLimit ? uniqueTextList([...pageImages, ...routeImages, ...titleImages, ...current, ...fallbackImages]).slice(0, slotLimit) : [];
     const shouldReplace = recommended.length && !sameListPrefix(current, recommended);
-    if (shouldReplace) changedSlides += 1;
+    const normalizedCurrent = normalizeImageSlotsForLayout(slide.layout || routeStep?.layout || "", current);
+    const nextSlots = shouldReplace ? recommended : normalizedCurrent;
+    if (!sameListPrefix(current, nextSlots)) changedSlides += 1;
     bindings.push({
       slide: index + 1,
       title: cleanClientText(slide.title),
@@ -1893,13 +3052,13 @@ function applySourceImageSlots(deck = {}, routePlan = null, uploads = []) {
       routeIndex: routeStep?.index || null,
       sourcePage,
       before: current,
-      after: shouldReplace ? recommended : current,
+      after: nextSlots,
       matchedBy: pageImages.length ? "source-slide" : routeImages.length ? "route-step" : titleImages.length ? "title-match" : fallbackImages.length ? "fallback" : "none",
       sourceTextChars: sourcePage ? pageReports.find((page) => Number(page.page) === sourcePage)?.textChars || null : null
     });
     return {
       ...slide,
-      imageSlots: shouldReplace ? recommended : current
+      imageSlots: nextSlots
     };
   });
 
@@ -1913,6 +3072,31 @@ function applySourceImageSlots(deck = {}, routePlan = null, uploads = []) {
       sourceBoundSlides: bindings.filter((item) => item.matchedBy === "source-slide").length,
       bindings: bindings.slice(0, 60)
     }
+  };
+}
+
+function imageSlotLimitForLayout(layout = "") {
+  if (layout === "cover") return 2;
+  if (layout === "visual") return 3;
+  if (layout === "product-detail") return 2;
+  if (layout === "bundle") return 3;
+  if (layout === "closing") return 1;
+  return 0;
+}
+
+function normalizeImageSlotsForLayout(layout = "", slots = []) {
+  const limit = imageSlotLimitForLayout(layout);
+  return limit ? normalizeClientList(slots).slice(0, limit) : [];
+}
+
+function normalizeDeckImageSlotsForLayouts(deck = {}) {
+  if (!Array.isArray(deck.slides)) return deck;
+  return {
+    ...deck,
+    slides: deck.slides.map((slide) => ({
+      ...slide,
+      imageSlots: normalizeImageSlotsForLayout(slide.layout || "", slide.imageSlots)
+    }))
   };
 }
 
@@ -1948,7 +3132,7 @@ function inferSourcePage(routeStep = null, slide = {}, index = 0) {
 
 function extractSourcePage(value = "") {
   const text = String(value || "");
-  const match = text.match(/(?:第|slide|page)\s*(\d{1,3})\s*(?:页|頁)?/i);
+  const match = text.match(/(?:slide|page|p)\s*(\d{1,3})/i) || text.match(/(\d{1,3})\s*(?:\/|\bof\b)/i);
   return match ? Number(match[1]) : null;
 }
 
@@ -2004,19 +3188,27 @@ function sortSourceImagesForSlide(files = [], slide = {}, routeStep = {}, allFil
 
 function sourceImageScore(file = {}, text = "", allFiles = []) {
   const name = normalizeForImageMatch(file.originalName || path.basename(file.path || ""));
+  const role = String(file.materialRole || file.mediaProfile?.role || "").toLowerCase();
   const size = Number(file.size || 0);
+  const wantsBackground = /cover|hero|visual|background|poster|封面|主视觉|底图|背景|海报|场景/.test(text);
+  const wantsForeground = /product|detail|bundle|pack|box|产品|单品|礼盒|包装|主图|素材|抠图|前景/.test(text);
   let score = 0;
   if (size >= 1_000_000) score += 60;
   else if (size >= 250_000) score += 42;
   else if (size >= 80_000) score += 24;
   else if (size >= 20_000) score += 8;
   else score -= 42;
+  if (role === "background") score += wantsForeground && !wantsBackground ? -6 : 22;
+  if (role === "foreground") score += wantsBackground && !wantsForeground ? -4 : 20;
+  if (role === "material") score += 8;
+  if (role === "decor") score -= 24;
+  if (role === "style-reference") score -= 80;
   for (const token of tokenizeForImageMatch(text)) {
     if (token.length >= 2 && name.includes(token)) score += token.length >= 4 ? 8 : 3;
   }
   if (/product|pack|box|detail|render|产品|包装|礼盒|细节|实物|效果/.test(name)) score += 18;
   if (/logo|brand|标志|品牌/.test(name)) score -= 8;
-  if (/background|bg|shape|line|map|grid|背景|底图|线条|地图/.test(name)) score -= 14;
+  if (/background|bg|shape|line|map|grid|背景|底图|线条|地图/.test(name)) score += wantsBackground ? 16 : -8;
   if (size && allFiles.filter((item) => Number(item.size || 0) === size).length >= 3) score -= 45;
   return score;
 }
@@ -2136,7 +3328,7 @@ function buildAgentDecision(mode, input = {}, uploads = [], materialBrief = {}, 
   const hasOldDeck = mode === "optimize" || uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
   const text = cleanClientText([input.notes, input.copyMode, input.projectName].filter(Boolean).join(" "));
   const wantsEdit = /修改|改写|优化|重排|重新排版|升级|高级|渲染/.test(text);
-  const intent = hasOldDeck && wantsEdit ? "优化旧 PPT" : hasOldDeck ? "重排旧 PPT" : materialBrief.inputStrength === "empty" ? "零资料初稿" : "新建 PPT";
+  const intent = hasOldDeck && wantsEdit ? "优化 PPT" : hasOldDeck ? "重排 PPT" : materialBrief.inputStrength === "empty" ? "零资料初稿" : "新建 PPT";
   return {
     intent,
     autonomy: "confirm-outline-then-auto-repair-once",
@@ -2152,8 +3344,8 @@ function buildAgentDecision(mode, input = {}, uploads = [], materialBrief = {}, 
 function buildAgentPlan(decision = {}, routePlan = {}) {
   return {
     name: "AI PPT Agent v1",
-    summary: `${decision.intent || "PPT 任务"}：先确认大纲，再生成、自检并自动修复一轮。`,
-    steps: ["读取资料", "判断任务意图", "规划可确认大纲", "按确认大纲生成 Deck", "交付自检", "必要时自动修复一轮", "生成 PPTX 和预览"],
+    summary: (decision.intent || "PPT task") + ": confirm outline, generate, QA, and auto-repair once.",
+    steps: ["Read materials", "Classify intent", "Plan confirmable outline", "Generate deck", "Delivery QA", "Auto repair once if needed", "Generate PPTX and preview"],
     route: {
       deckType: routePlan.deckType,
       targetSlides: routePlan.targetSlides,
@@ -2170,23 +3362,31 @@ function classifyAgentQuality(deck = {}, quality = {}, routePlan = null, materia
   const hints = [];
   const expectedSlides = Number(routePlan?.layoutSequence?.length || routePlan?.targetSlides || 0);
   const actualSlides = slides.length;
-  if (!actualSlides) blocking.push("没有生成任何页面");
-  if (expectedSlides && Math.abs(actualSlides - expectedSlides) >= 2) blocking.push(`页数偏离明显：计划 ${expectedSlides} 页，实际 ${actualSlides} 页`);
-  if (slides.some((slide) => !cleanClientText(slide.title))) repairable.push("存在空标题页面");
-  if (slides.some((slide) => !cleanClientText([slide.title, slide.subtitle, ...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("存在内容过空页面");
+  if (!actualSlides) blocking.push("No slides generated");
+  if (expectedSlides && Math.abs(actualSlides - expectedSlides) >= 2) blocking.push("Slide count deviates: expected " + expectedSlides + ", actual " + actualSlides);
+  if (slides.some((slide) => !cleanClientText(slide.title))) repairable.push("Some slides have empty titles");
+  if (slides.some((slide) => !cleanClientText([slide.title, slide.subtitle, ...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("Some slides are too empty");
   const routeScore = Number(quality.routeAdherence?.score);
-  if (Number.isFinite(routeScore) && routeScore < 0.75) repairable.push(`路由匹配偏低：${Math.round(routeScore * 100)}%`);
-  if ((quality.routingWarnings || []).some((item) => /连续|repeat/i.test(String(item)))) repairable.push("存在连续重复版式");
-  if (slides.some((slide) => slide.layout === "pricing" && !/\d/.test([...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("价格页缺少明确数字");
+  if (Number.isFinite(routeScore) && routeScore < 0.75) repairable.push("Route match is low: " + Math.round(routeScore * 100) + "%");
+  if ((quality.routingWarnings || []).some((item) => /repeat/i.test(String(item)))) repairable.push("Repeated layout sequence detected");
+  if (slides.some((slide) => slide.layout === "pricing" && !/\d/.test([...(slide.bullets || []), ...(slide.dataPoints || [])].join(" ")))) repairable.push("Pricing slide lacks numeric data");
   const hasImageMaterial = Number(materialBrief.imageCount || quality.material?.imageCount || 0) > 0;
-  if (hasImageMaterial && slides.some((slide) => slide.layout === "visual" && !(slide.imageSlots || []).length)) repairable.push("图片页缺少图片槽");
-  if (quality.renderImageQa?.warningCount) repairable.push(`图片放置存在比例/裁切风险：${quality.renderImageQa.warningCount} 处`);
-  if (Array.isArray(previewImages) && actualSlides && previewImages.filter(Boolean).length !== actualSlides) blocking.push(`预览图数量不一致：${previewImages.filter(Boolean).length}/${actualSlides}`);
-  if ((materialBrief.confirmationFields || []).length) hints.push(`待人工确认：${materialBrief.confirmationFields.join("、")}`);
-  if (materialBrief.inputStrength === "weak" || materialBrief.inputStrength === "empty") hints.push("资料较弱，生成内容需人工复核");
+  if (hasImageMaterial && slides.some((slide) => slide.layout === "visual" && !(slide.imageSlots || []).length)) repairable.push("Visual slide lacks image slots");
+  if (quality.renderImageQa?.warningCount) repairable.push("Image placement has crop/ratio risks: " + quality.renderImageQa.warningCount);
+  if (Array.isArray(previewImages) && actualSlides && previewImages.filter(Boolean).length !== actualSlides) blocking.push("Preview image count mismatch: " + previewImages.filter(Boolean).length + "/" + actualSlides);
+  if (routePlan?.designDirectorStrategy) {
+    const layouts = slides.map((slide) => slide.layout);
+    const imageLedCount = slides.filter((slide) => ["cover", "visual", "product-detail", "bundle"].includes(slide.layout) && (slide.imageSlots || []).length).length;
+    const longTextSlides = slides.filter((slide) => (slide.bullets || []).length > 3 || cleanClientText([slide.subtitle, ...(slide.bullets || [])].join(" ")).length > 180);
+    if (hasImageMaterial && imageLedCount < Math.min(3, Math.ceil(slides.length / 4))) repairable.push("Not enough image-led slides for visual-first deck");
+    if (longTextSlides.length) repairable.push("Text is too heavy on " + longTextSlides.length + " slides; compress to proposal copy.");
+    if ((layouts.filter((layout) => layout === "cards").length || 0) >= Math.ceil(slides.length / 2)) repairable.push("Too many card-layout slides; page rhythm is too templated");
+  }
+  if ((materialBrief.confirmationFields || []).length) hints.push("Needs manual confirmation: " + materialBrief.confirmationFields.join(", "));
+  if (materialBrief.inputStrength === "weak" || materialBrief.inputStrength === "empty") hints.push("Input is weak; generated content needs human review");
   const aestheticDiagnosis = quality.aestheticDiagnosis || materialBrief.sourceReport?.aestheticDiagnosis || {};
-  if (Number.isFinite(Number(aestheticDiagnosis.overallScore)) && Number(aestheticDiagnosis.overallScore) < 72) repairable.push(`旧稿美学诊断偏低：${aestheticDiagnosis.overallScore} 分`);
-  if ((aestheticDiagnosis.lowScoreSlides || []).length) repairable.push(`旧稿低分页：${aestheticDiagnosis.lowScoreSlides.slice(0, 6).join("、")}`);
+  if (Number.isFinite(Number(aestheticDiagnosis.overallScore)) && Number(aestheticDiagnosis.overallScore) < 72) repairable.push("Old deck aesthetic score is low: " + aestheticDiagnosis.overallScore);
+  if ((aestheticDiagnosis.lowScoreSlides || []).length) repairable.push("Old deck low-score slides: " + aestheticDiagnosis.lowScoreSlides.slice(0, 6).join(", "));
   return { blocking: [...new Set(blocking)], repairable: [...new Set(repairable)], hints: [...new Set(hints)] };
 }
 
@@ -2205,88 +3405,88 @@ function buildAgentReview(stage, deck = {}, quality = {}, routePlan = null, mate
   const agents = [
     {
       id: "brain",
-      name: "大脑 Agent",
-      role: "总控任务阶段、是否进入人工确认或继续生成。",
+      name: "Brain Agent",
+      role: "Controls task stage and whether generation can continue",
       status: assessment.blocking.length ? "block" : assessment.repairable.length ? "warn" : "pass",
       findings: [...assessment.blocking, ...assessment.repairable, ...assessment.hints].slice(0, 6)
     },
     {
       id: "route",
-      name: "路由 Agent",
-      role: "检查 deck 类型、页数、layout 队列和路由遵守度。",
+      name: "Route Agent",
+      role: "Checks deck type, slide count, layout queue, and routing adherence",
       status: Number.isFinite(routeScore) && routeScore < 0.75 ? "warn" : "pass",
       findings: [
-        routePlan?.deckType ? `类型：${routePlan.deckType}` : "",
-        routePlan?.targetSlides ? `目标页数：${routePlan.targetSlides}` : "",
-        Number.isFinite(routeScore) ? `路由匹配：${Math.round(routeScore * 100)}%` : "",
+        routePlan?.deckType ? "Type: " + routePlan.deckType : "",
+        routePlan?.targetSlides ? "Target slides: " + routePlan.targetSlides : "",
+        Number.isFinite(routeScore) ? "Route match: " + Math.round(routeScore * 100) + "%" : "",
         ...(quality.routingWarnings || []).slice(0, 3)
       ].filter(Boolean)
     },
     {
       id: "source",
-      name: "素材 Agent",
-      role: "检查原文、原图、页码绑定和生成页图片槽。",
+      name: "Material Agent",
+      role: "Checks source text, images, page binding, and generated image slots",
       status: localImageQa.warnCount ? "warn" : sourceReport.hasOldDeck && !sourceReport.boundImageCount ? "warn" : "pass",
       findings: [
-        sourceReport.pageCount ? `原稿页数：${sourceReport.pageCount}` : "",
-        sourceReport.imageCount ? `原图：${sourceReport.imageCount} 张` : "",
-        sourceReport.boundImageCount ? `绑定页码：${sourceReport.boundImageCount} 张` : "",
-        imageSlotReport.boundSlides ? `生成页图片槽：${imageSlotReport.boundSlides} 页` : "",
-        localImageQa.total ? `本地图 QA：${localImageQa.passCount}/${localImageQa.total} 通过` : "",
-        renderImageQa.total ? `图片放置：${renderImageQa.total} 处，风险 ${renderImageQa.warningCount || 0}` : "",
-        renderImageQa.warnings?.length ? `放置风险：${renderImageQa.warnings.slice(0, 3).join("、")}` : "",
-        localImageQa.risks?.length ? `风险：${localImageQa.risks.slice(0, 3).join("、")}` : ""
+        sourceReport.pageCount ? "Source pages: " + sourceReport.pageCount : "",
+        sourceReport.imageCount ? "Source images: " + sourceReport.imageCount : "",
+        sourceReport.boundImageCount ? "Bound source images: " + sourceReport.boundImageCount : "",
+        imageSlotReport.boundSlides ? "Bound slide image slots: " + imageSlotReport.boundSlides : "",
+        localImageQa.total ? "Local QA: " + localImageQa.passCount + "/" + localImageQa.total + " passed" : "",
+        renderImageQa.total ? "Image placement: " + renderImageQa.total + " objects, risks " + (renderImageQa.warningCount || 0) : "",
+        renderImageQa.warnings?.length ? "Placement risks: " + renderImageQa.warnings.slice(0, 3).join(", ") : "",
+        localImageQa.risks?.length ? "Risks: " + localImageQa.risks.slice(0, 3).join(", ") : ""
       ].filter(Boolean)
     },
     {
       id: "aesthetic-diagnosis",
-      name: "美学诊断 Agent",
-      role: "检查旧 PPT 的信息密度、层级、色彩、留白、图片风险和重构策略。",
+      name: "Aesthetic Diagnosis Agent",
+      role: "Checks old PPT density, hierarchy, color, whitespace, image risk, and rebuild strategy",
       status: Number.isFinite(Number(aestheticDiagnosis.overallScore)) && Number(aestheticDiagnosis.overallScore) < 72 ? "warn" : (aestheticDiagnosis.lowScoreSlides || []).length ? "warn" : "pass",
       findings: [
-        Number.isFinite(Number(aestheticDiagnosis.overallScore)) ? `诊断分：${aestheticDiagnosis.overallScore}` : "",
-        (aestheticDiagnosis.lowScoreSlides || []).length ? `低分页：${aestheticDiagnosis.lowScoreSlides.slice(0, 8).join("、")}` : "",
-        (aestheticDiagnosis.highDensitySlides || []).length ? `高密度页：${aestheticDiagnosis.highDensitySlides.slice(0, 8).join("、")}` : "",
+        Number.isFinite(Number(aestheticDiagnosis.overallScore)) ? "Diagnosis score: " + aestheticDiagnosis.overallScore : "",
+        (aestheticDiagnosis.lowScoreSlides || []).length ? "Low-score slides: " + aestheticDiagnosis.lowScoreSlides.slice(0, 8).join(", ") : "",
+        (aestheticDiagnosis.highDensitySlides || []).length ? "High-density slides: " + aestheticDiagnosis.highDensitySlides.slice(0, 8).join(", ") : "",
         ...((aestheticDiagnosis.slides || []).flatMap((slide) => slide.problems || []).map((item) => item.message || item).filter(Boolean).slice(0, 3))
       ].filter(Boolean)
     },
     {
       id: "style",
-      name: "风格 Agent",
-      role: "检查风格库、样稿覆盖和视觉调性约束。",
+      name: "Style Agent",
+      role: "Checks style library, style proof coverage, and visual tone constraints",
       status: styleRefs || routePlan?.recommendedTheme ? "pass" : "warn",
       findings: [
-        routePlan?.recommendedTheme ? `风格：${routePlan.recommendedTheme}` : "",
-        styleRefs ? `参考图：${styleRefs} 张` : "未使用自定义风格参考图",
-        styleFingerprint?.prompt ? `指纹：${styleFingerprint.prompt}` : "",
-        stage === "style-preview" ? "样稿阶段：先审再交给人工确认" : "整稿阶段：按已确认风格复审"
+        routePlan?.recommendedTheme ? "Style: " + routePlan.recommendedTheme : "",
+        styleRefs ? "Reference images: " + styleRefs : "No custom style reference images",
+        styleFingerprint?.prompt ? "Fingerprint: " + styleFingerprint.prompt : "",
+        stage === "style-preview" ? "Style proof stage: review before human confirmation" : "Final deck stage: follow confirmed style"
       ].filter(Boolean)
     },
     {
       id: "delivery",
-      name: "交付 Agent",
-      role: "检查 PPTX、预览、导出和可继续编辑风险。",
+      name: "Delivery Agent",
+      role: "Checks PPTX, preview, export, and editability risks",
       status: assessment.blocking.length ? "block" : quality.warningCount > 3 ? "warn" : "pass",
       findings: [
-        `页数：${slides.length}`,
-        previewCount !== null ? `预览：${previewCount}/${slides.length}` : "",
-        `警告：${quality.warningCount || 0}`,
-        quality.imageSlotCount ? `图片槽：${quality.imageSlotCount}` : "",
-        localImageQa.warnCount ? `本地图风险：${localImageQa.warnCount}` : "",
-        renderImageQa.warningCount ? `比例/裁切风险：${renderImageQa.warningCount}` : ""
+        "Slides: " + slides.length,
+        previewCount !== null ? "Preview: " + previewCount + "/" + slides.length : "",
+        "Warnings: " + (quality.warningCount || 0),
+        quality.imageSlotCount ? "Image slots: " + quality.imageSlotCount : "",
+        localImageQa.warnCount ? "Local image risks: " + localImageQa.warnCount : "",
+        renderImageQa.warningCount ? "Ratio/crop risks: " + renderImageQa.warningCount : ""
       ].filter(Boolean)
     }
   ];
   if (cloudVisualReview) {
     agents.push({
       id: "cloud-visual",
-      name: "云端视觉 Agent",
-      role: "读取样稿/整稿预览图，复审审美、密度、图片使用和交付观感。",
+      name: "Cloud Visual Agent",
+      role: "Reviews preview aesthetics, density, image use, and delivery impression",
       status: cloudVisualReview.used ? cloudVisualReview.status || "warn" : "warn",
       findings: [
-        cloudVisualReview.used ? cloudVisualReview.summary : `未完成云端视觉复审：${cloudVisualReview.reason || "not available"}`,
+        cloudVisualReview.used ? cloudVisualReview.summary : "Cloud visual review not completed: " + (cloudVisualReview.reason || "not available"),
         ...(cloudVisualReview.findings || []).slice(0, 4),
-        cloudVisualReview.scores ? `评分：风格 ${cloudVisualReview.scores.style ?? "-"} / 版式 ${cloudVisualReview.scores.layout ?? "-"} / 密度 ${cloudVisualReview.scores.density ?? "-"} / 图片 ${cloudVisualReview.scores.imageUse ?? "-"}` : ""
+        cloudVisualReview.scores ? "Scores: style " + (cloudVisualReview.scores.style ?? "-") + " / layout " + (cloudVisualReview.scores.layout ?? "-") + " / density " + (cloudVisualReview.scores.density ?? "-") + " / image " + (cloudVisualReview.scores.imageUse ?? "-") : ""
       ].filter(Boolean)
     });
   }
@@ -2339,46 +3539,112 @@ function summarizeAgentQuality(quality = {}) {
   };
 }
 
-async function refreshPreview(job, successVerb = "已生成") {
-  if (job.skipPreviewRender) {
-    delete job.skipPreviewRender;
-    addEvent(job, "preview-fast-sync", "预览已按页面操作快速同步", { count: (job.previewImages || []).filter(Boolean).length });
-    return;
+async function refreshPreview(job, successVerb = "generated") {
+  const options = arguments[2] || {};
+  job.deck = normalizeDeckImageSlotsForLayouts(job.deck);
+  const routePlan = job.input?.routePlan || null;
+  const materialBrief = job.input?.materialBrief || {};
+  if (routePlan) {
+    const validated = validateDeck(job.deck, routePlan);
+    job.deck = normalizeDeckImageSlotsForLayouts(validated.deck);
+    const previousQuality = job.quality || {};
+    job.quality = enrichQuality({
+      ...previousQuality,
+      ...validated.quality,
+      pptxEditability: previousQuality.pptxEditability || validated.quality.pptxEditability,
+      sceneGraphQa: previousQuality.sceneGraphQa || validated.quality.sceneGraphQa,
+      visualCompare: previousQuality.visualCompare || validated.quality.visualCompare
+    }, job.files || [], materialBrief, routePlan);
+    job.warning = validated.warnings.length ? validated.warnings.join("; ") : "";
   }
   const result = await renderPptxPreview(job.exports.pptx);
   job.previewImages = result.images || [];
-  job.previewWarning = result.error ? `PNG 预览生成失败：${result.error}` : null;
+  job.previewWarning = result.error ? "PNG preview generation failed: " + result.error : null;
   addEvent(
     job,
     result.error ? "preview-error" : "preview",
-    result.error ? job.previewWarning : `${successVerb} ${job.previewImages.length} 张预览图`,
+    result.error ? job.previewWarning : successVerb + " " + job.previewImages.length + " preview images",
     { count: job.previewImages.length, error: result.error || null }
   );
+  await updateSceneGraphPreviewCompare(job);
+  if (options.allowSceneGraphRepair !== false && hasAutoRepairableSceneGraphActions(job.sceneGraphRepair)) {
+    addEvent(job, "scenegraph-auto-repair", "SceneGraph repair applied after preview QA", {
+      actions: (job.sceneGraphRepair.actions || []).map((item) => item.action).slice(0, 8)
+    });
+    job.exports.pptx = await buildDeck(job);
+    job.exportMeta = collectExportMeta(job.exports);
+    await refreshPreview(job, "SceneGraph repair rendered", { allowSceneGraphRepair: false });
+  }
 }
 
-function syncPreviewAfterSlideAction(job, previousPreviewImages = [], action = "", slideIndex = 0, nextIndex = slideIndex) {
-  const next = [...previousPreviewImages];
-  if (action === "move-up" || action === "move-down" || action === "move-to") {
-    const [moved] = next.splice(slideIndex, 1);
-    next.splice(nextIndex, 0, moved || null);
-  } else if (action === "duplicate") {
-    next.splice(slideIndex + 1, 0, previousPreviewImages[slideIndex] || null);
-  } else if (action === "delete") {
-    next.splice(slideIndex, 1);
-  } else if (action === "insert-after" || action === "insert-before") {
-    next.splice(action === "insert-before" ? slideIndex : slideIndex + 1, 0, null);
+function hasAutoRepairableSceneGraphActions(repairRecord = {}) {
+  if (repairRecord.status !== "planned") return false;
+  const autoRepairable = new Set(["increase-or-bind-image-area", "rebuild-native-text-boxes", "increase-visual-hierarchy", "move-text-away-from-busy-region"]);
+  return (repairRecord.actions || []).some((item) => autoRepairable.has(item.action));
+}
+
+async function updateSceneGraphPreviewCompare(job) {
+  ensureSceneGraphForJob(job);
+  const previewQa = [];
+  for (const imageUrl of job.previewImages || []) {
+    const filePath = resolveOutputUrlToFile(imageUrl);
+    if (!filePath || !fsSync.existsSync(filePath)) continue;
+    try {
+      previewQa.push(await analyzeGeneratedImage(filePath, { textSafeArea: "" }));
+    } catch (error) {
+      previewQa.push({
+        version: 1,
+        source: "local-pixel-qa",
+        status: "warn",
+        risks: ["preview-qa-failed:" + (error.message || "unknown")],
+        full: null,
+        textSafe: null
+      });
+    }
   }
-  const slideCount = job.deck?.slides?.length || 0;
-  job.previewImages = next.slice(0, slideCount);
-  while (job.previewImages.length < slideCount) job.previewImages.push(null);
-  job.previewWarning = null;
-  addEvent(job, "preview-fast-sync", `页面操作已快速同步预览：${action}`, {
-    action,
-    from: slideIndex,
-    to: nextIndex,
-    previewCount: job.previewImages.filter(Boolean).length,
-    slideCount
+  let targetQa = null;
+  const targetPath = job.visualTarget?.sample?.imagePath;
+  if (targetPath && fsSync.existsSync(targetPath)) {
+    try {
+      targetQa = await analyzeGeneratedImage(targetPath, { textSafeArea: "" });
+    } catch (error) {
+      targetQa = {
+        version: 1,
+        source: "local-pixel-qa",
+        status: "warn",
+        risks: ["visual-target-qa-failed:" + (error.message || "unknown")],
+        full: null,
+        textSafe: null
+      };
+    }
+  }
+  job.visualCompare = compareRenderedPreviewToVisualTarget({
+    sceneGraph: job.sceneGraph,
+    visualTarget: job.visualTarget,
+    previewImages: job.previewImages || [],
+    previewQa,
+    targetQa
   });
+  job.sceneGraphRepair = buildSceneGraphRepairRecord(job.sceneGraph, job.visualCompare, job.sceneGraphQa);
+  addEvent(job, "scenegraph-preview-qa", "SceneGraph/PPTX preview QA " + job.visualCompare.score, {
+    status: job.visualCompare.status,
+    method: job.visualCompare.method,
+    score: job.visualCompare.score,
+    warnings: job.visualCompare.warnings || []
+  });
+}
+
+function resolveOutputUrlToFile(value = "") {
+  const pathname = String(value || "").split("?")[0];
+  if (pathname && fsSync.existsSync(pathname)) {
+    const resolvedPath = path.resolve(pathname);
+    return resolvedPath.startsWith(path.resolve(outputDir)) ? resolvedPath : null;
+  }
+  if (!pathname.startsWith("/outputs/")) return null;
+  const parts = pathname.slice("/outputs/".length).split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  const resolved = path.resolve(outputDir, ...parts);
+  const outputRoot = path.resolve(outputDir);
+  return resolved.startsWith(outputRoot) ? resolved : null;
 }
 
 function normalizeInput(input = {}) {
@@ -2389,16 +3655,15 @@ function normalizeInput(input = {}) {
 }
 
 function filterStyleReferencesForInput(references = [], input = {}, routePlan = null) {
-  const themes = getDesignSystem().themes || [];
-  const defaultTheme = themes[0]?.name || "";
-  const selectedTheme = decodeMaybeMojibake(input.style || routePlan?.recommendedTheme || defaultTheme);
-  const selectedThemeRecord = themes.find((theme) => theme.name === selectedTheme || theme.slug === selectedTheme) || themes[0] || {};
-  const selectedThemeSlug = selectedThemeRecord.slug || "";
-  return references.filter((record) => {
-    const recordTheme = decodeMaybeMojibake(record.themeName || "");
-    if (!recordTheme && !record.themeSlug) return selectedTheme === defaultTheme;
-    return recordTheme === selectedTheme || recordTheme === selectedThemeRecord.name || record.themeSlug === selectedThemeSlug;
-  });
+  return references
+    .map((record) => ({
+      ...record,
+      name: decodeMaybeMojibake(record.name || ""),
+      tone: decodeMaybeMojibake(record.tone || ""),
+      themeName: decodeMaybeMojibake(record.themeName || "")
+    }))
+    .filter((record) => record.id || record.path || record.originalName)
+    .slice(0, 24);
 }
 
 function normalizeUploadRecord(file) {
@@ -2406,16 +3671,70 @@ function normalizeUploadRecord(file) {
   const normalized = path.normalize(file.path || "");
   const isImage = /\.(png|jpe?g|svg|webp)$/i.test(file.originalName || file.path || "") || /^image\//.test(file.mimeType || "");
   const uploadUrl = normalized.startsWith(uploadDir) && fsSync.existsSync(normalized)
-    ? `/uploads/${path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")}`
+    ? "/uploads/" + path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")
     : null;
   return { ...file, originalName: decodeMaybeMojibake(file.originalName), uploadUrl: isImage ? uploadUrl : null };
+}
+
+function attachVisualTargetSampleUrl(visualTarget = null, files = []) {
+  if (!visualTarget?.sample) return visualTarget;
+  const sample = visualTarget.sample || {};
+  const record = (files || []).find((file) => file.id && file.id === sample.imageId) || (files || []).find((file) => sample.imagePath && path.normalize(file.path || "") === path.normalize(sample.imagePath));
+  const normalized = record ? normalizeUploadRecord(record) : null;
+  return {
+    ...visualTarget,
+    sample: {
+      ...sample,
+      imageUrl: normalized?.uploadUrl || null
+    }
+  };
+}
+
+function normalizeVisualProjectForClient(project = null, toOutputUrl = (value) => value) {
+  if (!project) return null;
+  const pathKeys = [
+    "projectDir",
+    "outlinePath",
+    "deckSpecPath",
+    "promptsDir",
+    "originImageDir",
+    "sceneGraphDir",
+    "slideJobsPath",
+    "slideRunStatePath",
+    "slideSceneGraphManifestPath",
+    "contactSheetPath",
+    "visualTargetPptxPath"
+  ];
+  const urls = {};
+  for (const key of pathKeys) {
+    if (project[key]) urls[key.replace(/Path$|Dir$/, "Url")] = toOutputUrl(project[key], { cacheBust: true });
+  }
+  const originImages = fsSync.existsSync(project.originImageDir || "")
+    ? fsSync.readdirSync(project.originImageDir)
+      .filter((name) => /^slide_\d+\.(png|jpe?g|webp)$/i.test(name))
+      .sort()
+      .map((name, index) => {
+        const filePath = path.join(project.originImageDir, name);
+        return {
+          slide: index + 1,
+          name,
+          path: filePath,
+          url: toOutputUrl(filePath, { cacheBust: true })
+        };
+      })
+    : [];
+  return {
+    ...project,
+    originImages,
+    urls
+  };
 }
 
 function normalizeStyleReference(record) {
   if (!record) return record;
   const normalized = path.normalize(record.path || "");
   const imageUrl = normalized.startsWith(uploadDir) && fsSync.existsSync(normalized)
-    ? `/uploads/${path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")}`
+    ? "/uploads/" + path.relative(uploadDir, normalized).split(path.sep).map(encodeURIComponent).join("/")
     : null;
   const defaultTheme = getDesignSystem().themes?.[0] || {};
   return {
@@ -2465,9 +3784,9 @@ function fileMeta(value) {
 }
 
 function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
 function cleanClientText(value = "") {
@@ -2491,9 +3810,9 @@ function applyOutlinePlan(baseRoutePlan, outlinePlan = null) {
     ...step,
     index: index + 1,
     layout: cleanClientText(step.layout) || "section",
-    title: cleanClientText(step.title) || `第 ${index + 1} 页`,
-    purpose: cleanClientText(step.purpose) || cleanClientText(step.visualIntent) || "按确认大纲生成本页内容。",
-    storyRole: cleanClientText(step.storyRole) || cleanClientText(step.kind) || "补充内容",
+    title: cleanClientText(step.title) || "Slide " + (index + 1),
+    purpose: cleanClientText(step.purpose) || cleanClientText(step.visualIntent) || "Generate content from confirmed outline",
+    storyRole: cleanClientText(step.storyRole) || cleanClientText(step.kind) || "Content",
     kind: cleanClientText(step.kind) || cleanClientText(step.layout) || "section",
     imageSlots: Array.isArray(step.imageSlots) ? step.imageSlots.map(cleanClientText).filter(Boolean) : [],
     sourceType: cleanClientText(step.sourceType) || "inferred",
@@ -2504,10 +3823,14 @@ function applyOutlinePlan(baseRoutePlan, outlinePlan = null) {
   return {
     ...baseRoutePlan,
     ...outlinePlan,
+    recommendedTheme: baseRoutePlan.recommendedTheme,
+    templatePack: baseRoutePlan.templatePack,
+    styleReferenceStrategy: baseRoutePlan.styleReferenceStrategy,
+    aestheticPlan: baseRoutePlan.aestheticPlan,
     targetSlides: layoutSequence.length,
     layoutSequence,
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
-    storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
+    storyArc: layoutSequence.map((step) => step.index + ". " + step.storyRole + ": " + step.title).join(" > "),
     routingReasons: [...(baseRoutePlan.routingReasons || []), "outlinePlan=confirmed"]
   };
 }
@@ -2520,9 +3843,9 @@ function syncRoutePlanWithSlides(routePlan = null, slides = [], reason = "manual
       ...previous,
       index: index + 1,
       layout: slide.layout || previous.layout || "section",
-      title: cleanClientText(slide.title) || previous.title || `第 ${index + 1} 页`,
-      purpose: previous.purpose || cleanClientText(slide.visualIntent) || cleanClientText(slide.subtitle) || "手动调整后的页面",
-      storyRole: cleanClientText(slide.storyRole) || previous.storyRole || "手动调整",
+      title: cleanClientText(slide.title) || previous.title || "Slide " + (index + 1),
+      purpose: previous.purpose || cleanClientText(slide.visualIntent) || cleanClientText(slide.subtitle) || "Page adjusted manually",
+      storyRole: cleanClientText(slide.storyRole) || previous.storyRole || "Manual adjustment",
       kind: previous.kind || slide.layout || "section",
       imageSlots: Array.isArray(slide.imageSlots) ? slide.imageSlots.map(cleanClientText).filter(Boolean) : previous.imageSlots || []
     };
@@ -2533,27 +3856,27 @@ function syncRoutePlanWithSlides(routePlan = null, slides = [], reason = "manual
     layoutCount: layoutSequence.length,
     layoutSequence,
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
-    storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" -> "),
-    routingReasons: [...(routePlan.routingReasons || []), `manual-slide-action=${reason}`, "routePlan=synced-to-current-deck"]
+    storyArc: layoutSequence.map((step) => step.index + ". " + step.storyRole + ": " + step.title).join(" -> "),
+    routingReasons: [...(routePlan.routingReasons || []), "manual-slide-action=" + reason, "routePlan=synced-to-current-deck"]
   };
 }
 
 function getInsertedSlideDefaults(layout = "section") {
   const defaults = {
-    cover: { title: "新增封面", subtitle: "补充项目标题和核心主张", storyRole: "开场定位", bullets: ["一句话说明项目价值"], dataPoints: [], visualIntent: "用主标题和主视觉建立第一印象。" },
-    visual: { title: "新增视觉页", subtitle: "补充图片素材或视觉意图", storyRole: "视觉证据", bullets: ["说明这张图片想证明什么"], dataPoints: [], visualIntent: "优先放入产品图、包装图、截图或效果图。" },
-    section: { title: "新增章节", subtitle: "补充这一部分的结论", storyRole: "章节承接", bullets: ["在这里补充当前页要点"], dataPoints: [], visualIntent: "用简洁章节页承接前后内容。" },
-    toc: { title: "目录", subtitle: "补充阅读路径", storyRole: "阅读路径", bullets: ["第一部分", "第二部分", "第三部分"], dataPoints: [], visualIntent: "用列表说明整份 PPT 的结构。" },
-    kpi: { title: "关键指标", subtitle: "补充指标口径和数据来源", storyRole: "关键证据", bullets: ["指标一待补齐", "指标二待补齐", "指标三待补齐"], dataPoints: ["指标一", "指标二", "指标三"], visualIntent: "用大数字或指标卡展示关键信息。" },
-    pricing: { title: "价格梯度", subtitle: "补充报价、档位和主推理由", storyRole: "预算决策", bullets: ["入门档待补齐", "主推档待补齐", "升级档待补齐"], dataPoints: ["入门档", "主推档", "升级档"], visualIntent: "用价格卡说明不同预算选择。" },
-    "product-detail": { title: "产品详情", subtitle: "补充规格、卖点和适用场景", storyRole: "方案证据", bullets: ["规格待补齐", "卖点待补齐", "场景待补齐"], dataPoints: [], visualIntent: "用产品图和信息条展示单品信息。" },
-    bundle: { title: "组合推荐", subtitle: "补充不同场景下的推荐组合", storyRole: "推荐方案", bullets: ["入门组合", "主推组合", "升级组合"], dataPoints: [], visualIntent: "用三栏卡片表达组合推荐。" },
-    "risk-checklist": { title: "风险与待确认", subtitle: "补充需要人工确认的信息", storyRole: "风险控制", bullets: ["价格待确认", "规格待确认", "图片授权待确认"], dataPoints: [], visualIntent: "用清单结构呈现待确认项。" },
-    compare: { title: "方案对比", subtitle: "补充方案差异和推荐理由", storyRole: "差异证明", bullets: ["方案 A", "方案 B", "推荐理由"], dataPoints: [], visualIntent: "用左右对比说明差异。" },
-    timeline: { title: "推进路径", subtitle: "补充阶段、节奏和交付动作", storyRole: "落地路径", bullets: ["阶段一", "阶段二", "阶段三"], dataPoints: [], visualIntent: "用时间线展示推进步骤。" },
-    cards: { title: "核心要点", subtitle: "补充 3-5 个关键卖点或判断", storyRole: "卖点证明", bullets: ["要点一", "要点二", "要点三"], dataPoints: [], visualIntent: "用卡片拆分关键信息。" },
-    quote: { title: "核心话术", subtitle: "补充可直接复述的一句话", storyRole: "表达锚点", bullets: ["把这一页讲成一句清楚的话"], dataPoints: [], visualIntent: "用大标题强化记忆点。" },
-    closing: { title: "下一步行动", subtitle: "补充确认事项和交付动作", storyRole: "下一步行动", bullets: ["确认资料", "输出正式版", "进入交付"], dataPoints: [], visualIntent: "用行动清单收束整份 PPT。" }
+    cover: { title: "新增封面", subtitle: "补充项目标题和核心主张", storyRole: "开场定位", bullets: ["用一句话说明项目价值"], dataPoints: [], visualIntent: "用主标题和主视觉建立第一印象" },
+    visual: { title: "新增视觉页", subtitle: "补充图片素材或视觉意图", storyRole: "视觉证据", bullets: ["说明这张图片想证明什么"], dataPoints: [], visualIntent: "优先放入产品图、包装图、截图或效果图" },
+    section: { title: "新增章节", subtitle: "补充这一部分的结论", storyRole: "章节承接", bullets: ["在这里补充当前页要点"], dataPoints: [], visualIntent: "用简洁章节页承接前后内容" },
+    toc: { title: "目录", subtitle: "补充阅读路径", storyRole: "阅读路径", bullets: ["第一部分", "第二部分", "第三部分"], dataPoints: [], visualIntent: "用列表说明整套 PPT 的结构" },
+    kpi: { title: "关键指标", subtitle: "补充指标口径和数据来源", storyRole: "关键证据", bullets: ["指标一待补齐", "指标二待补齐", "指标三待补齐"], dataPoints: ["指标一", "指标二", "指标三"], visualIntent: "用大数字或指标卡展示关键信息" },
+    pricing: { title: "价格梯度", subtitle: "补充报价、档位和主推理由", storyRole: "预算决策", bullets: ["入门档待补齐", "主推档待补齐", "升级档待补齐"], dataPoints: ["入门档", "主推档", "升级档"], visualIntent: "用价格卡说明不同预算选择" },
+    "product-detail": { title: "产品详情", subtitle: "补充规格、卖点和适用场景", storyRole: "方案证据", bullets: ["规格待补齐", "卖点待补齐", "场景待补齐"], dataPoints: [], visualIntent: "用产品图和信息条展示单品信息" },
+    bundle: { title: "组合推荐", subtitle: "补充不同场景下的推荐组合", storyRole: "推荐方案", bullets: ["入门组合", "主推组合", "升级组合"], dataPoints: [], visualIntent: "用三栏卡片表达组合推荐" },
+    "risk-checklist": { title: "风险与待确认", subtitle: "补充需要人工确认的信息", storyRole: "风险控制", bullets: ["价格待确认", "规格待确认", "图片授权待确认"], dataPoints: [], visualIntent: "用清单结构呈现待确认项" },
+    compare: { title: "方案对比", subtitle: "补充方案差异和推荐理由", storyRole: "差异证明", bullets: ["方案 A", "方案 B", "推荐理由"], dataPoints: [], visualIntent: "用左右对比说明差异" },
+    timeline: { title: "推进路径", subtitle: "补充阶段、节奏和交付动作", storyRole: "落地路径", bullets: ["阶段一", "阶段二", "阶段三"], dataPoints: [], visualIntent: "用时间线展示推进步骤" },
+    cards: { title: "核心要点", subtitle: "补充 3-5 个关键卖点或判断", storyRole: "卖点证明", bullets: ["要点一", "要点二", "要点三"], dataPoints: [], visualIntent: "用卡片拆分关键信息" },
+    quote: { title: "核心话术", subtitle: "补充可直接复述的一句话", storyRole: "表达锚点", bullets: ["把这一页讲成一句清楚的话"], dataPoints: [], visualIntent: "用大标题强化记忆点" },
+    closing: { title: "下一步行动", subtitle: "补充确认事项和交付动作", storyRole: "下一步行动", bullets: ["确认资料", "输出正式稿", "进入交付"], dataPoints: [], visualIntent: "用行动清单收束整套 PPT" }
   };
   return defaults[layout] || defaults.section;
 }
@@ -2623,25 +3946,25 @@ function repairDeckForDelivery(deck = {}, routePlan = null, files = [], material
   slides.forEach((slide, index) => {
     slide.bullets = normalizeClientList(slide.bullets).slice(0, slide.layout === "pricing" ? 4 : 5);
     slide.dataPoints = normalizeClientList(slide.dataPoints).slice(0, 8);
-    slide.imageSlots = normalizeClientList(slide.imageSlots).slice(0, 8);
+    slide.imageSlots = normalizeImageSlotsForLayout(slide.layout, slide.imageSlots);
     if (!slide.title) {
-      slide.title = index === 0 ? deck.title || "项目首页" : `第 ${index + 1} 页`;
+      slide.title = index === 0 ? deck.title || "Project cover" : "Slide " + (index + 1);
       changes.push("filled-title");
     }
     if (!slide.storyRole) {
-      slide.storyRole = slide.layout === "closing" ? "下一步行动" : slide.layout === "pricing" ? "预算决策" : "内容承接";
+      slide.storyRole = slide.layout === "closing" ? "Next step" : slide.layout === "pricing" ? "Budget decision" : "Content";
       changes.push("filled-story-role");
     }
     if (!slide.visualIntent) {
-      slide.visualIntent = slide.layout === "visual" ? "使用上传图片或素材槽作为页面主视觉。" : "按当前模板规则保持清晰层级和留白。";
+      slide.visualIntent = slide.layout === "visual" ? "Use uploaded images or material slots as the main visual." : "Keep clear hierarchy and whitespace within the current template.";
       changes.push("filled-visual-intent");
     }
     if (!slide.speakerNotes) {
-      slide.speakerNotes = `讲清「${slide.title}」这一页的结论、依据和下一步动作。`;
+      slide.speakerNotes = "Explain the conclusion, evidence, and next action for: " + slide.title;
       changes.push("filled-speaker-notes");
     }
     if (slide.layout === "visual" && imageFiles.length && !slide.imageSlots.length) {
-      slide.imageSlots = imageFiles.slice(0, 3);
+      slide.imageSlots = normalizeImageSlotsForLayout(slide.layout, imageFiles);
       changes.push("filled-image-slots");
     }
     if (slide.layout === "pricing") {
@@ -2668,17 +3991,12 @@ function repairDeckForDelivery(deck = {}, routePlan = null, files = [], material
       speakerNotes: "这里集中说明还不能被当作最终结论的信息，避免伪造价格、规格、库存或品牌承诺。"
     };
     const targetCount = Number(routePlan?.targetSlides || routePlan?.layoutSequence?.length || 0);
-    if (targetCount && slides.length >= targetCount) {
-      const routeRiskIndex = (routePlan?.layoutSequence || []).findIndex((step) => step.layout === "risk-checklist");
-      const replaceAt = routeRiskIndex >= 0
-        ? routeRiskIndex
-        : Math.max(1, Math.min(slides.length - 2, slides.findIndex((slide, index) => index > 0 && index < slides.length - 1 && !["cover", "closing"].includes(slide.layout))));
-      slides[replaceAt] = { ...slides[replaceAt], ...riskSlide };
-      changes.push("converted-slide-to-risk-checklist");
-    } else {
+    if (!targetCount || slides.length < targetCount) {
       const insertAt = Math.max(1, slides.length - 1);
       slides.splice(insertAt, 0, riskSlide);
       changes.push("added-risk-checklist");
+    } else {
+      changes.push("kept-source-pages-over-risk-insert");
     }
   }
 
@@ -2686,7 +4004,7 @@ function repairDeckForDelivery(deck = {}, routePlan = null, files = [], material
     deck: {
       ...deck,
       slides,
-      summary: cleanClientText(deck.summary) || "已完成交付自检修复。"
+      summary: cleanClientText(deck.summary) || "已完成交付自检修复"
     },
     summary: {
       changes: [...new Set(changes)],
@@ -2700,8 +4018,8 @@ function rewriteDeckLocally(deck = {}, instruction = "") {
   const text = instruction.toLowerCase();
   const reduceText = /少字|减字|减少文字|精简|简洁|高级|克制|不要堆字/i.test(instruction);
   const salesTone = /销售|成交|战卡|话术|主推/i.test(instruction);
-  const clientTone = /客户|提案|对外|客户版/i.test(instruction);
-  const premiumTone = /高级|克制|画册|品牌/i.test(instruction);
+  const clientTone = /客户|提案|对外|沟通|client|proposal|external|customer/i.test(instruction);
+  const premiumTone = /高级|克制|画册|品牌|质感/i.test(instruction);
   const actionTone = /下一步|行动|落地|推进|交付/i.test(instruction);
   const techTone = /技术|数据|指标|kpi|分析/i.test(text);
   const slides = (deck.slides || []).map((slide, index, all) => {
@@ -2744,51 +4062,51 @@ function rewriteDeckLocally(deck = {}, instruction = "") {
 
 function appendRewriteSummary(summary = "", instruction = "") {
   const base = cleanClientText(summary);
-  const note = `已批量改写：${instruction}`;
-  return base.includes(note) ? base : [base, note].filter(Boolean).join("；").slice(0, 180);
+  const note = "Batch rewrite: " + instruction;
+  return base.includes(note) ? base : [base, note].filter(Boolean).join("; ").slice(0, 180);
 }
 
 function shortenTitle(title = "") {
-  return cleanClientText(title).replace(/^(关于|针对|基于)/, "").slice(0, 24) || "核心观点";
+  return cleanClientText(title).replace(/^(about|for|based on)/i, "").slice(0, 24) || "Core Point";
 }
 
 function shortenBullet(value = "") {
-  const text = cleanClientText(value).replace(/^(首先|其次|同时|因此|所以)[，,、]*/, "");
-  return text.length > 24 ? `${text.slice(0, 24)}…` : text;
+  const text = cleanClientText(value).replace(/^(first|second|therefore|so)[:锛?\s]*/i, "");
+  return text.length > 24 ? text.slice(0, 24) + "..." : text;
 }
 
 function salesTitleForDeck(title = "", layout = "") {
   const clean = shortenTitle(title);
-  if (layout === "pricing") return "价格梯度与主推档位";
-  if (layout === "quote") return "客户可复述的成交话术";
-  if (layout === "risk-checklist") return "成交前必须确认";
-  if (/主推|成交|价格|行动/.test(clean)) return clean;
-  return `${clean}：主推理由`;
+  if (layout === "pricing") return "Price Tiers and Recommendation";
+  if (layout === "quote") return "Client-Ready Message";
+  if (layout === "risk-checklist") return "Before-Deal Checklist";
+  if (/recommend|deal|price|action/i.test(clean)) return clean;
+  return clean + ": Recommendation";
 }
 
 function salesNotesForSlide(slide = {}) {
   const first = (slide.bullets || [])[0] || slide.subtitle || slide.title;
-  return `这一页先讲结论，再讲客户为什么该选：${first}`;
+  return "Lead with the conclusion, then explain why the client should choose it: " + first;
 }
 
 function clientNotesForSlide(slide = {}) {
   const first = (slide.bullets || [])[0] || slide.title;
-  return `对客户讲这一页时，避免内部术语，直接说明价值和依据：${first}`;
+  return "When presenting this slide to the client, avoid internal jargon and state the value and evidence directly: " + first;
 }
 
 function normalizeClientList(value) {
   if (Array.isArray(value)) return value.map(cleanClientText).filter(Boolean);
   return String(value || "")
-    .split(/\r?\n|[；;]/)
+    .split(/\r?\n|[; "]/)
     .map(cleanClientText)
     .filter(Boolean);
 }
 
 function normalizeCanvasEdits(value = {}) {
   if (!value || typeof value !== "object") return null;
-  const allowed = ["title", "subtitle", "bullets"];
   const result = {};
-  for (const key of allowed) {
+  for (const key of Object.keys(value)) {
+    if (!isAllowedCanvasEditKey(key)) continue;
     const box = value[key]?.box;
     if (!box || typeof box !== "object") continue;
     result[key] = {
@@ -2801,6 +4119,12 @@ function normalizeCanvasEdits(value = {}) {
     };
   }
   return Object.keys(result).length ? result : null;
+}
+
+function isAllowedCanvasEditKey(key = "") {
+  return ["title", "subtitle", "bullets", "visualIntent", "speakerNotes"].includes(key)
+    || /^bullet_\d{1,2}$/.test(key)
+    || /^data_\d{1,2}$/.test(key);
 }
 
 function clampNumber(value, min, max) {
@@ -2821,8 +4145,8 @@ function scoreDecodedName(value) {
   let score = 0;
   if (/[\u4e00-\u9fa5]/.test(value)) score += 4;
   if (/[a-z0-9]/i.test(value)) score += 1;
-  if (/[ÃÂâ¤åç]/.test(value)) score -= 3;
-  if (/[�]/.test(value)) score -= 8;
+  if (/[脙脗芒陇氓莽]/.test(value)) score -= 3;
+  if (/[锟�]/.test(value)) score -= 8;
   return score;
 }
 
@@ -2834,8 +4158,8 @@ function repairPreviewImages(job, options = {}) {
     .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }))
     .map((name) => {
       const file = path.join(pngDir, name);
-      const version = options.cacheBust ? `?v=${Math.round(fsSync.statSync(file).mtimeMs)}` : "";
-      return `/outputs/${[job.id, "exports", "png", name].map(encodeURIComponent).join("/")}${version}`;
+      const version = options.cacheBust ? "?v=" + Math.round(fsSync.statSync(file).mtimeMs) : "";
+      return "/outputs/" + [job.id, "exports", "png", name].map(encodeURIComponent).join("/") + version;
     });
 }
 
@@ -2851,12 +4175,12 @@ async function writeEnvFile(values) {
   const existing = await readEnvFile();
   const merged = { ...existing, ...values };
   const orderedKeys = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "PORT"];
-  const lines = orderedKeys.map((key) => `${key}=${formatEnvValue(merged[key] || "")}`);
+  const lines = orderedKeys.map((key) => key + "=" + formatEnvValue(merged[key] || ""));
   const rest = Object.keys(merged)
     .filter((key) => !orderedKeys.includes(key))
     .sort()
-    .map((key) => `${key}=${formatEnvValue(merged[key] || "")}`);
-  await fs.writeFile(envPath, `${[...lines, ...rest].join("\n")}\n`, "utf8");
+    .map((key) => key + "=" + formatEnvValue(merged[key] || ""));
+  await fs.writeFile(envPath, [...lines, ...rest].join("\n") + "\n", "utf8");
 }
 
 function parseEnv(text = "") {
@@ -2888,7 +4212,7 @@ function normalizeBaseUrl(value) {
 async function fetchOpenAiCompatible(baseUrl, endpoint, options) {
   const errors = [];
   for (const candidate of getCompatibleBaseUrls(baseUrl)) {
-    const url = `${candidate}${endpoint}`;
+    const url = candidate + endpoint;
     try {
       const response = await fetch(url, options);
       if (response.ok && isJsonResponse(response)) return { response, url };
@@ -2906,7 +4230,7 @@ async function fetchOpenAiCompatible(baseUrl, endpoint, options) {
 function getCompatibleBaseUrls(baseUrl) {
   const normalized = normalizeBaseUrl(baseUrl);
   const candidates = [normalized];
-  if (!/\/v\d+(\/|$)/.test(normalized)) candidates.push(`${normalized}/v1`);
+  if (!/\/v\d+(\/|$)/.test(normalized)) candidates.push(normalized + "/v1");
   return [...new Set(candidates)];
 }
 
@@ -2938,5 +4262,5 @@ async function readProviderError(response) {
 function maskSecret(value = "") {
   if (!value) return "";
   if (value.length <= 10) return "已配置";
-  return `${value.slice(0, 5)}...${value.slice(-4)}`;
+  return value.slice(0, 5) + "..." + value.slice(-4);
 }

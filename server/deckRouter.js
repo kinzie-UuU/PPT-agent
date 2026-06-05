@@ -1,6 +1,7 @@
 import { getTemplatePack } from "./designSystem.js";
 import { summarizeStyleFingerprints } from "./styleFingerprint.js";
 import { buildAestheticPlan } from "./aestheticSystem.js";
+import { applyTemplateReusePlan, buildTemplateReusePlan } from "./templateReuse.js";
 
 const EXPLICIT_SLIDE_COUNTS = [
   { pattern: /8/, count: 8 },
@@ -40,16 +41,17 @@ function resolveTargetSlides(pageCount, materialBrief = {}, uploads = []) {
 function detectDeckType({ mode, input = {}, materialBrief = {}, uploads = [] }) {
   const text = cleanText([input.projectName, input.audience, input.notes, input.copyMode].join(" "));
   const hasOldDeck = mode === "optimize" || uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
+  if (isDesignLed(input)) return inferDesignLedDeckType({ text, materialBrief, hasOldDeck });
   const productCount = materialBrief.productCandidates?.length || materialBrief.products?.length || 0;
   const priceCount = materialBrief.prices?.length || 0;
   if (hasOldDeck) return "旧稿优化";
-  if (materialBrief.inputStrength === "empty") return "零资料初稿";
-  if (materialBrief.inputStrength === "weak") return "弱资料初稿";
+  if (materialBrief.inputStrength === "empty") return "轻量资料整理";
+  if (materialBrief.inputStrength === "weak") return "轻量资料整理";
   if (hasAny(text, [/客户|提案|方案|汇报给客户/])) return "客户提案";
   if (productCount && priceCount) return "销售战卡";
   if (productCount) return "产品介绍";
   if (priceCount || materialBrief.dimensions?.length || hasAny(text, [/数据|指标|KPI|分析|复盘/])) return "数据汇报";
-  return "资料整理";
+  return "轻量资料整理";
 }
 
 function chooseTheme(input = {}, deckType) {
@@ -60,11 +62,25 @@ function chooseTheme(input = {}, deckType) {
     产品介绍: "东方自然风",
     数据汇报: "蓝白科技风",
     旧稿优化: "蓝白科技风",
-    弱资料初稿: "轻盈渐变风",
-    零资料初稿: "黑白画册风",
-    资料整理: "黑白画册风"
+    轻量资料整理: "黑白画册风"
   };
   return map[deckType] || "轻盈渐变风";
+}
+
+function isDesignLed(input = {}) {
+  return input.designDirectorMode
+    || input.designPriority === "visual-first"
+    || input.reconstructionMode === "design-led"
+    || /设计优先|视觉优先|提案级|高级设计|高设计感|重构/i.test([input.copyMode, input.notes].join(" "));
+}
+
+function inferDesignLedDeckType({ text = "", materialBrief = {}, hasOldDeck = false } = {}) {
+  const combined = cleanText([text, materialBrief.summary, (materialBrief.pages || []).map((page) => `${page.title || ""} ${page.text || ""}`).join(" ")].join(" "));
+  if (/案例|作品集|portfolio|客户|提案|定制|能力展示/i.test(combined)) return "案例作品集 / 销售提案";
+  if (/品牌|画册|手册|形象|视觉/i.test(combined)) return "品牌画册 / 视觉手册";
+  if (/产品|礼盒|单品|SKU|卖点|价格|报价/i.test(combined)) return "产品提案 / 销售战卡";
+  if (/数据|指标|KPI|复盘|分析|报告/i.test(combined)) return "数据汇报 / 分析报告";
+  return hasOldDeck ? "旧稿设计重构" : "设计型提案";
 }
 
 function makeStep(layout, title, purpose, kind, options = {}) {
@@ -89,7 +105,7 @@ function makeStep(layout, title, purpose, kind, options = {}) {
 function inferStepSourceType(kind = "", options = {}) {
   if (options.sourceType) return options.sourceType;
   if (kind === "source") return "original-ppt";
-  if (["prices", "products", "productDetail", "visual", "compare", "bundle"].includes(kind)) return "extracted";
+  if (["prices", "products", "productDetail", "visual", "compare", "bundle", "spec"].includes(kind)) return "extracted";
   if (["risks", "assumptions"].includes(kind)) return "needs-confirmation";
   return "inferred";
 }
@@ -97,18 +113,20 @@ function inferStepSourceType(kind = "", options = {}) {
 function inferStepSourceLabel(kind = "", options = {}) {
   const sourceType = inferStepSourceType(kind, options);
   if (sourceType === "original-ppt") return "来自原 PPT";
-  if (sourceType === "extracted") return "来自资料提取";
+  if (sourceType === "extracted") return "来自资料抽取";
   if (sourceType === "needs-confirmation") return "待人工确认";
   return "AI 推断";
 }
 
 function dedupeConsecutive(sequence) {
+  const alternates = ["cards", "kpi", "compare", "quote", "timeline", "product-detail", "risk-checklist"];
   return sequence.map((step, index) => {
     if (index < 2) return step;
     const a = sequence[index - 1]?.layout;
     const b = sequence[index - 2]?.layout;
     if (step.layout !== a || step.layout !== b) return step;
-    return { ...step, layout: step.layout === "cards" ? "quote" : "cards" };
+    const nextLayout = alternates.find((layout) => layout !== step.layout && layout !== a) || "cards";
+    return makeTemplateStep(nextLayout, { includeRisk: true }) || { ...step, layout: nextLayout };
   });
 }
 
@@ -153,17 +171,20 @@ function reorderByTemplate(sequence, templatePack, weakOrEmpty) {
   const first = sequence.find((step) => step.layout === "cover") || sequence[0];
   const last = sequence.find((step) => step.layout === "closing") || sequence.at(-1);
   const middle = sequence.filter((step) => step !== first && step !== last);
-  const ranked = middle.map((step, index) => {
-    const rank = preferred.indexOf(step.layout);
-    return { step, index, rank: rank === -1 ? 999 + index : rank };
-  }).sort((a, b) => a.rank - b.rank || a.index - b.index).map((item) => item.step);
+  const ranked = middle
+    .map((step, index) => {
+      const rank = preferred.indexOf(step.layout);
+      return { step, index, rank: rank === -1 ? 999 + index : rank };
+    })
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.step);
   return [first, ...ranked, last].filter(Boolean);
 }
 
 function makeTemplateStep(layout, context = {}) {
   const imageSlots = context.imageHints || [];
   const steps = {
-    toc: makeStep("toc", "目录", "按模板包给长 deck 提供清晰阅读路径。", "toc", { required: true, storyRole: "阅读路径" }),
+    toc: makeStep("toc", "目录", "为长 deck 提供清晰阅读路径。", "toc", { required: true, storyRole: "阅读路径" }),
     visual: makeStep("visual", "视觉主张", "承接图片、截图或关键视觉素材，建立第一印象。", "visual", { imageSlots, storyRole: "第一印象" }),
     kpi: makeStep("kpi", "关键指标", "把价格、规格、成本、阶段或效果转成可扫读指标。", "spec", { storyRole: "关键证据" }),
     compare: makeStep("compare", "方案对比", "比较不同方案、档位、前后状态或能力差异。", "compare", { storyRole: "差异证明" }),
@@ -218,7 +239,7 @@ function inferSourceLayout(page = {}, index = 0) {
   if (/风险|投诉|问题|周期|交付|库存|确认/.test(text)) return "risk-checklist";
   if (/对比|差异|竞品|方案A|方案B/.test(text)) return "compare";
   if (/流程|路径|进度|阶段|时间|交付/.test(text)) return "timeline";
-  if (/案例|客户|品牌|背景|介绍/.test(text)) return "section";
+  if (/案例|客户|品牌|背景|介绍/.test(text)) return "cards";
   if (/产品|礼盒|套装|单品|规格|定制/.test(text)) return "product-detail";
   return index % 3 === 0 ? "cards" : "section";
 }
@@ -238,7 +259,7 @@ function buildSourceOutline(materialBrief = {}, targetSlides = 12, context = {})
       required: true,
       storyRole: context.hasOldDeck ? "原稿重排" : "资料页提炼",
       sourceType: context.hasOldDeck ? "original-ppt" : "extracted",
-      sourceLabel: context.hasOldDeck ? "来自原 PPT" : "来自资料提取",
+      sourceLabel: context.hasOldDeck ? "来自原 PPT" : "来自资料抽取",
       evidence: `第 ${page.page || index + 1} 页${page.title ? `：${page.title}` : ""}`,
       imageSlots: context.imagesBySlide?.[page.page || index + 1] || [],
       sourceSlideType: page.sourceSlideType || "",
@@ -253,8 +274,8 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
   const styleReferences = Array.isArray(input.styleReferences) ? input.styleReferences.slice(0, 12) : [];
   const styleFingerprintSummary = summarizeStyleFingerprints(styleReferences);
   const recommendedTheme = chooseTheme(input, deckType);
-  const templatePack = getTemplatePack(input.style || recommendedTheme);
-  const targetSlides = resolveTargetSlides(input.pageCount, materialBrief, uploads);
+  const templatePack = getTemplatePack(recommendedTheme);
+  let targetSlides = resolveTargetSlides(input.pageCount, materialBrief, uploads);
   const hasOldDeck = mode === "optimize" || uploads.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || file.path || ""));
   const imageHints = [
     ...(materialBrief.imageHints || []),
@@ -291,7 +312,7 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
   ].filter(Boolean) : [
     makeStep("cover", "封面", "用一句话说明项目核心价值。", "cover", { required: true, storyRole: "结论先行" }),
     includeToc ? makeStep("toc", "目录", "给长 deck 提供阅读路径。", "toc", { required: true, storyRole: "阅读路径" }) : null,
-    makeStep("section", "资料结论", "先讲清楚资料里的机会、对象和推荐方向。", "brief", { required: true, storyRole: "问题与机会" }),
+    makeStep("section", "资料结论", "先讲清资料里的机会、对象和推荐方向。", "brief", { required: true, storyRole: "问题与机会" }),
     hasImages ? makeStep("visual", "产品视觉", "优先展示上传图片、包装图或效果图。", "visual", { required: true, imageSlots: imageHints, storyRole: "第一印象" }) : null,
     hasPrices ? makeStep("pricing", "价格梯度", "用价格带帮助销售判断预算入口。", "prices", { required: true, storyRole: "预算决策" }) : null,
     hasProducts ? makeStep("product-detail", "单品详情", "讲清主推产品的规格、价格和卖点。", "productDetail", { required: true, storyRole: "方案证据" }) : null,
@@ -304,7 +325,9 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     makeStep("closing", "行动建议", "总结下一步动作和交付方式。", "closing", { required: true, storyRole: "下一步行动" })
   ].filter(Boolean);
 
-  const sourceBase = shouldUseSourceOutline ? buildSourceOutline(materialBrief, targetSlides, { hasOldDeck, imagesBySlide }) : null;
+  const sourceBase = shouldUseSourceOutline
+    ? buildSourceOutline(materialBrief, targetSlides, { hasOldDeck, imagesBySlide })
+    : null;
   const templateReadyBase = sourceBase || ensureTemplateLayouts(base, templatePack, {
     hasPrices,
     imageHints,
@@ -313,7 +336,10 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     weakOrEmpty
   });
   const orderedBase = sourceBase ? templateReadyBase : reorderByTemplate(templateReadyBase, templatePack, weakOrEmpty);
-  const layoutSequence = fitSequence(orderedBase, targetSlides, includeRisk);
+  const rawLayoutSequence = fitSequence(orderedBase, targetSlides, includeRisk);
+  const templateReusePlan = buildTemplateReusePlan(rawLayoutSequence, materialBrief.sourceReport || null);
+  const layoutSequence = applyTemplateReusePlan(rawLayoutSequence, templateReusePlan);
+  const sourceIntegrity = buildSourceIntegrity(materialBrief.sourceReport || null);
   const aestheticPlan = buildAestheticPlan({
     style: input.style || recommendedTheme,
     deckType,
@@ -341,23 +367,31 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       fingerprint: styleFingerprintSummary,
       instruction: styleReferences.length
         ? "生成时参考风格参考库的色彩、留白、质感、字体气质和画面密度；不要复制图片内容本身。"
-        : "未提供自定义风格参考，使用内置主题和模板包。"
+        : "未提供自定义风格参考，使用内置主题和设计方向规则。"
     },
     storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
     sections: layoutSequence.map((step) => ({ index: step.index, title: step.title, layout: step.layout, purpose: step.purpose, storyRole: step.storyRole })),
     layoutSequence,
     sourceReport: materialBrief.sourceReport || null,
+    sourceIntegrity,
+    templateReusePlan,
+    designDirectorStrategy: isDesignLed(input) ? {
+      typeJudgement: "设计优先重构：先判断内容类型，再抽取视觉 DNA，再按页面角色选择可编辑版式。",
+      visualDnaPolicy: ["从上传资料或风格参考中抽主色、背景、字体气质、图片语言和装饰克制程度", "没有明确品牌时选择最适合受众的高级视觉系统，不硬编码客户品牌"],
+      pageRolePolicy: ["每页只承载一个主信息", "图片/图表/证据优先成为视觉主角", "标题必须是结论句", "正文压缩到 2-4 条", "页面布局按角色变化，避免整套同一种卡片"],
+      deliveryPolicy: ["输出可编辑 PPTX", "文字、图片、形状保持独立对象", "本地素材处理优先，云端只做兜底", "视觉自检不通过则返工"]
+    } : null,
     imageStrategy: {
       hasImages,
       imageCount: imageHints.length,
       imageSlots: imageHints,
-      requiredLayouts: hasImages ? ["visual"] : []
+      requiredLayouts: hasImages ? ["visual", "product-detail", "bundle"] : []
     },
     aestheticPlan,
     riskStrategy: {
       includeRiskChecklist: includeRisk,
       required: includeRisk,
-      reason: includeRisk ? (weakOrEmpty ? "弱资料/零资料必须提示待确认项。" : "默认保留交付风险与待补齐项。") : "用户已取消风险清单。"
+      reason: includeRisk ? (weakOrEmpty ? "弱资料或零资料需要提示待确认项。" : "默认保留交付风险与待补齐项。") : "用户已取消风险清单。"
     },
     missingInfo: {
       ...(materialBrief.missing || {}),
@@ -369,11 +403,49 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       `inputStrength=${inputStrength}`,
       `targetSlides=${targetSlides}`,
       `outlineStrategy=${outlineStrategy}`,
+      sourceIntegrity ? `sourceIntegrity=${sourceIntegrity.status}` : "sourceIntegrity=none",
       styleReferences.length ? `styleRefs=${styleReferences.length}` : "noStyleRefs",
       hasImages ? `images=${imageHints.length}` : "noImages",
       hasPrices ? `prices=${materialBrief.prices.length}` : "noPrices",
       hasProducts ? `products=${materialBrief.productCandidates?.length || materialBrief.products?.length || 0}` : "noProducts",
       includeRisk ? "riskChecklist=on" : "riskChecklist=off"
     ]
+  };
+}
+
+function buildSourceIntegrity(sourceReport = null) {
+  if (!sourceReport?.hasOldDeck) return null;
+  const audit = sourceReport.extractionAudit || {};
+  const cloud = sourceReport.cloudSourceAnalysis || {};
+  const warnings = [
+    ...(sourceReport.warnings || []),
+    ...(audit.warnings || []),
+    ...(cloud.findings || [])
+  ].filter(Boolean);
+  const blocking = [
+    Number(audit.missingImageRefs || 0) > 0 ? "missing-image-media" : "",
+    cloud.status === "block" ? "cloud-source-block" : ""
+  ].filter(Boolean);
+  const status = blocking.length ? "block" : warnings.length || cloud.status === "warn" || audit.confidence === "medium" ? "warn" : "pass";
+  return {
+    status,
+    confidence: cloud.confidence || audit.confidence || "medium",
+    textCoverage: {
+      pages: sourceReport.pageCount || 0,
+      textPages: sourceReport.textPageCount || 0,
+      auditTextSlides: audit.textSlideCount || 0,
+      auditSlides: audit.slideCount || 0
+    },
+    imageCoverage: {
+      extractedImages: sourceReport.extractedImageCount || 0,
+      boundImages: sourceReport.boundImageCount || 0,
+      embeddedImageRefs: audit.embeddedImageRefs || 0,
+      linkedImageRefs: audit.linkedImageRefs || 0,
+      missingImageRefs: audit.missingImageRefs || 0
+    },
+    cloudUsed: Boolean(cloud.used),
+    cloudStatus: cloud.status || "not-run",
+    blocking,
+    warnings: warnings.slice(0, 10)
   };
 }

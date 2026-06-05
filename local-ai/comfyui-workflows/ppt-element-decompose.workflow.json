@@ -1,0 +1,54 @@
+{
+  "name": "ppt-element-decompose",
+  "version": 1,
+  "kind": "element-decomposition",
+  "savedBy": "ppt-design-tool",
+  "status": "spec-first",
+  "description": "Element decomposition target schema for PPT background/material/text/icon separation.",
+  "currentProductionPath": "server/pptAesthetic.js",
+  "layers": [
+    {
+      "id": "background",
+      "description": "Full-slide background, texture, atmosphere, color fields. Must reserve text-safe areas."
+    },
+    {
+      "id": "material",
+      "description": "Product photos, source images, foreground cutouts, charts or maps from user materials."
+    },
+    {
+      "id": "text",
+      "description": "Editable title, subtitle, bullets, data points, speaker notes. Never flatten into background."
+    },
+    {
+      "id": "ornament",
+      "description": "Icons, dividers, small accents, badges, page numbers, decorative marks."
+    }
+  ],
+  "slideIRFields": [
+    "page",
+    "size",
+    "elements[]",
+    "elements[].type",
+    "elements[].layer",
+    "elements[].x",
+    "elements[].y",
+    "elements[].w",
+    "elements[].h",
+    "elements[].text",
+    "elements[].imageRef",
+    "elements[].color",
+    "elements[].confidence"
+  ],
+  "futureComfyNodes": [
+    "LoadImage",
+    "SAM/SAM2 or detection segmentation",
+    "MaskToRegion",
+    "CropImageByMask",
+    "SaveImage"
+  ],
+  "policy": [
+    "PPTX text is authoritative and should be parsed from the PPTX whenever possible.",
+    "Visual segmentation is only a fallback for flattened images/screenshots.",
+    "Generated decomposition should preserve aspect ratio and never stretch materials."
+  ]
+}

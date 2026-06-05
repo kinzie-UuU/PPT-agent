@@ -12,6 +12,13 @@
       "Preserve critical facts from source decks: names, years, prices, quantities, client labels, risk notes, and delivery assumptions.",
       "If AI JSON or PPTX image parsing fails, fall back to local rule-based diagnosis and text-first editable redesign."
     ],
+    "imageToEditable": [
+      "For scanned/image/PDF-like inputs, create an object-level manifest before PPTX output: text_inventory, visual_inventory, background_strategy, quality_checks, text_boxes, shapes, images, and asset_provenance.",
+      "Readable text must become native PPT text boxes; never rely on a full-slide screenshot as the only editable surface.",
+      "Full-slide source rasters are allowed only as references or background candidates, and must be flagged for fake-editable QA when text boxes are overlaid.",
+      "Small source-derived raster assets are allowed only for non-text visual objects such as icons, logos, product photos, or decorative marks, with provenance recorded.",
+      "Each page needs a visual/contact-sheet style QA pass before final acceptance: source comparison, text completeness, image/object coverage, font size calibration, and shape corner checks."
+    ],
     "density": [
       "每页只承载一个主信息；长文字先拆页或改写。",
       "cover、quote 不超过 2 条 bullet；closing 不超过 4 条 bullet。",
@@ -36,6 +43,12 @@
       "导出前检查 previewImages、exportMeta、quality.warnings 和 events。",
       "PPTX 是主交付物；PDF 或 PNG 失败不能阻塞 PPTX 下载。",
       "最终结果要能被用户继续编辑，而不是只做成静态图片。"
+    ],
+    "templateReuse": [
+      "For uploaded PPTX templates, inspect slide layouts and placeholders before deciding whether to redraw a page.",
+      "Prefer used source layouts with title/body/picture placeholders when the planned slide role matches.",
+      "If a layout has no usable placeholders, treat it as style evidence only and rebuild editable objects in code.",
+      "Record template-profile warnings such as missing layout links, used layouts without placeholders, and noisy layout sets."
     ]
   }
 }

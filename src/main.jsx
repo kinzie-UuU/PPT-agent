@@ -11,12 +11,22 @@ const FALLBACK_THEMES = [
 ];
 
 const FALLBACK_TEMPLATE_PACKS = [
-  { themeName: "轻盈渐变风", name: "销售提案 / 战卡模板", scenario: "销售战卡、客户提案、节日礼盒", coreLayouts: ["pricing", "product-detail", "quote", "risk-checklist"] },
-  { themeName: "东方自然风", name: "礼盒 / 节日 / 文化产品模板", scenario: "节日礼盒、食品茶饮、文化产品", coreLayouts: ["visual", "product-detail", "bundle", "pricing"] },
-  { themeName: "黑白画册风", name: "品牌画册 / 高端产品模板", scenario: "品牌手册、设计汇报、高端产品介绍", coreLayouts: ["section", "visual", "quote", "product-detail"] },
-  { themeName: "蓝白科技风", name: "技术方案 / 数据汇报模板", scenario: "技术方案、产品分析、数据汇报", coreLayouts: ["toc", "kpi", "compare", "timeline"] },
-  { themeName: "暗黑科技风", name: "发布会 / 趋势报告模板", scenario: "新品发布、技术演示、趋势报告", coreLayouts: ["cover", "kpi", "timeline", "closing"] }
+  { themeName: "轻盈渐变风", name: "销售提案 / 战卡方向", scenario: "销售战卡、客户提案、节日礼盒", coreLayouts: ["pricing", "product-detail", "quote", "risk-checklist"] },
+  { themeName: "东方自然风", name: "礼盒 / 节日 / 文化产品方向", scenario: "节日礼盒、食品茶饮、文化产品", coreLayouts: ["visual", "product-detail", "bundle", "pricing"] },
+  { themeName: "黑白画册风", name: "品牌画册 / 高端产品方向", scenario: "品牌手册、设计汇报、高端产品介绍", coreLayouts: ["section", "visual", "quote", "product-detail"] },
+  { themeName: "蓝白科技风", name: "技术方案 / 数据汇报方向", scenario: "技术方案、产品分析、数据汇报", coreLayouts: ["toc", "kpi", "compare", "timeline"] },
+  { themeName: "暗黑科技风", name: "发布会 / 趋势报告方向", scenario: "新品发布、技术演示、趋势报告", coreLayouts: ["cover", "kpi", "timeline", "closing"] }
 ];
+
+const DESIGN_LED_INSTRUCTION = [
+  "高级设计优化：不管是上传旧 PPT/PDF/图片，还是纯聊天生成，都按视觉优先的提案级 PPT 处理。",
+  "必须先判断内容类型：销售提案、案例作品集、产品介绍、品牌手册、项目汇报、培训课件、招商方案或数据报告。",
+  "必须抽取视觉 DNA：主色、背景、字体气质、图片语言、Logo/品牌露出、留白、装饰语言和页面密度。",
+  "每页按内容角色选择固定版式策略：封面、案例大图、产品画廊、方案配置、对比矩阵、时间线、数据证据、风险清单、总结页。",
+  "设计优先：图片/图表/证据优先，正文压缩，标题必须强，页面不能全部做成同一种卡片。",
+  "输出必须是可在线编辑 PPTX：文字、图片、形状独立可编辑，不允许整页截图化。",
+  "生成后视觉自检：如果像普通模板、文字过密、图片太小、层级弱、风格不统一或可编辑性不足，就自动返工。"
+].join("\n");
 
 const LAYOUT_LABELS = {
   cover: "封面",
@@ -63,12 +73,14 @@ const UI = {
 };
 
 const STEPS = [
-  { id: "materials", number: "01", title: "资料", desc: "上传与补充需求" },
-  { id: "outline", number: "02", title: "大纲", desc: "确认页面路线" },
-  { id: "generate", number: "03", title: "生成", desc: "选择生成方式" },
-  { id: "preview", number: "04", title: "预览编辑", desc: "看稿并改单页" },
-  { id: "export", number: "05", title: "导出", desc: "输出文件" },
-  { id: "feedback", number: "06", title: "反馈", desc: "评分与留言" }
+  { id: "materials", number: "01", title: "资料识别", desc: "抽文本 / 图片 / 素材身份" },
+  { id: "outline", number: "02", title: "大纲规划", desc: "页面角色和叙事路线" },
+  { id: "generate", number: "03", title: "视觉方向", desc: "codex-ppt visual target" },
+  { id: "visual-project", number: "04", title: "逐页生成", desc: "prompts / origin_image" },
+  { id: "visual-qa", number: "05", title: "视觉 QA", desc: "contact sheet / 视觉稿" },
+  { id: "preview", number: "06", title: "可编辑重建", desc: "Hybrid SceneGraph" },
+  { id: "feedback", number: "07", title: "一致性 QA", desc: "视觉目标 vs 可编辑" },
+  { id: "export", number: "08", title: "导出", desc: "editable-final.pptx" }
 ];
 
 const api = {
@@ -113,6 +125,12 @@ const api = {
   async rescanLocalImageQa(id) {
     return this.create(`/api/jobs/${id}/rescan-local-image-qa`, {});
   },
+  async generateVisualTargetSample(id) {
+    return this.create(`/api/jobs/${id}/visual-target/sample`, {});
+  },
+  async generateVisualProjectSlides(id, body = {}) {
+    return this.create(`/api/jobs/${id}/visual-project/generate`, body);
+  },
   async config() {
     const response = await fetch("/api/config", { cache: "no-store" });
     return readJson(response);
@@ -130,13 +148,6 @@ const api = {
     const response = await fetch("/api/style-references", { cache: "no-store" });
     return readJson(response);
   },
-  async styleGroups() {
-    const response = await fetch("/api/style-groups", { cache: "no-store" });
-    return readJson(response);
-  },
-  async createStyleGroup(body) {
-    return this.create("/api/style-groups", body);
-  },
   async uploadStyleReferences(files, meta = {}) {
     const form = new FormData();
     [...files].forEach((file) => form.append("files", file));
@@ -148,19 +159,11 @@ const api = {
     const response = await fetch(`/api/style-references/${id}`, { method: "DELETE" });
     return readJson(response);
   },
-  async updateStyleReference(id, body) {
-    const response = await fetch(`/api/style-references/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    return readJson(response);
-  }
 };
 
 async function readJson(response) {
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "璇锋眰澶辫触");
+  if (!response.ok) throw new Error(data.error || "请求失败");
   return data;
 }
 
@@ -174,7 +177,20 @@ function getErrorMessage(error) {
 }
 
 function isConnectionError(message = "") {
-  return /Failed to fetch|fetch failed|NetworkError|Load failed|鏈湴鏈嶅姟杩炴帴澶辫触|鏈湴鏈嶅姟鍝嶅簲瓒呮椂/i.test(message);
+  return /Failed to fetch|fetch failed|NetworkError|Load failed|本地服务连接失败|本地服务响应超时/i.test(message);
+}
+
+function uniqueIds(ids = []) {
+  return [...new Set(ids.filter(Boolean))];
+}
+
+function mergeById(current = [], incoming = []) {
+  const byId = new Map((current || []).filter((item) => item?.id).map((item) => [item.id, item]));
+  for (const item of incoming || []) {
+    if (!item?.id) continue;
+    byId.set(item.id, { ...(byId.get(item.id) || {}), ...item });
+  }
+  return [...byId.values()];
 }
 
 function App() {
@@ -203,7 +219,6 @@ function App() {
   const [outlineInsertLayout, setOutlineInsertLayout] = useState("section");
   const [formats, setFormats] = useState(["pptx", "pdf", "png"]);
   const [themes, setThemes] = useState(FALLBACK_THEMES);
-  const [styleGroups, setStyleGroups] = useState([]);
   const [templatePacks, setTemplatePacks] = useState(FALLBACK_TEMPLATE_PACKS);
   const [skillRules, setSkillRules] = useState({});
   const [styleReferences, setStyleReferences] = useState([]);
@@ -236,12 +251,17 @@ function App() {
     api.jobs().then((data) => {
       const nextJobs = data.jobs || [];
       setJobs(nextJobs);
-      setJob(null);
-      setFiles([]);
-      setFileIds([]);
+      const startupJob = nextJobs.find((item) => isFullDeckJob(item) && isPreferredStartupJob(item))
+        || nextJobs.find((item) => isFullDeckJob(item) && isRestorableJob(item))
+        || nextJobs.find(isPreferredStartupJob)
+        || nextJobs.find(isRestorableJob)
+        || null;
+      setJob(startupJob);
+      setFiles(startupJob?.files || []);
+      setFileIds((startupJob?.files || []).map((file) => file.id).filter(Boolean));
       setSelectedSlide(0);
-      setActiveStep("materials");
-      setStatus("");
+      setActiveStep(startupJob ? "preview" : "materials");
+      setStatus(startupJob ? "已恢复最近任务" : "");
     }).catch(() => {});
     api.designSystem().then((data) => {
       const nextThemes = data.themes || [];
@@ -250,10 +270,8 @@ function App() {
       if (nextPacks.length && !nextPacks.some((pack) => isMojibake(pack.name || pack.scenario))) setTemplatePacks(nextPacks);
       setSkillRules(data.skillRules || {});
       setStyleReferences(data.styleReferences || []);
-      setStyleGroups(data.styleGroups || []);
     }).catch(() => {});
     api.styleReferences().then((data) => setStyleReferences(data.references || [])).catch(() => {});
-    api.styleGroups().then((data) => setStyleGroups(data.groups || [])).catch(() => {});
     api.config().then((data) => {
       setApiConfig((current) => ({ ...current, ...data, apiKey: "" }));
     }).catch(() => {});
@@ -326,9 +344,11 @@ function App() {
   const currentStyle = job?.input?.style || job?.quality?.routePlan?.recommendedTheme || "";
   const templateHit = getTemplateRenderHit(currentTemplate, dirty ? liveSlide : currentSlide);
   const selectedFileNames = useMemo(() => files.map((file) => file.originalName).join("、"), [files]);
+  const hasUploadedMaterials = files.length > 0;
   const inferredMaterials = useMemo(() => inferMaterialTypes(files), [files]);
   const completion = useMemo(() => getCompletion({ form, fileIds, job }), [form, fileIds, job]);
   const stepState = useMemo(() => getStepState({ activeStep, fileIds, job, formats }), [activeStep, fileIds, job, formats]);
+  const finalExportBlocked = isJobBlockedForFinal(job);
 
   const topbarStateClass = error || connection.state === "offline" ? "state-dot error" : connection.state === "online" ? "state-dot active" : "state-dot checking";
   const topbarMessage = error || status || connection.message || "准备就绪";
@@ -362,14 +382,18 @@ function App() {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    if (name === "style") {
+      setStyleConfirmed(false);
+      setStylePreviewJob(null);
+    }
   }
 
   function updateDraft(name, value) {
     setDraft((current) => ({ ...current, [name]: value }));
   }
 
-  function validatePreparation() {
-    if (!form.notes.trim() && fileIds.length === 0) {
+  function validatePreparation(nextForm = form) {
+    if (!nextForm.notes.trim() && fileIds.length === 0) {
       setError("请至少填写一句话需求，或上传一份资料。");
       setStatus("");
       setActiveStep("materials");
@@ -383,8 +407,9 @@ function App() {
     setStatus("正在上传资料...");
     try {
       const data = await api.upload(event.target.files);
-      setFiles((current) => [...current, ...(data.files || [])]);
-      setFileIds((current) => [...current, ...(data.files || []).map((file) => file.id)]);
+      const uploaded = data.files || [];
+      setFiles((current) => mergeById(current, uploaded));
+      setFileIds((current) => uniqueIds([...current, ...uploaded.map((file) => file.id)]));
       setStylePreviewJob(null);
       setStyleConfirmed(false);
       setStatus("资料已上传，可以继续补充需求或开始生成。");
@@ -425,6 +450,7 @@ function App() {
 
   async function createJob(mode, confirmedOutline = null) {
     if (!validatePreparation()) return;
+    const requestForm = getRequestFormForFiles(form);
     setError("");
     setStatus(mode === "optimize" ? "正在解析旧 PPT 并生成新版..." : "正在生成新 PPT...");
     setGenerationProgress({
@@ -435,8 +461,8 @@ function App() {
     });
     try {
       const data = await api.create(mode === "optimize" ? "/api/jobs/optimize" : "/api/jobs/generate", {
-        ...form,
-        projectName: getEffectiveProjectName(form, files),
+        ...requestForm,
+        projectName: getEffectiveProjectName(requestForm, files),
         fileIds,
         materials: inferredMaterials,
         outlinePlan: confirmedOutline,
@@ -445,10 +471,10 @@ function App() {
       });
       setJob(data);
       setSelectedSlide(0);
-      setActiveStep("preview");
-      setRightPanelMode("edit");
+      setActiveStep(data.visualProject?.generatedImages || data.visualTarget?.sample?.imageUrl ? "visual-qa" : "preview");
+      setRightPanelMode("status");
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus(data.warning || "任务已完成，可以预览和导出。");
+      setStatus(data.warning || "一键链路已完成：可先审阅视觉目标与可编辑结果，再进入在线编辑或导出。");
       setGenerationProgress({ active: false, mode: "", value: 100, label: "生成完成" });
     } catch (err) {
       setError(getErrorMessage(err));
@@ -461,17 +487,28 @@ function App() {
     return files.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || "")) ? "optimize" : "generate";
   }
 
+  function getRequestFormForFiles(current = form) {
+    return hasUploadedMaterials ? current : { ...current, outlineStrategy: "regenerate" };
+  }
+
   async function createStylePreview(confirmedOutline = null) {
     if (!validatePreparation()) return;
     const mode = getGenerationMode();
+    const requestForm = getRequestFormForFiles(form);
     setError("");
     setStylePreviewBusy(true);
     setStyleConfirmed(false);
-    setStatus("正在生成风格确认样张...");
+    setStatus("正在生成主视觉方向图...");
+    setGenerationProgress({
+      active: true,
+      mode: "style-preview",
+      value: 10,
+      label: "正在整理视觉方向资料和参考"
+    });
     try {
       const data = await api.create("/api/jobs/style-preview", {
-        ...form,
-        projectName: getEffectiveProjectName(form, files),
+        ...requestForm,
+        projectName: getEffectiveProjectName(requestForm, files),
         fileIds,
         materials: inferredMaterials,
         outlinePlan: confirmedOutline,
@@ -479,24 +516,56 @@ function App() {
       });
       setStylePreviewJob(data);
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus(data.warning || "风格样张已生成，请先确认视觉调性，再生成完整 PPT。");
+      setStatus(data.warning || "主视觉方向已生成；满意就采用方向，不满意就重做方向。");
+      setGenerationProgress({ active: false, mode: "", value: 100, label: "视觉方向生成完成" });
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
+      setGenerationProgress({ active: false, mode: "", value: 0, label: "" });
     } finally {
       setStylePreviewBusy(false);
     }
   }
 
-  async function planOutline() {
-    if (!validatePreparation()) return;
+  function buildDesignLedForm(current = form) {
+    const existingNotes = String(current.notes || "").trim();
+    const notes = existingNotes && existingNotes.includes("高级设计优化")
+      ? existingNotes
+      : [existingNotes, DESIGN_LED_INSTRUCTION].filter(Boolean).join("\n\n");
+    return {
+      ...current,
+      audience: current.audience || "对外展示 / 提案沟通 / 视觉化表达",
+      copyMode: "高级设计优化：视觉优先，标题优先，图片优先，可编辑交付",
+      reconstructionMode: "design-led",
+      designDirectorMode: true,
+      designPriority: "visual-first",
+      editableOutput: true,
+      outlineStrategy: "keep-source",
+      includeToc: current.includeToc,
+      includeRiskChecklist: true,
+      notes
+    };
+  }
+
+  async function activateDesignLedMode() {
+    const nextForm = buildDesignLedForm();
+    setForm(nextForm);
+    setStylePreviewJob(null);
+    setStyleConfirmed(false);
+    setStatus("已切换为高级设计优化：视觉优先、可编辑交付，正在生成设计重构大纲...");
+    await planOutline(nextForm);
+  }
+
+  async function planOutline(formOverride = null) {
+    const requestForm = getRequestFormForFiles(formOverride || form);
+    if (!validatePreparation(requestForm)) return;
     setError("");
     setOutlineBusy(true);
     setStatus("正在生成可确认大纲...");
     try {
       const data = await api.create("/api/jobs/outline", {
-        ...form,
-        projectName: getEffectiveProjectName(form, files),
+        ...requestForm,
+        projectName: getEffectiveProjectName(requestForm, files),
         fileIds,
         materials: inferredMaterials,
         mode: getGenerationMode()
@@ -567,7 +636,7 @@ function App() {
   async function applyImageSupplement() {
     if (!job?.imageSupplementPlan?.needed) return;
     setError("");
-    setStatus("正在按补图计划复用原稿图片并重绘样稿...");
+    setStatus("正在按补图计划复用原稿图片并重绘视觉方向...");
     try {
       const data = await api.create(`/api/jobs/${job.id}/apply-image-supplement`, {});
       setJob(data);
@@ -605,6 +674,41 @@ function App() {
       setJob(data);
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
       setStatus("本地图 QA 已刷新，文字污染和安全区风险已重新计算。");
+      setRightPanelMode("status");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    }
+  }
+
+  async function generateVisualTargetSample() {
+    if (!job?.id) return;
+    setError("");
+    setStatus("正在生成视觉目标方向图...");
+    try {
+      const data = await api.generateVisualTargetSample(job.id);
+      setJob(data);
+      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
+      const sampleStatus = data.visualTarget?.sample?.status;
+      setStatus(sampleStatus === "generated" ? "视觉目标方向图已生成；最终 PPT 仍从 SceneGraph 渲染。" : "视觉目标方向图已记录为待生成；请确认本地生图服务在线。");
+      setRightPanelMode("status");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    }
+  }
+
+  async function generateVisualProjectSlides(maxSlides = 3) {
+    if (!job?.id) return;
+    setError("");
+    setStatus("正在逐页生成视觉目标图...");
+    try {
+      const data = await api.generateVisualProjectSlides(job.id, { maxSlides });
+      setJob(data);
+      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
+      const project = data.visualProject || {};
+      setStatus(project.status === "ready" ? "逐页视觉目标已完成，visual-target.pptx 已生成。" : `已生成 ${project.generatedImages || 0}/${project.slideCount || 0} 张视觉目标图。`);
+      setActiveStep("visual-project");
       setRightPanelMode("status");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -663,6 +767,12 @@ function App() {
 
   async function exportJob() {
     if (!job) return;
+    if (finalExportBlocked && formats.some((format) => format !== "pptx")) {
+      setError("");
+      setStatus("QA blocked：当前 editable PPTX 已作为草稿保留，修复阻断项后才能正式导出 PDF/PNG。");
+      setRightPanelMode("status");
+      return;
+    }
     setError("");
     setStatus("正在导出文件...");
     try {
@@ -745,11 +855,11 @@ function App() {
   async function uploadStyleReference(files, meta) {
     if (!files?.length) return;
     setSettingsBusy(true);
-    setSettingsStatus("正在加入风格参考库...");
+    setSettingsStatus("\u6b63\u5728\u52a0\u5165\u98ce\u683c\u53c2\u8003\u5e93...");
     try {
       const data = await api.uploadStyleReferences(files, meta);
       setStyleReferences((current) => [...(data.references || []), ...current]);
-      setSettingsStatus("风格参考已加入，后续生成会参考它的调性。");
+      setSettingsStatus("\u98ce\u683c\u53c2\u8003\u5df2\u52a0\u5165\uff0c\u540e\u7eed\u751f\u6210\u4f1a\u53c2\u8003\u8fd9\u7ec4\u8c03\u6027\u3002");
     } catch (err) {
       setSettingsStatus(getErrorMessage(err));
     } finally {
@@ -763,41 +873,7 @@ function App() {
     try {
       await api.deleteStyleReference(id);
       setStyleReferences((current) => current.filter((item) => item.id !== id));
-      setSettingsStatus("已从风格参考库删除。");
-    } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
-    } finally {
-      setSettingsBusy(false);
-    }
-  }
-
-  async function createStyleGroup(payload) {
-    setSettingsBusy(true);
-    setSettingsStatus("");
-    try {
-      const data = await api.createStyleGroup(payload);
-      if (data.group) {
-        setStyleGroups((current) => [data.group, ...current.filter((item) => item.id !== data.group.id && item.name !== data.group.name)]);
-        setSettingsStatus("自定义风格库已创建，可以把参考图归到这个库里。");
-      }
-      return data.group;
-    } catch (err) {
-      setSettingsStatus(getErrorMessage(err));
-      return null;
-    } finally {
-      setSettingsBusy(false);
-    }
-  }
-
-  async function updateStyleReference(id, payload) {
-    setSettingsBusy(true);
-    setSettingsStatus("");
-    try {
-      const data = await api.updateStyleReference(id, payload);
-      if (data.reference) {
-        setStyleReferences((current) => current.map((item) => (item.id === id ? data.reference : item)));
-        setSettingsStatus("风格参考图已更新分组。");
-      }
+      setSettingsStatus("\u5df2\u4ece\u98ce\u683c\u53c2\u8003\u5e93\u5220\u9664\u3002");
     } catch (err) {
       setSettingsStatus(getErrorMessage(err));
     } finally {
@@ -818,7 +894,7 @@ function App() {
     if (!item?.id) return;
     if (!window.confirm(`删除历史任务「${item.deck?.title || item.id}」？对应导出文件也会删除。`)) return;
     setError("");
-    setStatus("姝ｅ湪鍒犻櫎鍘嗗彶浠诲姟...");
+    setStatus("正在删除历史任务...");
     try {
       await api.remove(`/api/jobs/${item.id}`);
       setJobs((current) => current.filter((jobItem) => jobItem.id !== item.id));
@@ -841,7 +917,7 @@ function App() {
     if (!targets.length) return;
     if (!window.confirm(`批量删除 ${targets.length} 个历史任务？对应导出文件也会删除。`)) return;
     setError("");
-    setStatus("姝ｅ湪鎵归噺鍒犻櫎鍘嗗彶浠诲姟...");
+    setStatus("正在批量删除历史任务...");
     try {
       for (const item of targets) await api.remove(`/api/jobs/${item.id}`);
       const targetIds = new Set(targets.map((item) => item.id));
@@ -863,7 +939,7 @@ function App() {
   async function repairHistoryJob(item) {
     if (!item?.id) return;
     setError("");
-    setStatus("姝ｅ湪淇鍘嗗彶浠诲姟...");
+    setStatus("正在修复历史任务...");
     try {
       const data = await api.create(`/api/jobs/${item.id}/repair`, {});
       setJobs((current) => [data, ...current.filter((historyItem) => historyItem.id !== data.id)]);
@@ -880,12 +956,12 @@ function App() {
     if (!job || previewBusy) return;
     setPreviewBusy(true);
     setError("");
-    setStatus("姝ｅ湪閲嶆柊鐢熸垚棰勮鍥?..");
+    setStatus("正在重新生成预览图...");
     try {
       const data = await api.create(`/api/jobs/${job.id}/preview`, {});
       setJob(data);
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus(data.previewWarning || "棰勮鍥惧凡閲嶆柊鐢熸垚銆?");
+      setStatus(data.previewWarning || "预览图已重新生成。");
       setRightPanelMode("edit");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -899,7 +975,7 @@ function App() {
     if (!job || !style || templateBusy) return;
     setTemplateBusy(true);
     setError("");
-    setStatus("姝ｅ湪鎸夋柊妯℃澘閲嶆柊娓叉煋 PPT...");
+    setStatus("正在按新设计方向重新渲染 PPT...");
     try {
       const data = await api.create(`/api/jobs/${job.id}/template`, { style });
       setJob(data);
@@ -916,7 +992,7 @@ function App() {
   }
 
   function appendQuickAction(text) {
-    setRevision((current) => current ? `${current}锛?{text}` : text);
+    setRevision((current) => current ? `${current}；${text}` : text);
   }
 
   function updateOutlineStep(index, field, value) {
@@ -938,7 +1014,7 @@ function App() {
       if (action === "insert-after") {
         next.splice(index + 1, 0, makeOutlineStep(outlineInsertLayout));
       } else if (action === "duplicate") {
-        next.splice(index + 1, 0, { ...next[index], title: `${next[index].title || "鏈懡鍚嶉〉"} 鍓湰` });
+        next.splice(index + 1, 0, { ...next[index], title: `${next[index].title || "未命名页"} 副本` });
       } else if (action === "delete") {
         if (next.length <= 1) return current;
         next.splice(index, 1);
@@ -962,8 +1038,15 @@ function App() {
     setRightPanelMode((current) => (current === "settings" ? (activeStep === "preview" ? "edit" : "closed") : "settings"));
   }
 
-  const showRightPanel = activeStep === "preview" || rightPanelMode !== "closed";
-  const visibleRightPanelMode = rightPanelMode === "closed" ? "edit" : rightPanelMode;
+  const editBlocked = Boolean(job?.editReadiness && job.editReadiness.ready === false);
+  const hasEditableContext = Boolean(job && currentSlide && !editBlocked);
+  const showRightPanel = (activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed";
+  const visibleRightPanelMode = rightPanelMode === "closed"
+    ? (hasEditableContext ? "edit" : "status")
+    : (!hasEditableContext && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
+  const rightPanelTabs = hasEditableContext
+    ? [["edit", "编辑"], ["ai", "AI"], ["history", "历史"]]
+    : [["history", "历史"]];
 
   return (
     <div className="workspace-shell">
@@ -1026,16 +1109,18 @@ function App() {
                     </button>
                   </div>
                 </div>
-                <div className="outline-strategy-toggle" role="group" aria-label={UI.regenerateOutline}>
-                  <button className={form.outlineStrategy !== "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "keep-source")}>
-                    <b>{UI.keepSourceOutline}</b>
-                    <span>{UI.keepSourceDesc}</span>
-                  </button>
-                  <button className={form.outlineStrategy === "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "regenerate")}>
-                    <b>{UI.regenerateOutline}</b>
-                    <span>{UI.regenerateDesc}</span>
-                  </button>
-                </div>
+                {hasUploadedMaterials && (
+                  <div className="outline-strategy-toggle" role="group" aria-label={UI.regenerateOutline}>
+                    <button className={form.outlineStrategy !== "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "keep-source")}>
+                      <b>优化旧 PPT</b>
+                      <span>保留页序、主题和素材，重建为可编辑 PPTX</span>
+                    </button>
+                    <button className={form.outlineStrategy === "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "regenerate")}>
+                      <b>重新规划</b>
+                      <span>重新组织叙事、页序和版式路线</span>
+                    </button>
+                  </div>
+                )}
                 {files.length > 0 && (
                   <div className="file-list compact-files">
                     {files.map((file) => (
@@ -1072,6 +1157,10 @@ function App() {
                 </div>
                 {outlinePlan?.layoutSequence?.length ? (
                   <div className="outline-list outline-card-list">
+                    <div className="outline-digest">
+                      <strong>故事线</strong>
+                      <span>{outlinePlan.layoutSequence.map((step, index) => `${index + 1}. ${step.title || LAYOUT_LABELS[step.layout] || step.layout}`).slice(0, 8).join(" / ")}</span>
+                    </div>
                     <div className="outline-insert-bar">
                       <select value={outlineInsertLayout} onChange={(event) => setOutlineInsertLayout(event.target.value)}>
                         {Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>新增版式：{label} / {value}</option>)}
@@ -1111,76 +1200,127 @@ function App() {
           )}
 
           {activeStep === "generate" && (
-            <SectionCard title="生成 PPT" desc="根据当前资料和已确认的大纲生成 Deck、PPTX 与预览图。">
+            <SectionCard title="一键提案级可编辑重构" desc="自动执行资料识别、视觉目标、SceneGraph 重建、PPTX 渲染和 QA；主视觉方向可选审阅。">
               <div className="readiness">
                 <Metric label="资料文件" value={fileIds.length} />
                 <Metric label="大纲状态" value={outlinePlan?.layoutSequence?.length ? "已确认" : "未确认"} />
                 <Metric label="需求完整度" value={`${completion}%`} />
               </div>
-              {generationProgress.active && <GenerationProgress progress={generationProgress} />}
+              <GenerationGateFlow outlineReady={Boolean(outlinePlan?.layoutSequence?.length)} styleSelected={Boolean(form.style)} styleProofReady={Boolean(stylePreviewJob)} styleConfirmed={styleConfirmed} optionalStyleProof />
+              <TemplatePreflightSelector
+                style={form.style}
+                themes={themes}
+                templatePacks={templatePacks}
+                styleReferences={styleReferences}
+                onChange={(style) => update("style", style)}
+              />
+              {generationProgress.active && generationProgress.mode !== "style-preview" ? <GenerationProgress progress={generationProgress} /> : null}
               <StylePreviewGate
                 busy={stylePreviewBusy}
                 confirmed={styleConfirmed}
                 job={stylePreviewJob}
+                progress={generationProgress.mode === "style-preview" ? generationProgress : null}
                 onConfirm={() => setStyleConfirmed(true)}
                 onCreate={() => createStylePreview(outlinePlan)}
                 onReset={() => {
                   setStyleConfirmed(false);
                   setStylePreviewJob(null);
                 }}
+                canCreate={Boolean(outlinePlan?.layoutSequence?.length && form.style)}
               />
               <div className="action-grid single-action">
-                <button className="primary-action" onClick={() => createJob(getGenerationMode(), outlinePlan)} disabled={generationProgress.active || stylePreviewBusy || !styleConfirmed || !outlinePlan?.layoutSequence?.length}>
-                  <b>{generationProgress.active ? "正在生成 PPT" : "生成完整 PPT"}</b>
-                  <span>{styleConfirmed ? "已确认样式，将按该风格输出完整 PPTX。" : "请先生成并确认风格样张。"}</span>
+                <button className="primary-action" onClick={() => createJob(getGenerationMode(), outlinePlan)} disabled={generationProgress.active || stylePreviewBusy || !outlinePlan?.layoutSequence?.length}>
+                  <b>{generationProgress.active ? "正在跑完整链路" : "一键生成可编辑最终稿"}</b>
+                  <span>{styleConfirmed ? "已采用视觉方向，将输出 editable-final.pptx。" : "未采用方向也可直接生成；系统会自动生成 visual target 并重建可编辑 PPTX。"}</span>
                 </button>
               </div>
             </SectionCard>
           )}
 
+          {activeStep === "visual-project" && (
+            <SectionCard title="逐页视觉生产" desc="按 codex-ppt 链路准备 outline、deck_spec、prompts、slide_jobs 和 origin_image。">
+              <VisualProjectWorkspace job={job} onGenerateSlides={generateVisualProjectSlides} />
+            </SectionCard>
+          )}
+
+          {activeStep === "visual-qa" && (
+            <SectionCard title="视觉目标 QA" desc="视觉目标是中间设计稿，不是最终可编辑文件；最终交付仍以 SceneGraph/PPTX 为准。">
+              <HybridQaWorkspace job={job} selectedSlide={selectedSlide} setSelectedSlide={setSelectedSlide} currentImage={currentImage} />
+            </SectionCard>
+          )}
+
           {activeStep === "preview" && (
             <SectionCard title="预览与单页编辑" desc="左侧选页，中间看稿并可直接编辑，右侧修改当前页。">
-              <PreviewCanvas
-                currentImage={currentImage}
-                currentSlide={currentSlide}
-                currentStyle={currentStyle}
-                currentTemplate={currentTemplate}
-                draft={draft}
-                dirty={dirty}
-                focusPreview={focusPreview}
-                job={job}
-                liveSlide={liveSlide}
-                selectedSlide={selectedSlide}
-                setFocusPreview={setFocusPreview}
-                setSelectedSlide={setSelectedSlide}
-                slides={slides}
-                updateDraft={updateDraft}
-                onSaveText={saveSlideText}
-                onRetryPreview={retryPreview}
-                previewBusy={previewBusy}
-                templateBusy={templateBusy}
-                templateHit={templateHit}
-                themes={themes}
-                templatePacks={templatePacks}
-                onRerenderTemplate={rerenderTemplate}
-              />
+              {!job ? (
+                <StageEmptyState
+                  title="还没有可编辑结果"
+                  body="先上传资料或输入需求，完成视觉方向和 SceneGraph 重建后，这里才显示可编辑预览、素材层和文字层。"
+                  action="回到资料识别"
+                  onAction={() => setActiveStep("materials")}
+                />
+              ) : (
+                <>
+                  <EditReadinessGate
+                    readiness={job?.editReadiness}
+                    localImage={localImage}
+                    onApplyImageSupplement={applyImageSupplement}
+                    onApplyLocalImageSupplement={applyLocalImageSupplement}
+                    onRescanLocalImageQa={rescanLocalImageQa}
+                  />
+                  <PreviewCanvas
+                    currentImage={currentImage}
+                    currentSlide={currentSlide}
+                    currentStyle={currentStyle}
+                    currentTemplate={currentTemplate}
+                    draft={draft}
+                    dirty={dirty}
+                    focusPreview={focusPreview}
+                    editBlocked={editBlocked}
+                    job={job}
+                    liveSlide={liveSlide}
+                    selectedSlide={selectedSlide}
+                    setFocusPreview={setFocusPreview}
+                    setSelectedSlide={setSelectedSlide}
+                    slides={slides}
+                    updateDraft={updateDraft}
+                    onSaveText={saveSlideText}
+                    onRetryPreview={retryPreview}
+                    previewBusy={previewBusy}
+                    templateBusy={templateBusy}
+                    templateHit={templateHit}
+                    themes={themes}
+                    templatePacks={templatePacks}
+                    onRerenderTemplate={rerenderTemplate}
+                  />
+                </>
+              )}
             </SectionCard>
           )}
 
           {activeStep === "export" && (
             <SectionCard title="导出文件" desc="选择需要的格式。PPTX 直接生成，PDF/PNG 调用本机 PowerPoint。">
-              <div className="export-layout">
-                <div className="format-list">
-                  {["pptx", "pdf", "png"].map((format) => (
-                    <label className="format-option" key={format}>
-                      <input type="checkbox" checked={formats.includes(format)} onChange={() => setFormats((current) => toggle(current, format))} />
-                      <span>{format.toUpperCase()}</span>
-                    </label>
-                  ))}
-                  <button className="btn primary wide" onClick={exportJob} disabled={!job || formats.length === 0}>开始导出</button>
+              {!job ? (
+                <StageEmptyState
+                  title="暂无可导出文件"
+                  body="生成整套 PPT 后，这里会出现 editable-final.pptx。visual-target.pptx 只作为中间视觉目标展示。"
+                  action="回到资料识别"
+                  onAction={() => setActiveStep("materials")}
+                />
+              ) : (
+                <div className="export-layout">
+                  <div className="format-list">
+                    {["pptx", "pdf", "png"].map((format) => (
+                      <label className="format-option" key={format}>
+                        <input type="checkbox" checked={formats.includes(format)} onChange={() => setFormats((current) => toggle(current, format))} disabled={finalExportBlocked && format !== "pptx"} />
+                        <span>{format.toUpperCase()}</span>
+                      </label>
+                    ))}
+                    {finalExportBlocked ? <p className="export-blocked-note">QA blocked：当前只能保留可编辑 PPTX 草稿，PDF/PNG 正式导出需先修复阻断项。</p> : null}
+                    <button className="btn primary wide" onClick={exportJob} disabled={formats.length === 0 || (finalExportBlocked && formats.some((format) => format !== "pptx"))}>开始导出</button>
+                  </div>
+                  <DownloadLinks job={job} />
                 </div>
-                <DownloadLinks job={job} />
-              </div>
+              )}
             </SectionCard>
           )}
 
@@ -1205,12 +1345,7 @@ function App() {
         {showRightPanel && (
         <aside className="right-panel">
           <div className="panel-tabs">
-            {[
-              ["edit", "编辑"],
-              ["ai", "AI"],
-              ["status", "状态"],
-              ["history", "历史"]
-            ].map(([id, label]) => (
+            {rightPanelTabs.map(([id, label]) => (
               <button className={visibleRightPanelMode === id ? "active" : ""} key={id} onClick={() => setRightPanelMode(id)}>{label}</button>
             ))}
             <button className={visibleRightPanelMode === "settings" ? "active" : ""} type="button" onClick={() => setRightPanelMode("settings")}>设置</button>
@@ -1222,7 +1357,7 @@ function App() {
               dirty={dirty}
               draft={draft}
               insertLayout={insertLayout}
-              job={job}
+              job={editBlocked ? null : job}
               revision={revision}
               savedDraft={savedDraft}
               selectedSlide={selectedSlide}
@@ -1245,7 +1380,7 @@ function App() {
               currentStyle={currentStyle}
               deckRevision={deckRevision}
               dirty={dirty}
-              job={job}
+              job={editBlocked ? null : job}
               revision={revision}
               setDeckRevision={setDeckRevision}
               setRevision={setRevision}
@@ -1258,7 +1393,7 @@ function App() {
               onRerenderTemplate={rerenderTemplate}
             />
           )}
-          {visibleRightPanelMode === "status" && <StatusPanel job={job} files={files} fileIds={fileIds} status={status} error={error} connection={connection} localImage={localImage} skillRules={skillRules} onRepairDelivery={repairDelivery} onApplyImageSupplement={applyImageSupplement} onApplyLocalImageSupplement={applyLocalImageSupplement} onRescanLocalImageQa={rescanLocalImageQa} />}
+          {visibleRightPanelMode === "status" && <StatusPanel job={job} files={files} fileIds={fileIds} status={status} error={error} connection={connection} localImage={localImage} skillRules={skillRules} onRepairDelivery={repairDelivery} onApplyImageSupplement={applyImageSupplement} onApplyLocalImageSupplement={applyLocalImageSupplement} onRescanLocalImageQa={rescanLocalImageQa} onGenerateVisualTargetSample={generateVisualTargetSample} />}
           {visibleRightPanelMode === "history" && <HistoryPanel jobs={jobs} onSelect={selectJob} onDelete={deleteHistoryJob} onDeleteMany={deleteHistoryJobs} onRepair={repairHistoryJob} />}
           {visibleRightPanelMode === "settings" && (
             <SettingsPanel
@@ -1267,14 +1402,11 @@ function App() {
               status={settingsStatus}
               models={availableModels}
               themes={themes}
-              styleGroups={styleGroups}
               onChange={setApiConfig}
               onSave={saveApiConfig}
               onTest={testApiConfig}
               onDetectModels={detectModels}
               styleReferences={styleReferences}
-              onCreateStyleGroup={createStyleGroup}
-              onUpdateStyleReference={updateStyleReference}
               onUploadStyleReference={uploadStyleReference}
               onDeleteStyleReference={deleteStyleReference}
             />
@@ -1424,37 +1556,216 @@ function OutlineNavigator({ outlinePlan = null }) {
   );
 }
 
-function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTemplate, draft, dirty, focusPreview, job, liveSlide, selectedSlide, setFocusPreview, setSelectedSlide, slides, updateDraft, onSaveText, onRetryPreview, previewBusy, templateBusy, templateHit, themes = [], templatePacks = [], onRerenderTemplate }) {
-  const editableSlide = dirty ? liveSlide : currentSlide;
+function EditReadinessGate({ readiness, localImage, onApplyImageSupplement, onApplyLocalImageSupplement, onRescanLocalImageQa }) {
+  if (!readiness) return null;
+  const blocked = readiness.ready === false || readiness.status === "blocked";
+  const actions = new Set(readiness.actions || []);
+  const visibleIssues = blocked ? (readiness.blockingIssues || readiness.issues || []) : (readiness.suggestions || []);
+  const hasActionButtons = actions.size > 0;
   return (
-    <div className={`preview-stage ${focusPreview ? "focus" : ""}`}>
+    <div className={`edit-readiness-gate ${blocked ? "blocked" : "ready"}`}>
+      <div>
+        <b>{blocked ? "进入编辑前先补齐素材" : "可以进入在线编辑"}</b>
+        <span>{readiness.summary}</span>
+      </div>
+      <div className="edit-readiness-facts">
+        <span>预览 {readiness.facts?.previewCount || 0}/{readiness.facts?.slideCount || 0}</span>
+        <span>待补图 {readiness.facts?.pendingGeneration || 0}</span>
+        <span>待复用 {readiness.facts?.pendingReuse || 0}</span>
+        <span>抠图 {readiness.facts?.plannedMatting || readiness.facts?.failedMatting || 0}</span>
+        <span>QA {Number(readiness.facts?.localQaWarnings || 0) + Number(readiness.facts?.renderQaWarnings || 0)}</span>
+      </div>
+      {visibleIssues?.length ? <ul>{visibleIssues.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+      {hasActionButtons ? (
+        <div className="button-row tight">
+          {actions.has("apply-image-supplement") ? <button className={blocked ? "btn primary" : "btn ghost"} type="button" onClick={onApplyImageSupplement}>{blocked ? "先复用/绑定已有素材" : "可选绑定已有素材"}</button> : null}
+          {actions.has("apply-local-image-supplement") ? <button className="btn primary" type="button" onClick={onApplyLocalImageSupplement} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "本地补图并抠图" : "等待本地生图在线"}</button> : null}
+          {actions.has("rescan-local-image-qa") ? <button className="btn ghost" type="button" onClick={onRescanLocalImageQa}>重扫图片 QA</button> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TemplatePreflightSelector({ style, themes = [], templatePacks = [], styleReferences = [], onChange }) {
+  const selectedTheme = themes.find((theme) => theme.name === style) || themes[0] || {};
+  const selectedPack = findTemplatePack(templatePacks, selectedTheme) || templatePacks.find((pack) => pack.themeName === style);
+  const selectedRefs = styleReferences;
+  const coreLayouts = (selectedPack?.coreLayouts || []).map((layout) => LAYOUT_LABELS[layout] || layout);
+  return (
+    <div className="template-preflight">
+      <div>
+        <b>{"\u8bbe\u8ba1\u65b9\u5411\u63a7\u5236\u53f0"}</b>
+        <span>{"\u8fd9\u91cc\u9009\u7684\u662f\u6a21\u677f\u548c\u7248\u5f0f\u65b9\u5411\uff1b\u98ce\u683c\u53c2\u8003\u5e93\u662f\u72ec\u7acb\u8c03\u6027\u8f93\u5165\uff0c\u4f1a\u6574\u4f53\u5f71\u54cd\u56fe\u7247\u3001\u7559\u767d\u3001\u8272\u5f69\u548c\u6392\u7248\u8282\u594f\u3002"}</span>
+      </div>
+      <div className="template-preflight-controls">
+        <label>
+          <span>{"\u6a21\u677f / \u7248\u5f0f\u65b9\u5411"}</span>
+          <select value={style || selectedTheme.name || ""} onChange={(event) => onChange?.(event.target.value)} title={"\u9009\u62e9\u6574\u5957 PPT \u7684\u7ed3\u6784\u548c\u7248\u5f0f\u503e\u5411"}>
+            {themes.map((theme) => {
+              const pack = findTemplatePack(templatePacks, theme);
+              return <option key={theme.name} value={theme.name}>{formatDesignDirectionName(pack?.name || theme.name)}</option>;
+            })}
+          </select>
+        </label>
+        <div className={selectedRefs.length ? "style-library-call active" : "style-library-call"}>
+          <span>{"\u98ce\u683c\u53c2\u8003\u5e93"}</span>
+          <b>{selectedRefs.length ? selectedRefs.length + " \u5f20\u53c2\u8003\u56fe\u5df2\u63a5\u5165" : "\u6682\u65e0\u53c2\u8003\u56fe\uff0c\u4f7f\u7528\u5185\u7f6e\u8bbe\u8ba1\u89c4\u5219"}</b>
+        </div>
+      </div>
+      <div className="template-preflight-meta">
+        <span>{"\u9002\u5408\uff1a"}{selectedPack?.scenario || selectedTheme.bestFor || "\u6309\u5f53\u524d\u8d44\u6599\u81ea\u52a8\u9002\u914d"}</span>
+        <span>{"\u7248\u5f0f\u7b56\u7565\uff1a"}{coreLayouts.join(" / ") || "\u81ea\u52a8\u7248\u5f0f"}</span>
+        <span>{selectedRefs.length ? "\u53c2\u8003\u56fe\u53ea\u5f71\u54cd\u8c03\u6027\u548c\u7248\u5f0f\uff0c\u4e0d\u4f5c\u4e3a\u4e8b\u5b9e\u56fe\u7247\u76f4\u63a5\u590d\u5236" : "\u53ef\u5728\u8bbe\u7f6e\u91cc\u4e0a\u4f20\u4e00\u7ec4\u98ce\u683c\u53c2\u8003\u56fe"}</span>
+      </div>
+    </div>
+  );
+}
+
+function GenerationGateFlow({ outlineReady, styleSelected, styleProofReady, styleConfirmed, optionalStyleProof = false }) {
+  const styleProofMissing = optionalStyleProof && !Boolean(styleProofReady);
+  const styleUnconfirmed = optionalStyleProof && !Boolean(styleConfirmed);
+  const gates = [
+    { label: "确认大纲", done: outlineReady },
+    { label: "选择设计方向", done: styleSelected },
+    { label: optionalStyleProof ? "方向审阅可选" : "方向自动质检", done: optionalStyleProof || styleProofReady, optional: styleProofMissing },
+    { label: optionalStyleProof ? "直接进入全链路" : "人工确认风格", done: optionalStyleProof || styleConfirmed, optional: styleUnconfirmed }
+  ];
+  return (
+    <div className="generation-gate-flow">
+      {gates.map((gate, index) => (
+        <div className={gate.done ? gate.optional ? "optional" : "done" : "pending"} key={gate.label}>
+          <b>{String(index + 1).padStart(2, "0")}</b>
+          <span>{gate.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTemplate, draft, dirty, editBlocked = false, focusPreview, job, liveSlide, selectedSlide, setFocusPreview, setSelectedSlide, slides, updateDraft, onSaveText, onRetryPreview, previewBusy, templateBusy, templateHit, themes = [], templatePacks = [], onRerenderTemplate }) {
+  const editableSlide = dirty ? liveSlide : currentSlide;
+  const [layerMode, setLayerMode] = useState("preview");
+  const textLayerActive = layerMode === "text";
+  const assetLayerActive = layerMode === "asset";
+  return (
+    <div className={`preview-stage ${focusPreview ? "focus" : ""} layer-${layerMode}`}>
+      <HybridPreviewStrip job={job} currentImage={currentImage} selectedSlide={selectedSlide} />
       <div className="stage-toolbar">
         <div>
           <b>{dirty ? liveSlide?.title : currentSlide?.title || "等待生成"}</b>
           <span>第 {selectedSlide + 1} 页 · {LAYOUT_LABELS[currentSlide?.layout] || currentSlide?.layout || "自动版式"}{(dirty ? liveSlide?.storyRole : currentSlide?.storyRole) ? ` · ${dirty ? liveSlide?.storyRole : currentSlide?.storyRole}` : ""}</span>
         </div>
         <div className="template-switcher">
-          <span>{currentTemplate?.name || "当前模板"} · {templateHit.label}</span>
-          <select value={currentStyle} onChange={(event) => onRerenderTemplate?.(event.target.value)} disabled={!job || dirty || templateBusy}>
+          <span>切换设计方向并重渲染 · {formatDesignDirectionName(currentTemplate?.name || "当前设计方向")} · {templateHit.label}</span>
+          <select value={currentStyle} onChange={(event) => onRerenderTemplate?.(event.target.value)} disabled={!job || dirty || templateBusy} title="切换设计方向后，会重渲染整套 PPT">
             {themes.map((theme) => {
               const pack = findTemplatePack(templatePacks, theme);
-              return <option key={theme.name} value={theme.name}>{pack?.name || theme.name}</option>;
+              return <option key={theme.name} value={theme.name}>{formatDesignDirectionName(pack?.name || theme.name)}</option>;
             })}
           </select>
         </div>
         <div className="stage-controls">
+          <button className={layerMode === "preview" ? "active" : ""} onClick={() => setLayerMode("preview")} disabled={!job}>预览</button>
+          <button className={layerMode === "asset" ? "active" : ""} onClick={() => setLayerMode("asset")} disabled={!job || editBlocked}>素材层</button>
+          <button className={layerMode === "text" ? "active" : ""} onClick={() => setLayerMode("text")} disabled={!job || editBlocked}>文字层</button>
           <button onClick={() => setSelectedSlide((value) => Math.max(0, value - 1))} disabled={!job || selectedSlide === 0}>上一页</button>
           <button onClick={() => setSelectedSlide((value) => Math.min(slides.length - 1, value + 1))} disabled={!job || selectedSlide >= slides.length - 1}>下一页</button>
           <button onClick={() => setFocusPreview((value) => !value)} disabled={!job}>{focusPreview ? "返回编辑" : "专注预览"}</button>
         </div>
       </div>
+      {currentSlide ? <LayerSeparationBar slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : null}
       <div className="large-slide">
         <div className="editable-slide-stage">
-          {currentImage ? <img src={currentImage} alt={`第 ${selectedSlide + 1} 页大图预览`} /> : currentSlide ? <SlideVisual slide={editableSlide} job={job} slideIndex={selectedSlide} /> : <div className="empty-preview">生成后这里显示大图预览</div>}
-          {currentSlide ? <CanvasTextLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
+          {currentImage && layerMode === "preview" ? <img src={currentImage} alt={`第 ${selectedSlide + 1} 页大图预览`} /> : currentSlide ? <LayerBaseCanvas slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : <div className="empty-preview">生成后这里显示大图预览</div>}
+          {currentSlide && assetLayerActive ? <CanvasAssetLayer slide={editableSlide} job={job} slideIndex={selectedSlide} /> : null}
+          {currentSlide && textLayerActive ? <CanvasTextLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
         </div>
       </div>
       {job?.previewWarning ? <div className="preview-warning"><div><b>PNG 预览图未生成，当前使用网页预览</b><span>{job.previewWarning}</span></div><button type="button" onClick={onRetryPreview} disabled={previewBusy}>{previewBusy ? "正在重试" : "重新生成预览图"}</button></div> : null}
+    </div>
+  );
+}
+
+function HybridPreviewStrip({ job, currentImage, selectedSlide = 0 }) {
+  if (!job) return null;
+  const sample = job.visualTarget?.sample || {};
+  const compare = job.visualCompare || {};
+  return (
+    <div className="hybrid-preview-strip">
+      <div>
+        <b>视觉目标</b>
+        <span>{sample.status === "generated" ? "方向图已生成" : job.visualProject?.status || "待生成"} / 不可编辑中间稿</span>
+      </div>
+      <div>
+        <b>可编辑结果</b>
+        <span>{currentImage ? `第 ${selectedSlide + 1} 页预览` : "等待 PPTX 渲染"} / editable-final.pptx</span>
+      </div>
+      <div>
+        <b>一致性</b>
+        <span>{compare.score ? `${compare.score}/100` : "待 QA"}</span>
+      </div>
+    </div>
+  );
+}
+
+function LayerBaseCanvas({ slide = {}, job, slideIndex = 0, layerMode = "preview" }) {
+  const layout = slide.layout || "auto";
+  const visualImage = getSlideVisualImage(job, slide, slideIndex);
+  const materialImages = getSlideMaterialImages(job, slide, slideIndex);
+  return (
+    <div className={`layer-base-canvas layout-${layout} mode-${layerMode}`}>
+      {visualImage ? (
+        <div
+          className="layer-base-image"
+          style={{ backgroundImage: `url("${visualImage.uploadUrl}")` }}
+        />
+      ) : null}
+      <div className="layer-base-safe-area" />
+      {materialImages.slice(0, 4).map((image, index) => {
+        const box = buildAssetBoxes(layout, materialImages.length)[index] || { x: 60, y: 22 + index * 14, w: 24, h: 12 };
+        return (
+          <div
+            className="layer-base-slot"
+            key={`${image.id || image.uploadUrl}-${index}`}
+            style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function LayerSeparationBar({ slide = {}, job, slideIndex = 0, layerMode = "preview" }) {
+  const textCount = buildCanvasObjects(slide, slide).length;
+  const materialCount = getSlideMaterialImages(job, slide, slideIndex).length;
+  const hasBackground = Boolean(getSlideVisualImage(job, slide, slideIndex)) && ["cover", "visual", "product-detail", "bundle"].includes(slide.layout);
+  const decorationCount = ["cover", "section", "quote", "closing"].includes(slide.layout) ? 2 : 1;
+  return (
+    <div className="layer-separation-bar">
+      <span className={hasBackground ? "active" : ""}>底图 {hasBackground ? 1 : 0}</span>
+      <span className={layerMode === "asset" || materialCount ? "active" : ""}>素材 {materialCount}</span>
+      <span className={layerMode === "text" ? "active" : ""}>文字 {textCount}</span>
+      <span>装饰 {decorationCount}</span>
+      <em>{layerMode === "text" ? "正在编辑文字层：拖动蓝色标签移动对象，保存后写回 PPTX。" : layerMode === "asset" ? "正在查看素材层：只显示当前页绑定图片槽，不显示文字编辑框。" : "当前为干净预览：不叠加文字编辑框，避免和底图/预览图重复。"}</em>
+    </div>
+  );
+}
+
+function CanvasAssetLayer({ slide = {}, job, slideIndex = 0 }) {
+  const images = getSlideMaterialImages(job, slide, slideIndex);
+  const boxes = buildAssetBoxes(slide.layout, images.length);
+  return (
+    <div className="canvas-asset-layer">
+      {images.length ? images.map((image, index) => {
+        const box = boxes[index] || boxes[0];
+        return (
+          <figure className="canvas-asset-box" key={`${image.id || image.originalName}-${index}`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}>
+            <img src={image.uploadUrl} alt={image.originalName || "素材图"} />
+            <figcaption>素材 {index + 1} · {image.originalName || "未命名"}</figcaption>
+          </figure>
+        );
+      }) : <div className="canvas-empty-layer">当前页没有绑定素材图。到右侧“图片槽 / 素材名”填写文件名，或让 Agent 重新匹配素材。</div>}
     </div>
   );
 }
@@ -1479,7 +1790,7 @@ function AIPanel({ deckRevision, dirty, job, revision, setDeckRevision, setRevis
 function EditorPanel({ deckRevision, dirty, draft, job, revision, savedDraft, setDeckRevision, setDraft, setRevision, updateDraft, onQuickAction, onRevise, onSaveText, onRewriteDeck, onUndoJob }) {
   return (
     <aside className="editor-panel">
-      <div className="edit-mode-title"><div><b>直接编辑当前页</b>{dirty ? <strong>未保存</strong> : <strong className="saved">已同步</strong>}</div><span>保存后会重新生成 PPTX 和预览。</span></div>
+      <div className="edit-mode-title"><div><b>直接编辑当前页</b>{dirty ? <strong>未保存</strong> : <strong className="saved">已同步</strong>}</div><span>保存后写入 SceneGraph，并重新渲染 PPTX 和预览。</span></div>
       <Field label="版式"><button className="btn ghost wide undo-button" type="button" onClick={onUndoJob} disabled={!job?.canUndo || dirty}>{job?.undoLabel || "撤销上一轮修改"}</button><select value={draft.layout} onChange={(e) => updateDraft("layout", e.target.value)} disabled={!job}>{Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}</select></Field>
       <Field label="标题"><input value={draft.title} onChange={(e) => updateDraft("title", e.target.value)} disabled={!job} /></Field>
       <Field label="副标题 / 摘要"><textarea className="compact-textarea" value={draft.subtitle} onChange={(e) => updateDraft("subtitle", e.target.value)} disabled={!job} /></Field>
@@ -1585,20 +1896,82 @@ function ProductFactPreview({ facts }) {
   );
 }
 
-const CANVAS_FIELDS = [
-  { key: "title", label: "标题", fallback: "", box: { x: 58, y: 24, w: 34, h: 13 } },
-  { key: "subtitle", label: "副标题", fallback: "", box: { x: 58, y: 42, w: 34, h: 10 } },
-  { key: "bullets", label: "要点", fallback: "", box: { x: 58, y: 58, w: 34, h: 20 } }
-];
+const CANVAS_FIELD_FALLBACKS = {
+  title: { label: "标题", box: { x: 56, y: 18, w: 36, h: 13 }, fontSize: 28, bold: true },
+  subtitle: { label: "副标题", box: { x: 56, y: 34, w: 36, h: 10 }, fontSize: 14 },
+  visualIntent: { label: "视觉意图", box: { x: 56, y: 47, w: 36, h: 10 }, fontSize: 10 },
+  speakerNotes: { label: "讲稿备注", box: { x: 56, y: 72, w: 36, h: 18 }, fontSize: 9 }
+};
+
+const CANVAS_LAYOUT_BOXES = {
+  cover: {
+    title: { x: 8, y: 24, w: 48, h: 14 },
+    subtitle: { x: 8, y: 42, w: 45, h: 8 },
+    bulletStart: { x: 8, y: 58, w: 36, h: 5 }
+  },
+  cards: {
+    title: { x: 8, y: 12, w: 50, h: 10 },
+    subtitle: { x: 8, y: 25, w: 44, h: 7 },
+    bulletStart: { x: 10, y: 40, w: 30, h: 5 },
+    dataStart: { x: 53, y: 38, w: 34, h: 5 }
+  },
+  bundle: {
+    title: { x: 8, y: 11, w: 48, h: 10 },
+    subtitle: { x: 8, y: 24, w: 42, h: 7 },
+    bulletStart: { x: 8, y: 39, w: 38, h: 5 },
+    dataStart: { x: 54, y: 36, w: 34, h: 5 }
+  },
+  kpi: {
+    title: { x: 8, y: 10, w: 48, h: 10 },
+    subtitle: { x: 8, y: 23, w: 42, h: 7 },
+    bulletStart: { x: 8, y: 58, w: 38, h: 5 },
+    dataStart: { x: 14, y: 34, w: 24, h: 6 }
+  },
+  pricing: {
+    title: { x: 8, y: 11, w: 42, h: 10 },
+    subtitle: { x: 8, y: 24, w: 44, h: 8 },
+    bulletStart: { x: 8, y: 40, w: 36, h: 5 },
+    dataStart: { x: 52, y: 34, w: 36, h: 5 }
+  },
+  "product-detail": {
+    title: { x: 8, y: 11, w: 42, h: 10 },
+    subtitle: { x: 8, y: 25, w: 40, h: 8 },
+    bulletStart: { x: 8, y: 42, w: 34, h: 5 },
+    dataStart: { x: 52, y: 30, w: 34, h: 5 }
+  },
+  compare: {
+    title: { x: 8, y: 10, w: 48, h: 10 },
+    subtitle: { x: 8, y: 23, w: 42, h: 7 },
+    bulletStart: { x: 8, y: 38, w: 35, h: 5 },
+    dataStart: { x: 53, y: 38, w: 35, h: 5 }
+  },
+  "risk-checklist": {
+    title: { x: 8, y: 12, w: 50, h: 10 },
+    subtitle: { x: 8, y: 25, w: 44, h: 7 },
+    bulletStart: { x: 10, y: 38, w: 46, h: 5 }
+  },
+  section: {
+    title: { x: 10, y: 33, w: 58, h: 13 },
+    subtitle: { x: 10, y: 51, w: 44, h: 8 },
+    bulletStart: { x: 10, y: 65, w: 40, h: 5 }
+  },
+  closing: {
+    title: { x: 12, y: 32, w: 54, h: 13 },
+    subtitle: { x: 12, y: 50, w: 46, h: 8 },
+    bulletStart: { x: 12, y: 64, w: 40, h: 5 }
+  },
+  default: {
+    title: { x: 8, y: 11, w: 48, h: 10 },
+    subtitle: { x: 8, y: 25, w: 48, h: 8 },
+    bulletStart: { x: 8, y: 42, w: 42, h: 5 },
+    dataStart: { x: 56, y: 36, w: 34, h: 5 }
+  }
+};
 
 function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
   const [drag, setDrag] = useState(null);
-  const edits = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits);
-  const values = {
-    title: draft.title ?? slide.title ?? "",
-    subtitle: draft.subtitle ?? slide.subtitle ?? "",
-    bullets: draft.bullets ?? toBulletList(slide.bullets).join("\n")
-  };
+  const canvasObjects = useMemo(() => buildCanvasObjects(draft, slide), [draft, slide]);
+  const edits = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits, canvasObjects);
 
   function patchCanvasEdit(key, patch) {
     const current = normalizeCanvasEdits(draft.canvasEdits || slide.canvasEdits);
@@ -1608,14 +1981,27 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
     });
   }
 
-  function patchText(key, value) {
-    updateDraft?.(key, value);
+  function patchText(object, value) {
+    if (object.path === "bullet") {
+      const next = [...toBulletList(draft.bullets ?? slide.bullets)];
+      next[object.index] = value;
+      updateDraft?.("bullets", next);
+      return;
+    }
+    if (object.path === "dataPoint") {
+      const next = [...toBulletList(draft.dataPoints ?? slide.dataPoints)];
+      next[object.index] = value;
+      updateDraft?.("dataPoints", next);
+      return;
+    }
+    updateDraft?.(object.key, value);
   }
 
   function startDrag(event, key) {
     event.preventDefault();
     event.stopPropagation();
-    const box = edits[key]?.box || CANVAS_FIELDS.find((item) => item.key === key)?.box;
+    const box = edits[key]?.box || canvasObjects.find((item) => item.key === key)?.box;
+    if (!box) return;
     setDrag({
       key,
       startX: event.clientX,
@@ -1647,7 +2033,7 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
 
   return (
     <div className="canvas-text-layer">
-      {CANVAS_FIELDS.map((field) => {
+      {canvasObjects.map((field) => {
         const edit = edits[field.key] || { box: field.box };
         const box = edit.box || field.box;
         return (
@@ -1658,8 +2044,8 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
           >
             <button type="button" className="canvas-drag-handle" onPointerDown={(event) => startDrag(event, field.key)} title="拖动位置">{field.label}</button>
             <textarea
-              value={values[field.key] || field.fallback}
-              onChange={(event) => patchText(field.key, event.target.value)}
+              value={field.value || ""}
+              onChange={(event) => patchText(field, event.target.value)}
               onBlur={onSave}
               onClick={(event) => event.stopPropagation()}
             />
@@ -1670,17 +2056,54 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
   );
 }
 
-function normalizeCanvasEdits(value = {}) {
+function buildCanvasObjects(draft = {}, slide = {}) {
+  const layout = draft.layout || slide.layout || "default";
+  const boxes = CANVAS_LAYOUT_BOXES[layout] || CANVAS_LAYOUT_BOXES.default;
+  const bullets = toBulletList(draft.bullets ?? slide.bullets);
+  const dataPoints = toBulletList(draft.dataPoints ?? slide.dataPoints);
+  const objects = [
+    buildCanvasObject("title", "标题", draft.title ?? slide.title ?? "", boxes.title || CANVAS_FIELD_FALLBACKS.title.box),
+    buildCanvasObject("subtitle", "副标题", draft.subtitle ?? slide.subtitle ?? "", boxes.subtitle || CANVAS_FIELD_FALLBACKS.subtitle.box)
+  ];
+  bullets.forEach((value, index) => {
+    objects.push(buildCanvasObject(`bullet_${index}`, `要点 ${index + 1}`, value, stackBox(boxes.bulletStart || CANVAS_LAYOUT_BOXES.default.bulletStart, index), "bullet", index));
+  });
+  if (["pricing", "kpi", "compare", "timeline", "product-detail"].includes(layout)) {
+    dataPoints.forEach((value, index) => {
+      objects.push(buildCanvasObject(`data_${index}`, `数据 ${index + 1}`, value, stackBox(boxes.dataStart || CANVAS_LAYOUT_BOXES.default.dataStart, index), "dataPoint", index));
+    });
+  }
+  return objects.filter((item) => String(item.value || "").trim());
+}
+
+function buildCanvasObject(key, label, value, box, path = key, index = null) {
+  return { key, label, value: String(value || ""), box, path, index };
+}
+
+function stackBox(startBox, index) {
+  return {
+    x: startBox.x,
+    y: clamp(startBox.y + index * 7, 0, 92),
+    w: startBox.w,
+    h: startBox.h
+  };
+}
+
+function normalizeCanvasEdits(value = {}, canvasObjects = []) {
   const edits = typeof value === "object" && value ? value : {};
-  return CANVAS_FIELDS.reduce((acc, field) => {
-    const box = edits[field.key]?.box || field.box;
-    acc[field.key] = {
-      ...edits[field.key],
+  const known = new Map(canvasObjects.map((field) => [field.key, field]));
+  const keys = new Set([...known.keys(), ...Object.keys(edits).filter((key) => /^[a-zA-Z][\w-]{0,40}$/.test(key))]);
+  return [...keys].reduce((acc, key) => {
+    const field = known.get(key);
+    const box = edits[key]?.box || field?.box;
+    if (!box) return acc;
+    acc[key] = {
+      ...edits[key],
       box: {
-        x: clamp(Number(box.x ?? field.box.x), 0, 96),
-        y: clamp(Number(box.y ?? field.box.y), 0, 96),
-        w: clamp(Number(box.w ?? field.box.w), 8, 96),
-        h: clamp(Number(box.h ?? field.box.h), 5, 96)
+        x: clamp(Number(box.x ?? field?.box?.x), 0, 96),
+        y: clamp(Number(box.y ?? field?.box?.y), 0, 96),
+        w: clamp(Number(box.w ?? field?.box?.w), 8, 96),
+        h: clamp(Number(box.h ?? field?.box?.h), 4, 96)
       }
     };
     return acc;
@@ -1731,33 +2154,33 @@ function buildDeliveryIssues(job = {}) {
   return [
     ...(quality.risks || []),
     ...(quality.routingWarnings || []),
-    ...((quality.localImageQa?.risks || []).map((item) => `\u672a\u8bbe\u7f6e`)),
-    ...((quality.renderImageQa?.warnings || []).map((item) => `\u672a\u8bbe\u7f6e`)),
+    ...((quality.localImageQa?.risks || []).map((item) => `本地图风险：${localQaRiskLabel(item)}`)),
+    ...((quality.renderImageQa?.warnings || []).map((item) => `图片比例风险：${renderQaRiskLabel(item)}`)),
     ...getBlockingWarnings(job),
     job.warning,
     job.previewWarning,
     job.exportWarning,
-    ...(material.confirmationFields?.length ? [`\u672a\u8bbe\u7f6e`] : [])
+    ...(material.confirmationFields?.length ? [`待确认：${material.confirmationFields.slice(0, 3).join(" / ")}`] : [])
   ].filter((item) => item && !isNonBlockingWarning(item)).slice(0, 3);
 }
 
 function renderQaRiskLabel(value = "") {
   const map = {
-    "cover-crops-too-much": "\u672a\u8bbe\u7f6e",
-    "contain-leaves-too-much-empty-space": "\u672a\u8bbe\u7f6e",
-    "landscape-scene-should-be-hero-or-background": "\u672a\u8bbe\u7f6e"
+    "cover-crops-too-much": "封面裁切过多",
+    "contain-leaves-too-much-empty-space": "留白过多",
+    "landscape-scene-should-be-hero-or-background": "横图更适合作底图或主视觉"
   };
   return map[value] || value;
 }
 
 function localQaRiskLabel(value = "") {
   const map = {
-    "image-may-be-too-blank": "\u672a\u8bbe\u7f6e",
-    "text-safe-area-too-busy": "\u672a\u8bbe\u7f6e",
-    "possible-readable-text-or-labels": "\u672a\u8bbe\u7f6e",
-    "possible-small-dark-text-or-labels": "\u672a\u8bbe\u7f6e",
-    "high-contrast-foreground-may-include-text": "\u672a\u8bbe\u7f6e",
-    "qa-failed": "\u672a\u8bbe\u7f6e"
+    "image-may-be-too-blank": "图片主体偏弱",
+    "text-safe-area-too-busy": "文字安全区过花",
+    "possible-readable-text-or-labels": "图片内可能有可读文字",
+    "possible-small-dark-text-or-labels": "图片内可能有小字",
+    "high-contrast-foreground-may-include-text": "前景高对比内容需检查",
+    "qa-failed": "图片检测失败"
   };
   return map[value] || value;
 }
@@ -1789,13 +2212,13 @@ function AgentWorkRecord({ job, files = [] }) {
     <div className="agent-record">
       <div className="agent-record-header">
         <b>Agent {"\u5de5\u4f5c\u8bb0\u5f55"}</b>
-        <span>{decision.hasOldDeck ? "\u672a\u8bbe\u7f6e" : "?? PPT ??"}</span>
+        <span>{decision.hasOldDeck ? "旧稿优化" : "新建 PPT"}</span>
       </div>
       <div className="agent-record-grid">
-        <RecordBlock title="\u672a\u8bbe\u7f6e" value={decision.intent || "PPT ??"} detail={`${inputStrengthLabel(decision.inputStrength || material.inputStrength)} ? ${decision.targetSlides || route.targetSlides || job?.deck?.slides?.length || 0} ?`} />
-        <RecordBlock title="\u672a\u8bbe\u7f6e" value={`\u672a\u8bbe\u7f6e`} detail={`?? ${material.charCount || 0} ? ? ?? ${material.imageCount || 0} ? ?? ${material.priceCount || 0}`} />
-        <RecordBlock title="\u672a\u8bbe\u7f6e" value={route.deckType || decision.routeType || "\u672a\u8bbe\u7f6e"} detail={routeReasons.slice(0, 2).join("?") || "\u672a\u8bbe\u7f6e"} />
-        <RecordBlock title="\u672a\u8bbe\u7f6e" value={fixes.length ? `\u672a\u8bbe\u7f6e` : "\u672a\u8bbe\u7f6e"} detail={fixes[0]?.changes?.slice(0, 2).join("?") || "\u672a\u8bbe\u7f6e"} />
+        <RecordBlock title="任务意图" value={decision.intent || "PPT 生成"} detail={`${inputStrengthLabel(decision.inputStrength || material.inputStrength)} / ${decision.targetSlides || route.targetSlides || job?.deck?.slides?.length || 0} 页`} />
+        <RecordBlock title="资料规模" value="已解析" detail={`文字 ${material.charCount || 0} 字 / 图片 ${material.imageCount || 0} 张 / 价格 ${material.priceCount || 0} 条`} />
+        <RecordBlock title="智能路由" value={route.deckType || decision.routeType || "待识别"} detail={routeReasons.slice(0, 2).join(" / ") || "暂无原因"} />
+        <RecordBlock title="自动修复" value={fixes.length ? `${fixes.length} 轮` : "未触发"} detail={fixes[0]?.changes?.slice(0, 2).join(" / ") || "暂无修复"} />
       </div>
       <div className="agent-record-section">
         <b>{"\u6267\u884c\u6b65\u9aa4"}</b>
@@ -1832,19 +2255,417 @@ function RecordBlock({ title, value, detail }) {
   );
 }
 
+function VisualProjectWorkspace({ job, onGenerateSlides }) {
+  const project = job?.visualProject || {};
+  const manifest = job?.assetManifest || {};
+  const qa = job?.assetManifestQa || {};
+  const slideJobs = job?.pipeline?.slideJobs || [];
+  if (!job) return <div className="visual-project-empty">先上传资料并生成任务，这里会显示 codex-ppt 式视觉生产链路。</div>;
+  return (
+    <div className="hybrid-workspace">
+      <div className={`hybrid-card ${qa.status || "pass"}`}>
+        <div className="hybrid-card-head"><b>素材中枢 Asset Manifest</b><span>{qa.status || manifest.status || "ready"}</span></div>
+        <p>Logo、产品图、图表、价格和正文从一开始锁定身份，禁止混入底图。</p>
+        <div className="hybrid-facts">
+          <span>{manifest.assets?.length || 0} 素材</span>
+          <span>{manifest.criticalCount || 0} 必须保留</span>
+          <span>{manifest.backgroundBlockedCount || 0} 禁入底图</span>
+        </div>
+        {manifest.hardRules?.length ? <small>{manifest.hardRules.slice(0, 2).join(" / ")}</small> : null}
+      </div>
+      <div className={`hybrid-card ${project.status === "ready" ? "pass" : "warn"}`}>
+        <div className="hybrid-card-head"><b>Visual Project</b><span>{project.status || "not-created"}</span></div>
+        <p>生成 outline、deck_spec、逐页 prompt 和 slide_jobs；视觉目标 PPTX 只作为中间稿。</p>
+        <div className="hybrid-facts">
+          <span>{project.slideCount || 0} 页</span>
+          <span>{project.generatedImages || 0} 张视觉图</span>
+          <span>{project.generatedSceneGraphs || 0} 个可编辑页结构</span>
+          <span>{project.visualTargetPptxPath ? "visual-target.pptx" : "待生成视觉 PPTX"}</span>
+        </div>
+        <div className="hybrid-links">
+          {project.urls?.outlineUrl ? <a href={project.urls.outlineUrl} target="_blank" rel="noreferrer">outline.md</a> : null}
+          {project.urls?.deckSpecUrl ? <a href={project.urls.deckSpecUrl} target="_blank" rel="noreferrer">deck_spec.json</a> : null}
+          {project.urls?.slideJobsUrl ? <a href={project.urls.slideJobsUrl} target="_blank" rel="noreferrer">slide_jobs.json</a> : null}
+          {project.urls?.slideSceneGraphManifestUrl ? <a href={project.urls.slideSceneGraphManifestUrl} target="_blank" rel="noreferrer">slide_scenegraphs.json</a> : null}
+          {project.urls?.contactSheetUrl ? <a href={project.urls.contactSheetUrl} target="_blank" rel="noreferrer">contact sheet</a> : null}
+          {project.urls?.visualTargetPptxUrl ? <a href={project.urls.visualTargetPptxUrl} target="_blank" rel="noreferrer">visual-target.pptx</a> : null}
+        </div>
+        {onGenerateSlides ? (
+          <div className="button-row tight">
+            <button className="btn primary" type="button" onClick={() => onGenerateSlides(3)}>生成 3 页视觉图</button>
+            <button className="btn ghost" type="button" onClick={() => onGenerateSlides("all")}>全量生成</button>
+          </div>
+        ) : null}
+        {project.warnings?.length ? <small>{project.warnings.slice(0, 3).join(" / ")}</small> : null}
+        {project.originImages?.length ? (
+          <div className="origin-image-strip">
+            {project.originImages.slice(0, 12).map((item) => <img key={item.name} src={item.url} alt={item.name} title={item.name} />)}
+          </div>
+        ) : null}
+      </div>
+      <div className="hybrid-card wide">
+        <div className="hybrid-card-head"><b>逐页 Worker 任务</b><span>{slideJobs.length || project.slideCount || 0}</span></div>
+        <div className="hybrid-job-grid">
+          {(slideJobs.length ? slideJobs : Array.from({ length: project.slideCount || 0 }, (_, index) => ({ id: `slide_${String(index + 1).padStart(2, "0")}`, index: index + 1, status: "pending" }))).slice(0, 16).map((item) => (
+            <span className={item.status || "pending"} key={item.id}>
+              <strong>{String(item.index || item.slide || "").padStart(2, "0")}</strong>
+              {item.layout || item.role || item.status || "pending"}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HybridQaWorkspace({ job, selectedSlide = 0, setSelectedSlide, currentImage }) {
+  if (!job) return <div className="visual-project-empty">生成后这里会显示视觉目标与可编辑结果的双轨 QA。</div>;
+  const target = job.visualTarget || {};
+  const project = job.visualProject || {};
+  const compare = job.visualCompare || {};
+  const edit = job.quality?.pptxEditability || {};
+  const sceneQa = job.sceneGraphQa || {};
+  const hybridQa = job.hybridQa || {};
+  const sample = target.sample || {};
+  const sceneSlides = Array.isArray(job.sceneGraph?.slides) ? job.sceneGraph.slides : [];
+  const slideCount = Math.max(sceneSlides.length, (project.originImages || []).length, (job.previewImages || []).length, project.slideCount || 0);
+  const currentOriginImage = (project.originImages || []).find((item) => Number(item.slide) === selectedSlide + 1);
+  const visualImage = currentOriginImage?.url || sample.imageUrl || null;
+  const currentSceneSlide = sceneSlides[selectedSlide] || null;
+  const categories = hybridQa.categories || {};
+  const qaItems = [
+    { label: "内容完整度", value: categories.content?.blockers?.length ? "阻断" : categories.content?.warnings?.length ? "需复核" : "通过", state: categories.content?.status || (sceneQa.warnings?.length ? "warn" : "pass") },
+    { label: "素材完整度", value: `${job.assetManifest?.criticalCount || 0} 关键素材`, state: categories.assets?.status || (job.assetManifestQa?.status === "block" ? "block" : "pass") },
+    { label: "视觉一致性", value: compare.score ? `${compare.score}/100` : "待对比", state: categories.visual?.status || compare.status || "warn" },
+    { label: "可编辑完整度", value: `${edit.nativeTextBoxes || 0} 文本 / ${edit.nativeShapes || 0} shape`, state: categories.editable?.status || (edit.editable === false ? "block" : "pass") }
+  ];
+  return (
+    <div className="dual-preview-workspace">
+      {slideCount > 1 ? (
+        <div className="dual-slide-selector" aria-label="选择双轨 QA 页码">
+          {Array.from({ length: slideCount }, (_, index) => (
+            <button
+              className={index === selectedSlide ? "active" : ""}
+              key={`dual-slide-${index}`}
+              type="button"
+              onClick={() => setSelectedSlide?.(index)}
+            >
+              {String(index + 1).padStart(2, "0")}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="dual-preview-grid">
+        <div className="dual-preview-pane">
+          <div className="dual-preview-head"><b>视觉目标</b><span>不可编辑 / 中间产物</span></div>
+          {visualImage ? <img src={visualImage} alt="visual target" /> : <div className="dual-preview-empty">等待 visual target sample / origin_image</div>}
+          <small>{currentOriginImage?.name || (project.visualTargetPptxPath ? "visual-target.pptx 已准备" : "origin_image 未齐，视觉目标 PPTX 待生成")}</small>
+        </div>
+        <div className="dual-preview-pane">
+          <div className="dual-preview-head"><b>可编辑结果</b><span>最终交付 / SceneGraph</span></div>
+          {currentImage ? <img src={currentImage} alt={`editable preview ${selectedSlide + 1}`} /> : <div className="dual-preview-empty">等待 PPTX 渲染预览</div>}
+          <small>editable-final.pptx：文本、shape、独立图片由 SceneGraph 渲染。</small>
+        </div>
+      </div>
+      <div className="hybrid-qa-grid">
+        {qaItems.map((item) => <div className={`hybrid-qa-item ${item.state}`} key={item.label}><span>{item.label}</span><b>{item.value}</b></div>)}
+      </div>
+      <SlideSceneGraphAssetEvidence slide={currentSceneSlide} />
+      <HybridQaDetail qa={hybridQa} />
+      {compare.items?.length ? (
+        <div className="hybrid-card wide">
+          <div className="hybrid-card-head"><b>逐页一致性</b><span>{compare.method || "structural"}</span></div>
+          <div className="hybrid-job-grid">
+            {compare.items.slice(0, 12).map((item) => <span className={item.status || "pass"} key={item.slideId}><strong>{item.slideId}</strong>{item.score || 0}</span>)}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SlideSceneGraphAssetEvidence({ slide }) {
+  if (!slide) return null;
+  const images = Array.isArray(slide.images) ? slide.images : [];
+  const texts = Array.isArray(slide.texts) ? slide.texts : [];
+  const shapes = [...(slide.shapes || []), ...(slide.decorations || [])];
+  const background = slide.layers?.background || {};
+  const backgroundBlocked = Boolean(background.containsCriticalText || background.containsLogo || background.containsProductHero || background.containsKeyData);
+  const visualTargetName = slide.source?.visualTargetImage ? slide.source.visualTargetImage.split(/[\\/]/).pop() : "";
+  return (
+    <div className={`hybrid-card wide ${backgroundBlocked ? "block" : "pass"}`}>
+      <div className="hybrid-card-head">
+        <b>当前页 SceneGraph 素材层</b>
+        <span>{backgroundBlocked ? "背景违规" : "三层安全"}</span>
+      </div>
+      <div className="asset-evidence-grid">
+        <span><b>{texts.length}</b> 文本框</span>
+        <span><b>{shapes.length}</b> shape / 装饰</span>
+        <span><b>{images.length}</b> 独立图片</span>
+        <span><b>{background.forbiddenKinds?.length || 0}</b> 禁入底图类型</span>
+      </div>
+      <div className="asset-evidence-list">
+        {visualTargetName ? (
+          <div className="asset-evidence-row reference-only">
+            <strong>{visualTargetName}</strong>
+            <span>visual-target-reference-only</span>
+            <small>不进入最终图片层 / 不作为 PPT 背景</small>
+          </div>
+        ) : null}
+        {images.length ? images.slice(0, 4).map((image) => (
+          <div className="asset-evidence-row" key={image.id || image.path || image.name}>
+            <strong>{image.name || image.id || "image"}</strong>
+            <span>{image.provenance?.selectionReason || image.provenance?.source || "independent-image"}</span>
+            <small>
+              {[image.role, image.provenance?.mattingStatus, image.provenance?.derived ? "derived" : "", image.fullSlide ? "full-slide-risk" : "editable-object"].filter(Boolean).join(" / ")}
+            </small>
+          </div>
+        )) : <small>当前页没有独立图片对象；如果这是图片主导页，需要检查素材抽取或 imageSlots。</small>}
+      </div>
+      <small>
+        背景层只允许氛围/纹理/光影；标题、正文、价格、Logo、产品主体和关键数据必须在文本框或独立图片对象里。
+      </small>
+    </div>
+  );
+}
+
+function HybridQaDetail({ qa = {} }) {
+  const categories = qa.categories || {};
+  const rows = [
+    ["内容 QA", categories.content],
+    ["素材 QA", categories.assets],
+    ["可编辑 QA", categories.editable],
+    ["视觉 QA", categories.visual]
+  ].filter(([, item]) => item);
+  if (!rows.length) return null;
+  return (
+    <div className="hybrid-card wide">
+      <div className="hybrid-card-head"><b>四类 QA</b><span>{qa.status || "pending"}</span></div>
+      <div className="hybrid-qa-detail">
+        {rows.map(([label, item]) => (
+          <div className={`hybrid-qa-detail-row ${item.status}`} key={label}>
+            <b>{label}</b>
+            <span>{item.status}</span>
+            <small>{[...(item.blockers || []), ...(item.warnings || [])].slice(0, 3).join(" / ") || "通过"}</small>
+          </div>
+        ))}
+      </div>
+      {qa.autoRepairLog?.length ? <small>自动返工：{qa.autoRepairLog.slice(0, 4).map((item) => `${item.type}:${item.status}`).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
+function PipelineCard({ pipeline }) {
+  if (!pipeline?.stages?.length) return null;
+  const statusText = { pass: "通过", warn: "需检查", block: "阻断", skipped: "跳过" };
+  const jobs = Array.isArray(pipeline.slideJobs) ? pipeline.slideJobs : [];
+  return (
+    <div className="pipeline-card">
+      <div className="pipeline-head">
+        <b>设计流水线</b>
+        <span>{pipeline.lastCompletedStage || "pending"}</span>
+      </div>
+      <div className="pipeline-stage-list">
+        {pipeline.stages.map((stage) => (
+          <div className={`pipeline-stage ${stage.status || "skipped"}`} key={stage.id}>
+            <span>{stage.label}</span>
+            <b>{statusText[stage.status] || stage.status}</b>
+            <small>{stage.summary}</small>
+          </div>
+        ))}
+      </div>
+      {jobs.length ? (
+        <div className="pipeline-slide-jobs">
+          {jobs.slice(0, 8).map((job) => (
+            <span className={job.status || "editable-ready"} key={job.id}>
+              <strong>{String(job.index).padStart(2, "0")}</strong>
+              {job.layout || job.role || "slide"}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {pipeline.blockingReasons?.length ? <small className="pipeline-blockers">{pipeline.blockingReasons.slice(0, 2).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
+function EditableRebuildCard({ plan }) {
+  if (!plan?.candidate) return null;
+  const pages = Array.isArray(plan.pages) ? plan.pages : [];
+  const statusLabel = plan.status === "active" ? "已规划" : plan.status === "warn" ? "需复核" : plan.status || "待处理";
+  return (
+    <div className={`editable-rebuild-card ${plan.status || "warn"}`}>
+      <div className="editable-rebuild-head">
+        <b>对象级可编辑重建</b>
+        <span>{statusLabel}</span>
+      </div>
+      <p>{plan.reason}</p>
+      <div className="editable-rebuild-facts">
+        <span>{plan.inputType || "mixed"}</span>
+        <span>{plan.pageCount || pages.length || 0} 页</span>
+        <span>{(plan.warnings || []).length} 风险</span>
+      </div>
+      {plan.hardRules?.length ? (
+        <ul>
+          {plan.hardRules.slice(0, 3).map((rule) => <li key={rule}>{rule}</li>)}
+        </ul>
+      ) : null}
+      {pages.length ? (
+        <div className="editable-page-list">
+          {pages.slice(0, 6).map((page) => {
+            const manifest = page.editableManifest || {};
+            const textCount = manifest.text_boxes?.length || 0;
+            const imageCount = manifest.images?.length || 0;
+            return (
+              <div className={page.qa?.fakeEditableRisk ? "warn" : "pass"} key={page.pageId}>
+                <strong>#{String(page.index).padStart(2, "0")} {page.title || page.pageId}</strong>
+                <small>{textCount} 文本框 / {imageCount} 图片对象 / {page.source?.status || "source"}</small>
+                {page.qa?.warnings?.length ? <em>{page.qa.warnings.slice(0, 2).join(" / ")}</em> : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+      {plan.warnings?.length ? <small className="editable-rebuild-warning">{plan.warnings.slice(0, 2).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
+function VisualTargetCard({ target, onGenerateSample, localImage }) {
+  if (!target) return null;
+  const pages = Array.isArray(target.pageTargets) ? target.pageTargets : [];
+  const sample = target.sample || {};
+  return (
+    <div className="scenegraph-card">
+      <div className="scenegraph-head">
+        <b>视觉目标方向图</b>
+        <span>{sample.status || target.status || "brief"}</span>
+      </div>
+      <p>{target.styleBrief || "已生成视觉目标 brief；img2/codex-ppt 只作为风格参考，不作为最终整页背景。"}</p>
+      <div className="scenegraph-facts">
+        <span>{target.engine || "visual-target"}</span>
+        <span>{target.density || "density"}</span>
+        <span>{sample.status || "sample-not-generated"}</span>
+      </div>
+      {sample.imageUrl ? <img className="visual-target-sample" src={sample.imageUrl} alt="visual target sample" /> : null}
+      {sample.prompt ? <small className="scenegraph-warning">{sample.prompt.slice(0, 180)}</small> : null}
+      {onGenerateSample ? <button className="btn ghost wide" type="button" onClick={onGenerateSample} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "生成视觉目标方向图" : "等待本地生图在线"}</button> : null}
+      {pages.length ? (
+        <div className="scenegraph-page-list">
+          {pages.slice(0, 5).map((page) => (
+            <div className="pass" key={page.slideId}>
+              <strong>{page.slideId} / {page.role}</strong>
+              <small>{page.composition} / image {page.imagePriority}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SceneGraphCard({ graph, qa }) {
+  if (!graph?.slides?.length && !qa) return null;
+  const slides = Array.isArray(graph?.slides) ? graph.slides : [];
+  const status = qa?.status || "pass";
+  return (
+    <div className={`scenegraph-card ${status}`}>
+      <div className="scenegraph-head">
+        <b>SceneGraph 可编辑真源</b>
+        <span>{status}</span>
+      </div>
+      <p>最终 PPTX 从 SceneGraph 渲染：文本是真文本框，色块是 shape，图片是独立对象。</p>
+      <div className="scenegraph-facts">
+        <span>{qa?.slideCount || slides.length || 0} 页</span>
+        <span>{qa?.textBoxes || 0} 文本框</span>
+        <span>{qa?.shapeCount || 0} 形状</span>
+        <span>{qa?.imageCount || 0} 图片</span>
+      </div>
+      {slides.length ? (
+        <div className="scenegraph-page-list">
+          {slides.slice(0, 6).map((slide) => (
+            <div className="pass" key={slide.id}>
+              <strong>#{String(slide.index).padStart(2, "0")} {slide.role}</strong>
+              <small>{slide.texts?.length || 0} text / {slide.shapes?.length || 0} shapes / {slide.images?.length || 0} images</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {qa?.warnings?.length || qa?.errors?.length ? <small className="scenegraph-warning">{[...(qa.errors || []), ...(qa.warnings || [])].slice(0, 2).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
+function VisualCompareCard({ compare }) {
+  if (!compare) return null;
+  const items = Array.isArray(compare.items) ? compare.items : [];
+  return (
+    <div className={`scenegraph-card ${compare.status || "pass"}`}>
+      <div className="scenegraph-head">
+        <b>视觉一致性评分</b>
+        <span>{compare.score || 0}</span>
+      </div>
+      <p>{compare.note || "检查 SceneGraph 渲染结构是否贴近视觉目标；后续可升级为截图级对比。"}</p>
+      {items.length ? (
+        <div className="scenegraph-page-list">
+          {items.slice(0, 5).map((item) => (
+            <div className={item.status || "pass"} key={item.slideId}>
+              <strong>{item.slideId} / {item.score}</strong>
+              <small>{item.warnings?.length ? item.warnings.join(" / ") : "结构通过"}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SceneGraphRepairCard({ repair }) {
+  if (!repair || repair.status === "not-needed") return null;
+  const actions = Array.isArray(repair.actions) ? repair.actions : [];
+  const completed = Array.isArray(repair.completed) ? repair.completed : [];
+  return (
+    <div className={`scenegraph-card ${repair.status === "blocked" ? "block" : "warn"}`}>
+      <div className="scenegraph-head">
+        <b>自动返工记录</b>
+        <span>{repair.status}</span>
+      </div>
+      <p>{repair.policy || "只修 SceneGraph，不把视觉图贴成最终背景。"}</p>
+      <div className="scenegraph-facts">
+        <span>{actions.length} 待处理</span>
+        <span>{completed.length} 已完成</span>
+      </div>
+      {actions.length ? (
+        <div className="scenegraph-page-list">
+          {actions.slice(0, 5).map((item, index) => (
+            <div className="warn" key={`${item.slideId}-${item.action}-${index}`}>
+              <strong>{item.slideId} / {item.action}</strong>
+              <small>{item.reason || item.status}</small>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {repair.blockers?.length ? <small className="scenegraph-warning">{repair.blockers.slice(0, 2).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
 function SourceRecognitionCard({ report }) {
   if (!report) return null;
   const pages = Array.isArray(report.pages) ? report.pages : [];
   const slotReport = report.imageSlotReport || null;
-  const statusLabel = { "text+image": "??+??", "text-only": "\u672a\u8bbe\u7f6e", "image-only": "\u672a\u8bbe\u7f6e", empty: "??" };
+  const templateProfile = report.templateProfile || null;
+  const extractionAudit = report.extractionAudit || null;
+  const cloudSource = report.cloudSourceAnalysis || null;
+  const statusLabel = { "text+image": "文字+图片", "text-only": "仅文字", "image-only": "仅图片", empty: "空白" };
   return (
     <div className="source-report-card">
       <b>{"\u8d44\u6599\u8bc6\u522b"}</b>
-      <p>{report.hasOldDeck ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e"}</p>
+      <p>{report.hasOldDeck ? "已识别旧 PPT 的文字、图片和页面结构。" : "已识别上传资料并抽取关键信息。"}</p>
       <div className="source-report-stats">
-        <span><strong>{report.pageCount || 0}</strong>?</span>
+        <span><strong>{report.pageCount || 0}</strong>页</span>
         <span><strong>{report.textPageCount || 0}</strong>{"\u6587\u5b57\u9875"}</span>
-        <span><strong>{report.imageCount || 0}</strong>??</span>
+        <span><strong>{report.imageCount || 0}</strong>张图片</span>
         <span><strong>{report.boundImageCount || 0}</strong>{"\u5df2\u7ed1\u5b9a\u56fe\u7247"}</span>
       </div>
       {slotReport ? (
@@ -1854,6 +2675,27 @@ function SourceRecognitionCard({ report }) {
           <span>{"\u5df2\u66ff\u6362"}{slotReport.changedSlides || 0} {"\u9875"}</span>
         </div>
       ) : null}
+      {templateProfile ? (
+        <div className="source-slot-summary">
+          <span>{"\u6bcd\u7248"}{templateProfile.usedLayoutCount || 0}/{templateProfile.layoutCount || 0}</span>
+          <span>{"\u53ef\u590d\u7528"}{templateProfile.reusableLayoutCount || 0}</span>
+          <span>{templateProfile.warnings?.length ? `warning ${templateProfile.warnings.length}` : "\u5360\u4f4d\u7b26\u5df2\u8bc6\u522b"}</span>
+        </div>
+      ) : null}
+      {extractionAudit ? (
+        <div className={`source-slot-summary ${extractionAudit.confidence === "high" ? "pass" : "warning"}`}>
+          <span>抽取审计 {extractionAudit.confidence || "medium"}</span>
+          <span>文本 {extractionAudit.textSlideCount || 0}/{extractionAudit.slideCount || 0}</span>
+          <span>图 {extractionAudit.extractedImageRefs || 0}/{extractionAudit.embeddedImageRefs || 0}</span>
+          <span>{extractionAudit.linkedImageRefs || extractionAudit.missingImageRefs ? `外链/缺失 ${extractionAudit.linkedImageRefs || 0}/${extractionAudit.missingImageRefs || 0}` : "无缺失记录"}</span>
+        </div>
+      ) : null}
+      {cloudSource ? (
+        <div className={`cloud-review-summary ${cloudSource.status || "warn"}`}>
+          <strong>{cloudSource.used ? "云端源稿分析" : "云端源稿分析未运行"}</strong>
+          <small>{cloudSource.used ? (cloudSource.summary || cloudSource.status) : (cloudSource.reason || "not available")}</small>
+        </div>
+      ) : null}
       {report.warnings?.length ? <div className="source-report-warnings">{report.warnings.slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div> : null}
       {pages.length ? (
         <div className="source-page-list">
@@ -1861,8 +2703,8 @@ function SourceRecognitionCard({ report }) {
             <div className={`source-page-row ${page.status || "empty"}`} key={page.page}>
               <span>#{page.page}</span>
               <div>
-                <b>{page.title || `? ${page.page} ?`}</b>
-                <small>{page.textChars || 0} ? / {page.imageCount || 0} ? / {statusLabel[page.status] || page.status || "??"}</small>
+                <b>{page.title || `第 ${page.page} 页`}</b>
+                <small>{page.textChars || 0} 字 / {page.imageCount || 0} 图 / {statusLabel[page.status] || page.status || "未知"}</small>
               </div>
             </div>
           ))}
@@ -1876,15 +2718,15 @@ function AgentReviewCard({ reviews = [], visualFixes = [] }) {
   const latest = Array.isArray(reviews) ? reviews.at(-1) : null;
   if (!latest) return null;
   const latestFix = Array.isArray(visualFixes) ? visualFixes.at(-1) : null;
-  const statusLabel = latest.status === "block" ? "\u672a\u8bbe\u7f6e" : latest.status === "warn" ? "\u672a\u8bbe\u7f6e" : "??";
-  const stageLabel = latest.stage === "style-preview" ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e";
+  const statusLabel = latest.status === "block" ? "需处理" : latest.status === "warn" ? "需确认" : "通过";
+  const stageLabel = latest.stage === "style-preview" ? "视觉方向阶段" : "整稿阶段";
   return (
     <div className={`agent-review-card ${latest.status || "pass"}`}>
-      <div className="agent-review-head"><b>Agent {"\u590d\u5ba1"}</b><span>{stageLabel} ? {statusLabel}</span></div>
-      <p>{latest.nextGate === "human-style-confirmation" ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e"}</p>
+      <div className="agent-review-head"><b>Agent {"\u590d\u5ba1"}</b><span>{stageLabel} / {statusLabel}</span></div>
+      <p>{latest.nextGate === "human-style-confirmation" ? "自动质检后等待人工确认风格。" : "已进入可编辑与导出检查。"}</p>
       {latest.cloudVisualReview ? (
         <div className={`cloud-review-summary ${latest.cloudVisualReview.status || "warn"}`}>
-          <strong>{latest.cloudVisualReview.used ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e"}</strong>
+          <strong>{latest.cloudVisualReview.used ? "云端视觉复审" : "云端复审跳过"}</strong>
           <small>{latest.cloudVisualReview.used ? (latest.cloudVisualReview.summary || latest.cloudVisualReview.status) : (latest.cloudVisualReview.reason || "not available")}</small>
         </div>
       ) : null}
@@ -1901,13 +2743,13 @@ function ImageSupplementPlanCard({ plan, onApply, onApplyLocal, localImage }) {
   const items = Array.isArray(plan.items) ? plan.items : [];
   const localTargets = items.filter((item) => item.action === "need-remote-generation").length;
   const localReady = localImage?.state === "online";
-  const actionLabel = { "use-source-image": "\u672a\u8bbe\u7f6e", "use-uploaded-image": "\u672a\u8bbe\u7f6e", "need-remote-generation": "\u672a\u8bbe\u7f6e" };
+  const actionLabel = { "use-source-image": "复用原图", "use-uploaded-image": "使用上传图", "need-remote-generation": "需要补图" };
   return (
     <div className="image-supplement-card">
       <div className="image-supplement-head"><b>{"\u8865\u56fe\u8ba1\u5212"}</b><span>{plan.status === "needs-human-confirmation" ? "\u5f85\u786e\u8ba4" : "\u5df2\u68c0\u67e5"}</span></div>
       <p>{"\u68c0\u67e5\u54ea\u4e9b\u9875\u9700\u8981\u539f\u56fe\u590d\u7528\u3001\u4e0a\u4f20\u56fe\u6216\u8fdc\u7a0b\u751f\u56fe\u8865\u9f50\u3002"}</p>
       <div className="image-supplement-facts"><span>{"\u6e90\u9875"} {plan.sourceFacts?.sourcePages || 0} {"\u9875"}</span><span>{"\u6e90\u56fe"} {plan.sourceFacts?.sourceImages || 0} {"\u5f20"}</span><span>{"\u5df2\u7ed1\u5b9a"} {plan.sourceFacts?.boundImageSlots || 0} {"\u4e2a"}</span><span>{"\u4fee\u590d"} {plan.sourceFacts?.visualFixRounds || 0} {"\u8f6e"}</span></div>
-      {items.length ? <div className="image-supplement-list">{items.slice(0, 5).map((item) => <div className={item.action || "need-remote-generation"} key={`${item.slide}-${item.title}`}><strong>#{item.slide} {item.title}</strong><small>{actionLabel[item.action] || item.action} ? {item.reason}</small>{item.availableSourceImages?.length ? <em>{"\u53ef\u7528\u56fe\u7247"}{item.availableSourceImages.slice(0, 2).join(" / ")}</em> : null}</div>)}</div> : null}
+      {items.length ? <div className="image-supplement-list">{items.slice(0, 5).map((item) => <div className={item.action || "need-remote-generation"} key={`${item.slide}-${item.title}`}><strong>#{item.slide} {item.title}</strong><small>{actionLabel[item.action] || item.action} / {item.reason}</small>{item.availableSourceImages?.length ? <em>{"\u53ef\u7528\u56fe\u7247"}{item.availableSourceImages.slice(0, 2).join(" / ")}</em> : null}</div>)}</div> : null}
       <ul>{(plan.policy || []).slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>
       {onApply ? <button className="btn primary wide" type="button" onClick={onApply}>{"\u6267\u884c\u8865\u56fe\u8ba1\u5212"}</button> : null}
       {onApplyLocal && localTargets > 0 ? <button className="btn ghost wide" type="button" onClick={onApplyLocal} disabled={!localReady}>{localReady ? `\u7528 Z-Image \u751f\u6210 ${Math.min(localTargets, 3)} \u5f20\u8865\u56fe` : "\u7b49\u5f85 Z-Image \u5c31\u7eea"}</button> : null}
@@ -1922,9 +2764,9 @@ function AestheticPlanCard({ plan }) {
   return (
     <div className="route-card aesthetic-card">
       <b>PPT {"\u7f8e\u5b66\u65b9\u6848"}</b>
-      <p>{plan.theme || "\u672a\u8bbe\u7f6e"} ? {plan.system || "poster-layer-system"}</p>
+      <p>{plan.theme || "未选择风格"} / {plan.system || "poster-layer-system"}</p>
       <div><span>{pagePlans.length} {"\u9875\u7b56\u7565"}</span><span>{plan.generationPolicy?.localFirst ? "\u672c\u5730\u4f18\u5148" : "\u4e91\u7aef\u4f18\u5148"}</span><span>{plan.comfy?.workflowMustBeSaved ? "\u4fdd\u5b58\u8282\u70b9" : "\u65e0\u8282\u70b9"}</span></div>
-      {plan.globalComposition ? <small>{[plan.globalComposition.background, `\u672a\u8bbe\u7f6e`, `\u672a\u8bbe\u7f6e`].filter(Boolean).join("?")}</small> : null}
+      {plan.globalComposition ? <small>{[plan.globalComposition.background, plan.globalComposition.textSafeArea, plan.globalComposition.assetPolicy].filter(Boolean).join(" / ")}</small> : null}
       {firstPrompt ? <em>{firstPrompt.slice(0, 180)}</em> : null}
     </div>
   );
@@ -1939,9 +2781,9 @@ function AestheticDiagnosisCard({ diagnosis }) {
   return (
     <div className={`route-card aesthetic-card ${Number.isFinite(score) && score < 72 ? "warning" : ""}`}>
       <b>{"\u7f8e\u5b66\u8bca\u65ad"}</b>
-      <p>{Number.isFinite(score) ? `${score} ?` : "\u672a\u8bbe\u7f6e"} / {diagnosis.slideCount || slides.length || 0} ?</p>
-      <div><span>{low.length ? `\u672a\u8bbe\u7f6e` : "\u672a\u8bbe\u7f6e"}</span><span>{dense.length ? `\u672a\u8bbe\u7f6e` : "\u672a\u8bbe\u7f6e"}</span></div>
-      {slides.length ? <ul className="local-qa-list">{slides.slice(0, 5).map((slide) => <li className={Number(slide.diagnosisScore) < 72 ? "warn" : "pass"} key={slide.page}><strong>#{slide.page} {slide.type || "unknown"} / {slide.diagnosisScore ?? "-"} ?</strong><span>{slide.layoutStrategy || "structured_summary"} / {(slide.problems || []).map((item) => item.message || item).slice(0, 2).join(" / ") || "\u672a\u8bbe\u7f6e"}</span></li>)}</ul> : null}
+      <p>{Number.isFinite(score) ? `${score} 分` : "未评分"} / {diagnosis.slideCount || slides.length || 0} 页</p>
+      <div><span>{low.length ? `低分页 ${low.length}` : "无低分页"}</span><span>{dense.length ? `高密度 ${dense.length}` : "密度正常"}</span></div>
+      {slides.length ? <ul className="local-qa-list">{slides.slice(0, 5).map((slide) => <li className={Number(slide.diagnosisScore) < 72 ? "warn" : "pass"} key={slide.page}><strong>#{slide.page} {slide.type || "unknown"} / {slide.diagnosisScore ?? "-"} 分</strong><span>{slide.layoutStrategy || "structured_summary"} / {(slide.problems || []).map((item) => item.message || item).slice(0, 2).join(" / ") || "暂无问题"}</span></li>)}</ul> : null}
     </div>
   );
 }
@@ -1953,9 +2795,9 @@ function StyleProofConfirmationCard({ confirmation }) {
   return (
     <div className={`route-card style-proof-confirm-card ${confirmation.reviewStatus === "block" ? "warning" : ""}`}>
       <b>{"\u98ce\u683c\u786e\u8ba4"}</b>
-      <p>{confirmation.title || confirmation.id} ? {confirmation.previewCount || 0} {"\u5f20\u6837\u5f20"} ? {"\u590d\u5ba1"} {confirmation.reviewStatus || "\u672a\u8bbe\u7f6e"}</p>
-      <div><span>{confirmation.style || "\u672a\u8bbe\u7f6e"}</span><span>{confirmation.styleFingerprint?.prompt ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e"}</span><span>{fix?.changes?.length ? `\u672a\u8bbe\u7f6e` : "\u672a\u8bbe\u7f6e"}</span></div>
-      {cloud.summary ? <small>{cloud.used ? cloud.summary : `\u672a\u8bbe\u7f6e`}</small> : null}
+      <p>{confirmation.title || confirmation.id} / {confirmation.previewCount || 0} {"\u5f20\u6837\u5f20"} / {"\u590d\u5ba1"} {confirmation.reviewStatus || "未开始"}</p>
+      <div><span>{confirmation.style || "未选择风格"}</span><span>{confirmation.styleFingerprint?.prompt ? "已提取风格指纹" : "无风格指纹"}</span><span>{fix?.changes?.length ? `已修复 ${fix.changes.length} 项` : "未自动修复"}</span></div>
+      {cloud.summary ? <small>{cloud.used ? cloud.summary : "云端复审未执行"}</small> : null}
     </div>
   );
 }
@@ -1966,9 +2808,9 @@ function LocalImageQaCard({ qa, onRescan }) {
   return (
     <div className={`route-card local-qa-card ${qa.warnCount ? "warning" : ""}`}>
       <div className="local-qa-head"><b>{"\u672c\u5730\u56fe QA"}</b>{onRescan ? <button type="button" onClick={onRescan}>{"\u91cd\u626b"}</button> : null}</div>
-      <p>{qa.passCount || 0}/{qa.total} {"\u901a\u8fc7"} ? {qa.checked || 0} {"\u5f20\u5df2\u68c0\u67e5"}</p>
-      <div><span>{qa.warnCount ? `\u672a\u8bbe\u7f6e` : "\u672a\u8bbe\u7f6e"}</span><span>{qa.risks?.length ? qa.risks.map(localQaRiskLabel).slice(0, 2).join(" / ") : "\u672a\u8bbe\u7f6e"}</span></div>
-      {items.length ? <ul className="local-qa-list">{items.slice(0, 5).map((item) => <li className={item.status === "pass" ? "pass" : "warn"} key={item.id || item.name}><strong>{item.slide ? `#${item.slide} ` : ""}{item.status === "pass" ? "??" : "??"}</strong><span>{item.risks?.length ? item.risks.map(localQaRiskLabel).join("?") : "\u672a\u8bbe\u7f6e"}</span></li>)}</ul> : null}
+      <p>{qa.passCount || 0}/{qa.total} {"\u901a\u8fc7"} / {qa.checked || 0} {"\u5f20\u5df2\u68c0\u67e5"}</p>
+      <div><span>{qa.warnCount ? `风险 ${qa.warnCount}` : "全部通过"}</span><span>{qa.risks?.length ? qa.risks.map(localQaRiskLabel).slice(0, 2).join(" / ") : "暂无风险"}</span></div>
+      {items.length ? <ul className="local-qa-list">{items.slice(0, 5).map((item) => <li className={item.status === "pass" ? "pass" : "warn"} key={item.id || item.name}><strong>{item.slide ? `#${item.slide} ` : ""}{item.status === "pass" ? "通过" : "需检查"}</strong><span>{item.risks?.length ? item.risks.map(localQaRiskLabel).join(" / ") : "暂无风险"}</span></li>)}</ul> : null}
     </div>
   );
 }
@@ -1979,14 +2821,14 @@ function RenderImageQaCard({ qa }) {
   return (
     <div className={`route-card local-qa-card ${qa.warningCount ? "warning" : ""}`}>
       <div className="local-qa-head"><b>{"\u56fe\u7247\u6bd4\u4f8b QA"}</b></div>
-      <p>{qa.total} {"\u5f20\u56fe\u7247"} ? {qa.warningCount || 0} {"\u4e2a\u88c1\u526a/\u7559\u767d\u98ce\u9669"}</p>
+      <p>{qa.total} {"\u5f20\u56fe\u7247"} / {qa.warningCount || 0} {"\u4e2a\u88c1\u526a/\u7559\u767d\u98ce\u9669"}</p>
       <div><span>{"\u6700\u5927\u88c1\u526a"} {Math.round((qa.maxCropLoss || 0) * 100)}%</span><span>{"\u6700\u5c0f\u586b\u5145"} {Math.round((qa.minFillRatio || 1) * 100)}%</span></div>
-      {items.length ? <ul className="local-qa-list">{items.slice(0, 5).map((item, index) => <li className="warn" key={`${item.slideIndex}-${item.source}-${index}`}><strong>? {item.slideIndex} ? ? {item.mode}</strong><span>{(item.warnings || []).map(renderQaRiskLabel).join("?")} ? ?? {item.imageWidth}x{item.imageHeight}</span></li>)}</ul> : null}
+      {items.length ? <ul className="local-qa-list">{items.slice(0, 5).map((item, index) => <li className="warn" key={`${item.slideIndex}-${item.source}-${index}`}><strong>第 {item.slideIndex} 页 / {item.mode}</strong><span>{(item.warnings || []).map(renderQaRiskLabel).join(" / ")} / 原图 {item.imageWidth}x{item.imageHeight}</span></li>)}</ul> : null}
     </div>
   );
 }
 
-function StatusPanel({ job, files, fileIds, status, error, connection, localImage, skillRules, onRepairDelivery, onApplyImageSupplement, onApplyLocalImageSupplement, onRescanLocalImageQa }) {
+function StatusPanel({ job, files, fileIds, status, error, connection, localImage, skillRules, onRepairDelivery, onApplyImageSupplement, onApplyLocalImageSupplement, onRescanLocalImageQa, onGenerateVisualTargetSample }) {
   const [showDetails, setShowDetails] = useState(false);
   const warnings = [error, job?.warning, job?.previewWarning, job?.exportWarning].filter(Boolean);
   const ruleGroups = Object.keys(skillRules || {});
@@ -2005,16 +2847,23 @@ function StatusPanel({ job, files, fileIds, status, error, connection, localImag
   return (
     <div className="side-section">
       <h2>{"\u72b6\u6001"}</h2>
-      {job ? <div className={`status-summary ${statusTone}`}><div><b>{statusTone === "pass" ? "\u5df2\u901a\u8fc7" : statusTone === "warn" ? "\u9700\u68c0\u67e5" : "\u9700\u4fee\u590d"}</b><span>{job.deck?.slides?.length || 0} {"\u9875"} ? {"\u8def\u7531"} {Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : "-"} ? {(job.previewImages || []).filter(Boolean).length} {"\u5f20\u9884\u89c8"}</span></div><button type="button" onClick={() => setShowDetails((value) => !value)}>{showDetails ? "\u6536\u8d77" : "\u8be6\u60c5"}</button></div> : null}
-      {job?.agentPlan ? <div className={`agent-card ${job.agentDecision?.autoRepaired ? "repaired" : "checked"}`}><b>{job.agentPlan.name || "AI PPT Agent"}</b><p>{job.agentDecision?.intent || "PPT ??"} ? {job.agentDecision?.autoRepaired ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e"}</p><div>{(job.agentSteps || []).slice(-5).map((step) => <span className={step.status || "done"} key={`${step.id}-${step.at}`}><strong>{step.label}</strong>{step.summary || step.status}</span>)}</div>{job.agentDecision?.finalAssessment?.hints?.length ? <small>{job.agentDecision.finalAssessment.hints.join("?")}</small> : null}</div> : null}
+      {job ? <div className={`status-summary ${statusTone}`}><div><b>{statusTone === "pass" ? "\u5df2\u901a\u8fc7" : statusTone === "warn" ? "\u9700\u68c0\u67e5" : "\u9700\u4fee\u590d"}</b><span>{job.deck?.slides?.length || 0} {"\u9875"} / {"\u8def\u7531"} {Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : "-"} / {(job.previewImages || []).filter(Boolean).length} {"\u5f20\u9884\u89c8"}</span></div><button type="button" onClick={() => setShowDetails((value) => !value)}>{showDetails ? "\u6536\u8d77" : "\u8be6\u60c5"}</button></div> : null}
+      <EditReadinessGate readiness={job?.editReadiness} localImage={localImage} onApplyImageSupplement={onApplyImageSupplement} onApplyLocalImageSupplement={onApplyLocalImageSupplement} onRescanLocalImageQa={onRescanLocalImageQa} />
+      {job?.agentPlan ? <div className={`agent-card ${job.agentDecision?.autoRepaired ? "repaired" : "checked"}`}><b>{job.agentPlan.name || "AI PPT Agent"}</b><p>{job.agentDecision?.intent || "PPT 生成"} / {job.agentDecision?.autoRepaired ? "已自动修复" : "已完成检查"}</p><div>{(job.agentSteps || []).slice(-5).map((step) => <span className={step.status || "done"} key={`${step.id}-${step.at}`}><strong>{step.label}</strong>{step.summary || step.status}</span>)}</div>{job.agentDecision?.finalAssessment?.hints?.length ? <small>{job.agentDecision.finalAssessment.hints.join(" / ")}</small> : null}</div> : null}
       {job?.agentPlan ? <AgentWorkRecord job={job} files={files} /> : null}
       {job?.agentReviews?.length ? <AgentReviewCard reviews={job.agentReviews} visualFixes={job.visualFixes || []} /> : null}
       <ImageSupplementPlanCard plan={job?.imageSupplementPlan} onApply={onApplyImageSupplement} onApplyLocal={onApplyLocalImageSupplement} localImage={localImage} />
       {showDetails ? <ul className="status-list"><li><b>{fileIds.length}</b><span>{"\u4e0a\u4f20\u6587\u4ef6"}</span></li><li><b>{job?.deck?.slides?.length || 0}</b><span>{"\u5df2\u751f\u6210\u9875"}</span></li><li><b>{job?.aiUsed ? "AI" : "\u672c\u5730"}</b><span>{"\u751f\u6210\u6a21\u5f0f"}</span></li></ul> : null}
       <div className={`health-card ${connection?.state || "checking"}`}><span className={connection?.state === "offline" ? "state-dot error" : connection?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{connection?.state === "offline" ? "\u672c\u5730\u79bb\u7ebf" : connection?.state === "online" ? "\u672c\u5730\u5728\u7ebf" : "\u68c0\u67e5\u4e2d"}</b><p>{connection?.message || "\u6b63\u5728\u68c0\u67e5..."}</p></div></div>
       <div className={`health-card ${localImage?.state || "checking"}`}><span className={localImage?.state === "offline" ? "state-dot error" : localImage?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{localImage?.state === "online" ? "\u751f\u56fe\u5728\u7ebf" : localImage?.state === "offline" ? "\u751f\u56fe\u79bb\u7ebf" : "\u68c0\u67e5\u751f\u56fe"}</b><p>{localImage?.message || "\u68c0\u67e5 Z-Image / ComfyUI..."}</p></div></div>
-      {routeSummary ? <div className="route-card"><b>{"\u667a\u80fd\u8def\u7531"}</b><p>{routeSummary.deckType || "\u672a\u77e5"} ? {routeSummary.recommendedTheme || "\u672a\u8bbe\u7f6e\u98ce\u683c"}</p><div><span>{routeSummary.targetSlides || job?.deck?.slides?.length || 0} {"\u9875"}</span><span>{routeSummary.layoutSequence?.length || 0} {"\u4e2a\u7248\u5f0f"}</span><span>{routeSummary.imageStrategy?.hasImageSlides ? "\u542b\u56fe\u7247\u9875" : "\u65e0\u56fe\u7247\u9875"}</span><span>{routeSummary.riskStrategy?.includeRiskChecklist ? "\u542b\u98ce\u9669\u9875" : "\u65e0\u98ce\u9669\u9875"}</span></div></div> : null}
+      {routeSummary ? <div className="route-card"><b>{"\u667a\u80fd\u8def\u7531"}</b><p>{routeSummary.deckType || "\u672a\u77e5"} / {routeSummary.recommendedTheme || "\u672a\u8bbe\u7f6e\u98ce\u683c"}</p><div><span>{routeSummary.targetSlides || job?.deck?.slides?.length || 0} {"\u9875"}</span><span>{routeSummary.layoutSequence?.length || 0} {"\u4e2a\u7248\u5f0f"}</span><span>{routeSummary.imageStrategy?.hasImageSlides ? "\u542b\u56fe\u7247\u9875" : "\u65e0\u56fe\u7247\u9875"}</span><span>{routeSummary.riskStrategy?.includeRiskChecklist ? "\u542b\u98ce\u9669\u9875" : "\u65e0\u98ce\u9669\u9875"}</span></div></div> : null}
       <StyleProofConfirmationCard confirmation={job?.input?.styleProofConfirmation} />
+      <PipelineCard pipeline={job?.pipeline} />
+      <VisualTargetCard target={job?.visualTarget} onGenerateSample={onGenerateVisualTargetSample} localImage={localImage} />
+      <SceneGraphCard graph={job?.sceneGraph} qa={job?.sceneGraphQa} />
+      <VisualCompareCard compare={job?.visualCompare} />
+      <SceneGraphRepairCard repair={job?.sceneGraphRepair} />
+      <EditableRebuildCard plan={job?.editableRebuildPlan} />
       <SourceRecognitionCard report={sourceReport} />
       <AestheticDiagnosisCard diagnosis={aestheticDiagnosis} />
       <AestheticPlanCard plan={job?.aestheticPlan} />
@@ -2062,95 +2911,81 @@ function ExportPanel({ job }) {
   return <div className="side-section"><h2>{"\u5bfc\u51fa"}</h2><DownloadLinks job={job} compact />{!job ? <p className="empty">{"\u751f\u6210\u540e\u53ef\u4e0b\u8f7d\u6587\u4ef6"}</p> : null}</div>;
 }
 
-function SettingsPanel({ config, busy, status, models, themes = [], styleGroups = [], styleReferences = [], onChange, onSave, onTest, onDetectModels, onCreateStyleGroup, onUpdateStyleReference, onUploadStyleReference, onDeleteStyleReference }) {
+function SettingsPanel({ config, busy, status, models, styleReferences = [], onChange, onSave, onTest, onDetectModels, onUploadStyleReference, onDeleteStyleReference }) {
   const [styleName, setStyleName] = useState("");
   const [styleTone, setStyleTone] = useState("");
-  const [groupName, setGroupName] = useState("");
-  const [groupTone, setGroupTone] = useState("");
-  const builtinThemes = themes.length ? themes : FALLBACK_THEMES;
-  const themeOptions = [...builtinThemes, ...styleGroups];
-  const defaultThemeName = themeOptions[0]?.name || "";
-  const [styleTheme, setStyleTheme] = useState(defaultThemeName);
-  useEffect(() => {
-    if (defaultThemeName && !themeOptions.some((theme) => theme.name === styleTheme)) setStyleTheme(defaultThemeName);
-  }, [defaultThemeName, styleTheme, themeOptions]);
-  const groupedStyleReferences = themeOptions.map((theme) => ({ theme, references: styleReferences.filter((item) => (item.themeName || defaultThemeName) === theme.name) }));
-  const selectedStyleReferences = groupedStyleReferences.find(({ theme }) => theme.name === styleTheme)?.references || [];
-  const orphanStyleReferences = styleReferences.filter((item) => item.themeName && !themeOptions.some((theme) => theme.name === item.themeName));
   function update(name, value) { onChange((current) => ({ ...current, [name]: value })); }
   function handleStyleUpload(event) {
     const files = event.target.files;
     if (files?.length) {
-      const theme = themeOptions.find((item) => item.name === styleTheme) || themeOptions[0] || {};
-      onUploadStyleReference(files, { name: styleName, tone: styleTone, themeName: theme.name || styleTheme, themeSlug: theme.slug || "" });
+      onUploadStyleReference(files, { name: styleName, tone: styleTone, themeName: "", themeSlug: "" });
       setStyleName("");
       setStyleTone("");
     }
     event.target.value = "";
   }
-  async function handleCreateGroup() {
-    const group = await onCreateStyleGroup?.({ name: groupName, tone: groupTone, bestFor: groupTone });
-    if (group?.name) { setStyleTheme(group.name); setGroupName(""); setGroupTone(""); }
-  }
   return (
     <div className="side-section settings-panel">
-      <h2>API {"\u8bbe\u7f6e"}</h2>
-      <div className={`api-state ${config.hasApiKey ? "ready" : "missing"}`}><span className={config.hasApiKey ? "state-dot active" : "state-dot error"} /><div><b>{config.hasApiKey ? "AI \u5df2\u914d\u7f6e" : "\u672a\u914d\u7f6e API Key"}</b><p>{config.hasApiKey ? `\u5f53\u524d Key: ${config.maskedApiKey || "-"}` : "\u672a\u914d\u7f6e\uff0c\u5c06\u4f7f\u7528\u672c\u5730\u6a21\u677f\u751f\u6210"}</p></div></div>
+      <h2>{"API \u8bbe\u7f6e"}</h2>
+      <div className={"api-state " + (config.hasApiKey ? "ready" : "missing")}><span className={config.hasApiKey ? "state-dot active" : "state-dot error"} /><div><b>{config.hasApiKey ? "AI \u5df2\u914d\u7f6e" : "\u672a\u914d\u7f6e API Key"}</b><p>{config.hasApiKey ? "\u5f53\u524d Key: " + (config.maskedApiKey || "-") : "\u672a\u914d\u7f6e\uff0c\u5c06\u4f7f\u7528\u672c\u5730\u6a21\u677f\u751f\u6210"}</p></div></div>
       <Field label="OpenAI API Key"><input type="password" value={config.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={config.hasApiKey ? "\u7559\u7a7a\u5219\u4fdd\u7559\u5df2\u4fdd\u5b58\u7684 Key" : "sk-..."} autoComplete="off" /></Field>
       <Field label="Base URL"><input value={config.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.openai.com/v1" /></Field>
       <Field label="Model"><select value={config.model || ""} onChange={(event) => update("model", event.target.value)}>{models?.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value={config.model || "gpt-4.1-mini"}>{config.model || "gpt-4.1-mini"}</option>}</select></Field>
       <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>{"\u4fdd\u5b58\u914d\u7f6e"}</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>{"\u6d4b\u8bd5\u8fde\u63a5"}</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>{"\u68c0\u6d4b\u6a21\u578b"}</button></div>
       {status ? <div className="settings-status">{status}</div> : null}
       <div className="settings-divider" />
-      <h2>{"\u98ce\u683c\u5e93\u5206\u7ec4"}</h2>
-      <p className="settings-note">{"\u5148\u65b0\u5efa\u4e00\u4e2a\u98ce\u683c\u7ec4\uff0c\u518d\u628a\u53c2\u8003\u56fe\u5f52\u5230\u8fd9\u4e2a\u7ec4\u3002"}</p>
-      <Field label="\u5206\u7ec4\u540d\u79f0"><input value={groupName} onChange={(event) => setGroupName(event.target.value)} placeholder="\u4f8b\u5982\uff1a\u4e1c\u65b9\u81ea\u7136\u98ce" /></Field>
-      <Field label="\u8c03\u6027\u8bf4\u660e"><textarea className="compact-textarea" value={groupTone} onChange={(event) => setGroupTone(event.target.value)} placeholder="\u4f8b\u5982\uff1a\u7559\u767d\u3001\u81ea\u7136\u7eb9\u7406\u3001\u4f4e\u9971\u548c\u3002" /></Field>
-      <button className="btn ghost" type="button" onClick={handleCreateGroup} disabled={busy || !groupName.trim()}>{"\u65b0\u589e\u98ce\u683c\u7ec4"}</button>
-      {styleGroups.length ? <div className="custom-style-groups">{styleGroups.map((group) => <button type="button" key={group.id || group.slug || group.name} onClick={() => setStyleTheme(group.name)}>{group.name}</button>)}</div> : null}
-      <div className="settings-divider" />
-      <Field label="\u5f53\u524d\u98ce\u683c\u7ec4"><select value={styleTheme} onChange={(event) => setStyleTheme(event.target.value)}>{themeOptions.map((theme) => <option key={theme.slug || theme.name} value={theme.name}>{theme.name}</option>)}</select></Field>
       <h2>{"\u98ce\u683c\u53c2\u8003\u5e93"}</h2>
-      <p className="settings-note">{"\u4e0a\u4f20\u98ce\u683c\u53c2\u8003\u56fe\uff0c\u540e\u7eed\u751f\u6210 PPT 会\u53c2\u8003\u8272\u5f69\u3001\u7559\u767d\u3001\u8d28\u611f\u548c\u753b\u9762\u5bc6\u5ea6\u3002"}</p>
-      <Field label="\u53c2\u8003\u540d\u79f0"><input value={styleName} onChange={(event) => setStyleName(event.target.value)} placeholder="\u4f8b\u5982\uff1a\u9ad8\u7aef\u793c\u76d2\u753b\u518c" /></Field>
-      <Field label="\u98ce\u683c\u8bf4\u660e"><textarea className="compact-textarea" value={styleTone} onChange={(event) => setStyleTone(event.target.value)} placeholder="\u4f8b\u5982\uff1a\u4f4e\u9971\u548c\u3001\u514b\u5236\u3001\u6807\u9898\u5927\u7559\u767d" /></Field>
-      <label className="style-upload"><input type="file" accept="image/*" multiple onChange={handleStyleUpload} disabled={busy} /><span>{"\u6dfb\u52a0\u98ce\u683c\u53c2\u8003\u56fe"}</span></label>
-      <div className="style-current-gallery"><div className="style-current-gallery-head"><b>{"\u5f53\u524d\u7ec4\u56fe\u7247"}</b><span>{selectedStyleReferences.length} {"\u5f20"}</span></div>{selectedStyleReferences.length ? <div className="style-thumb-grid">{selectedStyleReferences.map((item) => <img key={item.id} src={item.imageUrl} alt={item.name || item.originalName || "\u53c2\u8003\u56fe"} />)}</div> : <p className="empty">{"\u8fd9\u4e2a\u7ec4\u8fd8\u6ca1\u6709\u53c2\u8003\u56fe"}</p>}</div>
+      <p className="settings-note">{"\u4e0a\u4f20\u4e00\u7ec4\u53c2\u8003\u56fe\uff0c\u7cfb\u7edf\u4f1a\u628a\u5b83\u4eec\u4f5c\u4e3a\u6574\u4f53\u8c03\u6027\u8f93\u5165\uff1a\u8272\u5f69\u3001\u7559\u767d\u3001\u8d28\u611f\u3001\u56fe\u7247\u6bd4\u4f8b\u3001\u6587\u5b57\u5bc6\u5ea6\u548c\u6392\u7248\u8282\u594f\u90fd\u4f1a\u53c2\u4e0e\u540e\u7eed PPT \u751f\u6210\u3002"}</p>
+      <Field label={"\u53c2\u8003\u540d\u79f0"}><input value={styleName} onChange={(event) => setStyleName(event.target.value)} placeholder={"\u4f8b\u5982\uff1a\u4e1c\u65b9\u81ea\u7136\u98ce\u793c\u76d2\u53c2\u8003"} /></Field>
+      <Field label={"\u8c03\u6027\u8bf4\u660e"}><textarea className="compact-textarea" value={styleTone} onChange={(event) => setStyleTone(event.target.value)} placeholder={"\u4f8b\u5982\uff1a\u7559\u767d\u591a\u3001\u4f4e\u9971\u548c\u3001\u7eb8\u611f\u7eb9\u7406\u3001\u6807\u9898\u514b\u5236\u3002"} /></Field>
+      <label className="style-upload"><input type="file" accept="image/*" multiple onChange={handleStyleUpload} disabled={busy} /><span>{"\u4e0a\u4f20\u98ce\u683c\u53c2\u8003\u56fe"}</span></label>
+      <div className="style-current-gallery"><div className="style-current-gallery-head"><b>{"\u5df2\u4e0a\u4f20\u53c2\u8003\u56fe"}</b><span>{styleReferences.length} {"\u5f20"}</span></div>{styleReferences.length ? <div className="style-thumb-grid">{styleReferences.slice(0, 12).map((item) => <img key={item.id} src={item.imageUrl} alt={item.name || item.originalName || "\u53c2\u8003\u56fe"} />)}</div> : <p className="empty">{"\u8fd8\u6ca1\u6709\u98ce\u683c\u53c2\u8003\u56fe"}</p>}</div>
       <div className="style-reference-list">
-        {groupedStyleReferences.map(({ theme, references }) => <div className={`style-reference-group ${theme.name === styleTheme ? "active" : ""}`} key={theme.slug || theme.name}><button type="button" className="style-reference-group-head" onClick={() => setStyleTheme(theme.name)}><span>{theme.name}</span><small>{references.length} {"\u5f20"}</small></button>{references.length ? references.map((item) => <StyleReferenceItem key={item.id} item={item} busy={busy} themeOptions={themeOptions} onUpdate={onUpdateStyleReference} onDelete={onDeleteStyleReference} />) : <p className="empty">{"\u6682\u65e0\u53c2\u8003\u56fe"}</p>}</div>)}
-        {orphanStyleReferences.length ? <div className="style-reference-group"><div className="style-reference-group-head"><span>{"\u672a\u5206\u7ec4"}</span><small>{orphanStyleReferences.length} {"\u5f20"}</small></div>{orphanStyleReferences.map((item) => <StyleReferenceItem key={item.id} item={item} busy={busy} themeOptions={themeOptions} onUpdate={onUpdateStyleReference} onDelete={onDeleteStyleReference} />)}</div> : null}
-        {!styleReferences.length ? <p className="empty">{"\u6682\u65e0\u98ce\u683c\u53c2\u8003"}</p> : null}
+        {styleReferences.length ? styleReferences.map((item) => <StyleReferenceItem key={item.id} item={item} busy={busy} onDelete={onDeleteStyleReference} />) : <p className="empty">{"\u6682\u65e0\u98ce\u683c\u53c2\u8003"}</p>}
       </div>
     </div>
   );
 }
 
-function StyleReferenceItem({ item, busy, themeOptions = [], onUpdate, onDelete }) {
-  function moveToTheme(themeName) {
-    const theme = themeOptions.find((option) => option.name === themeName) || {};
-    onUpdate?.(item.id, { themeName: theme.name || themeName, themeSlug: theme.slug || "" });
-  }
+function StyleReferenceItem({ item, busy, onDelete }) {
   return (
     <div className="style-reference-item">
-      {item.imageUrl ? <img src={item.imageUrl} alt={item.name || item.originalName} /> : <span className="style-reference-fallback">IMG</span>}
-      <div><b>{item.name || item.originalName || "\u672a\u8bbe\u7f6e"}</b><p>{item.tone || "\u672a\u8bbe\u7f6e"}</p>{item.styleFingerprint?.prompt ? <small className="style-fingerprint">{item.styleFingerprint.prompt}</small> : null}<select value={item.themeName || ""} onChange={(event) => moveToTheme(event.target.value)} disabled={busy}>{themeOptions.map((theme) => <option key={theme.slug || theme.id || theme.name} value={theme.name}>{theme.name}</option>)}</select></div>
-      <button type="button" onClick={() => onDelete(item.id)} disabled={busy}>??</button>
+      {item.imageUrl ? <img src={item.imageUrl} alt={item.name || item.originalName || "\u53c2\u8003\u56fe"} /> : <span className="style-reference-fallback">IMG</span>}
+      <div><b>{item.name || item.originalName || "\u672a\u547d\u540d\u53c2\u8003"}</b><p>{item.tone || "\u53c2\u8003\u8272\u5f69\u3001\u7559\u767d\u3001\u8d28\u611f\u548c\u7248\u5f0f\u8282\u594f\u3002"}</p>{item.styleFingerprint?.prompt ? <small className="style-fingerprint">{item.styleFingerprint.prompt}</small> : null}</div>
+      <button type="button" onClick={() => onDelete(item.id)} disabled={busy}>{"\u5220\u9664"}</button>
     </div>
   );
 }
 
 function DownloadLinks({ job, compact = false }) {
   if (!job) return null;
+  const blocked = isJobBlockedForFinal(job);
   const links = [];
-  if (job.exports?.pptx) links.push(["PPTX", job.exports.pptx, job.exportMeta?.pptx?.label]);
+  if (job.exports?.editablePptx || job.exports?.pptx) links.push([blocked ? "editable-draft.pptx" : "editable-final.pptx", job.exports.editablePptx || job.exports.pptx, job.exportMeta?.editablePptx?.label || job.exportMeta?.pptx?.label]);
+  if (job.exports?.visualTargetPptx) links.push(["visual-target.pptx", job.exports.visualTargetPptx, job.exportMeta?.visualTargetPptx?.label]);
   if (job.exports?.pdf) links.push(["PDF", job.exports.pdf, job.exportMeta?.pdf?.label]);
   (job.exports?.png || []).forEach((url, index) => links.push([`PNG ${index + 1}`, url, job.exportMeta?.png?.[index]?.label]));
-  if (links.length === 0) return <p className="empty">{"\u6682\u65e0\u5bfc\u51fa\u6587\u4ef6"}</p>;
-  return <div className={compact ? "download-links compact" : "download-links"}>{links.map(([label, url, size]) => <a key={`${label}-${url}`} href={url} target="_blank" rel="noreferrer">{label}{size ? <small>{size}</small> : null}</a>)}</div>;
+  if (links.length === 0) return <p className="empty">暂无导出文件</p>;
+  return (
+    <div className={compact ? "download-links compact" : "download-links"}>
+      {blocked ? <span className="download-warning">QA blocked: 当前 PPTX 是可编辑草稿，不能作为最终成品交付。</span> : null}
+      {links.map(([label, url, size]) => <a key={`${label}-${url}`} href={url} target="_blank" rel="noreferrer">{label}{size ? <small>{size}</small> : null}</a>)}
+    </div>
+  );
 }
 
 function SectionCard({ title, desc, children, className = "" }) {
   return <section className={`section-card ${className}`.trim()}>{(title || desc) ? <header>{title ? <h2>{title}</h2> : null}{desc ? <p>{desc}</p> : null}</header> : null}{children}</section>;
+}
+
+function StageEmptyState({ title, body, action, onAction }) {
+  return (
+    <div className="stage-empty-state">
+      <b>{title}</b>
+      <span>{body}</span>
+      {action ? <button className="btn primary" type="button" onClick={onAction}>{action}</button> : null}
+    </div>
+  );
 }
 
 function Field({ label, children }) { return <div className="field"><label>{label}</label>{children}</div>; }
@@ -2158,31 +2993,61 @@ function Metric({ label, value }) { return <div className="metric"><b>{value}</b
 
 function GenerationProgress({ progress }) {
   const value = Math.max(0, Math.min(100, progress?.value || 0));
-  return <div className="generation-progress"><div><b>{progress?.mode === "optimize" ? "正在优化旧 PPT" : "正在生成 PPT"}</b><span>{progress?.label || "正在处理，请稍等..."}</span></div><strong>{value}%</strong><em><i style={{ width: `${value}%` }} /></em></div>;
+  const title = progress?.mode === "style-preview" ? "正在生成主视觉方向" : progress?.mode === "optimize" ? "正在优化旧 PPT" : "正在生成 PPT";
+  return <div className="generation-progress"><div><b>{title}</b><span>{progress?.label || "正在处理，请稍等..."}</span></div><strong>{value}%</strong><em><i style={{ width: `${value}%` }} /></em></div>;
 }
 
-function StylePreviewGate({ busy, confirmed, job, onConfirm, onCreate, onReset }) {
+function StylePreviewGate({ busy, confirmed, job, progress, onConfirm, onCreate, onReset, canCreate = true }) {
   const images = job?.previewImages || [];
   const latestReview = Array.isArray(job?.agentReviews) ? job.agentReviews.at(-1) : null;
   const latestCloudReview = Array.isArray(job?.cloudReviews) ? job.cloudReviews.at(-1) : latestReview?.cloudVisualReview || null;
   const reviewStatus = latestReview?.status || latestCloudReview?.status || "";
   const canConfirm = Boolean(job && !busy && reviewStatus !== "block");
+  const criteria = ["图片必须是主角", "标题层级要强", "不像普通商务套壳", "最终仍重建为可编辑对象"];
   return (
     <div className={`style-proof-card ${confirmed ? "confirmed" : ""}`}>
       <div className="style-proof-head">
         <div>
-          <b>风格样稿确认</b>
-          <span>{job ? `已生成 ${images.length || 0} 张样稿预览，并已完成自动质检。` : "先生成 3-4 页最终样式，人工确认后再输出整套 PPT。"}</span>
+          <b>主视觉方向审阅</b>
+          <span>{job ? `已生成 ${images.length || 0} 张视觉方向图。这些只是 visual target，不是最终可编辑 PPT。` : "先生成 3-4 页主视觉方向图，用来判断气质、构图和图片权重；不满意就重做方向，不要进入最终生成。"}</span>
         </div>
         <div className="button-row tight">
-          <button className="btn ghost" type="button" onClick={onCreate} disabled={busy}>{busy ? "正在生成样稿" : job ? "重新生成样稿" : "生成风格样稿"}</button>
-          <button className="btn primary" type="button" onClick={onConfirm} disabled={!canConfirm}>{confirmed ? "风格已确认" : "确认这个风格"}</button>
-          {job ? <button className="btn ghost" type="button" onClick={onReset} disabled={busy}>取消确认</button> : null}
+          <button className="btn ghost" type="button" onClick={onCreate} disabled={busy || !canCreate}>{busy ? "正在生成方向图" : job ? "重做视觉方向" : canCreate ? "生成主视觉方向" : "先确认大纲和设计方向"}</button>
+          {job && !busy ? <button className="btn primary" type="button" onClick={onConfirm} disabled={!canConfirm}>{confirmed ? "方向已采用" : "采用此方向"}</button> : null}
+          {job ? <button className="btn ghost" type="button" onClick={onReset} disabled={busy}>撤销采用</button> : null}
         </div>
       </div>
-      {latestReview ? <div className={`style-proof-qa ${latestReview.status || "pass"}`}><strong>样稿自动质检：{latestReview.status === "block" ? "需处理" : latestReview.status === "warn" ? "需确认" : "通过"}</strong><span>{latestReview.nextGate === "human-style-confirmation" ? "质检通过后进入人工风格确认。" : "已记录质检结果。"}</span>{latestCloudReview ? <small>{latestCloudReview.used ? (latestCloudReview.summary || latestCloudReview.status) : `云端视觉复审未完成：${latestCloudReview.reason || "not available"}`}</small> : null}<div>{(latestReview.agents || []).slice(0, 5).map((agent) => <em className={agent.status || "pass"} key={agent.id || agent.name}>{agent.name}：{agent.status === "block" ? "需处理" : agent.status === "warn" ? "需确认" : "通过"}</em>)}</div></div> : null}
-      {images.length ? <div className="style-proof-grid">{images.slice(0, 4).map((url, index) => <img key={`${url}-${index}`} src={url} alt={`风格样稿 ${index + 1}`} />)}</div> : null}
-      {job?.exports?.pptx ? <a className="style-proof-link" href={job.exports.pptx} target="_blank" rel="noreferrer">打开样稿 PPTX</a> : null}
+      <div className="style-proof-criteria">
+        {criteria.map((item) => <span key={item}>{item}</span>)}
+      </div>
+      {progress?.active ? <StyleProofProgress progress={progress} /> : null}
+      {latestReview ? <div className={`style-proof-qa ${latestReview.status || "pass"}`}><strong>方向自动质检：{latestReview.status === "block" ? "需处理" : latestReview.status === "warn" ? "需人工判断" : "通过"}</strong><span>{latestReview.nextGate === "human-style-confirmation" ? "只代表可进入人工审阅，不代表最终 PPT 已完成。" : "已记录质检结果。"}</span>{latestCloudReview ? <small>{latestCloudReview.used ? (latestCloudReview.summary || latestCloudReview.status) : `云端视觉复审未完成：${latestCloudReview.reason || "not available"}`}</small> : null}<div>{(latestReview.agents || []).slice(0, 5).map((agent) => <em className={agent.status || "pass"} key={agent.id || agent.name}>{agent.name}：{agent.status === "block" ? "需处理" : agent.status === "warn" ? "需确认" : "通过"}</em>)}</div></div> : null}
+      {images.length ? <div className="style-proof-grid">{images.slice(0, 4).map((url, index) => <figure key={`${url}-${index}`}><img src={url} alt={`主视觉方向 ${index + 1}`} /><figcaption>{index === 0 ? "方向基准" : `页面气质 ${index + 1}`}</figcaption></figure>)}</div> : null}
+      {job?.exports?.pptx ? <a className="style-proof-link" href={job.exports.pptx} target="_blank" rel="noreferrer">打开 visual-target.pptx 中间稿</a> : null}
+    </div>
+  );
+}
+
+function StyleProofProgress({ progress }) {
+  const value = Math.max(0, Math.min(100, progress?.value || 0));
+  const stages = [
+    { at: 10, label: "资料" },
+    { at: 35, label: "路由" },
+    { at: 60, label: "方向" },
+    { at: 82, label: "质检" },
+    { at: 95, label: "预览" }
+  ];
+  return (
+    <div className="style-proof-progress">
+      <div className="style-proof-progress-head">
+        <b>视觉方向生成进度</b>
+        <strong>{value}%</strong>
+      </div>
+      <span>{progress?.label || generationProgressLabel(value, "style-preview")}</span>
+      <em><i style={{ width: `${value}%` }} /></em>
+      <div className="style-proof-progress-steps">
+        {stages.map((stage) => <small className={value >= stage.at ? "done" : ""} key={stage.label}>{stage.label}</small>)}
+      </div>
     </div>
   );
 }
@@ -2194,37 +3059,37 @@ function toggle(list, item) {
 function toBulletList(value) {
   if (Array.isArray(value)) return value;
   if (!value) return [];
-  return String(value).split(/[\r\n;；。]+/).map((item) => item.trim()).filter(Boolean);
+  return String(value).split(/[\r\n;,，；、]+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function normalizePreviewPrices(slide = {}) {
   const data = toBulletList(slide.dataPoints);
   const source = data.length ? data : toBulletList(slide.bullets);
-  const tiers = ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"];
+  const tiers = ["基础档", "推荐档", "升级档", "高配档", "定制档", "补充项"];
   const entries = source.slice(0, 6).map((item, index) => {
     const text = String(item || "");
     const price = text.match(/\d+(?:\.\d+)?/)?.[0] || String(index + 1);
-    const label = text.replace(price, "").replace(/[?,??;\-]/g, " ").trim() || tiers[index] || ("? " + (index + 1) + " ?");
+    const label = text.replace(price, "").replace(/[，、；;\-]/g, " ").trim() || tiers[index] || `第 ${index + 1} 档`;
     return {
-      tier: tiers[index] || ("? " + (index + 1) + " ?"),
+      tier: tiers[index] || `第 ${index + 1} 档`,
       price,
       label,
-      note: index === 0 ? "\u672a\u8bbe\u7f6e" : index === source.length - 1 ? "\u672a\u8bbe\u7f6e" : "\u672a\u8bbe\u7f6e",
-      accented: /recommended|upgrade|premium/i.test(text) || index === 1
+      note: index === 0 ? "入门预算" : index === source.length - 1 ? "需复核" : "可推荐",
+      accented: /recommended|upgrade|premium|推荐|升级|高配/i.test(text) || index === 1
     };
   });
-  return entries.length ? entries : [{ tier: "\u672a\u8bbe\u7f6e", price: "01", label: slide.title || "\u672a\u8bbe\u7f6e", note: "\u672a\u8bbe\u7f6e", accented: true }];
+  return entries.length ? entries : [{ tier: "推荐档", price: "01", label: slide.title || "待补充", note: "需复核", accented: true }];
 }
 
 function buildPreviewProductFacts(slide = {}) {
   const text = [slide.title, slide.subtitle, ...toBulletList(slide.bullets), ...toBulletList(slide.dataPoints)].join(" ");
-  const price = text.match(/\d+(?:\.\d+)?/)?.[0] || "\u672a\u8bbe\u7f6e";
-  const spec = text.match(/\d{2,4}\s*[xX*]\s*\d{2,4}(?:\s*[xX*]\s*\d{2,4})?\s*(?:mm|cm)?/i)?.[0] || "\u672a\u8bbe\u7f6e";
-  const scene = toBulletList(slide.bullets).find((item) => /scene|client|gift|benefit/i.test(item)) || slide.subtitle || "按客户预算匹配";
+  const price = text.match(/\d+(?:\.\d+)?/)?.[0] || "待确认";
+  const spec = text.match(/\d{2,4}\s*[xX*]\s*\d{2,4}(?:\s*[xX*]\s*\d{2,4})?\s*(?:mm|cm)?/i)?.[0] || "待确认";
+  const scene = toBulletList(slide.bullets).find((item) => /scene|client|gift|benefit|客户|礼品|福利|场景/i.test(item)) || slide.subtitle || "按客户预算匹配";
   return [
-    { label: "??", value: price },
-    { label: "??", value: spec },
-    { label: "??", value: String(scene).slice(0, 28) }
+    { label: "价格", value: price },
+    { label: "规格", value: spec },
+    { label: "场景", value: String(scene).slice(0, 28) }
   ];
 }
 function makeSlideDraft(slide = {}) {
@@ -2233,7 +3098,7 @@ function makeSlideDraft(slide = {}) {
     title: slide?.title || "",
     subtitle: slide?.subtitle || "",
     storyRole: slide?.storyRole || "",
-    contentSource: slide?.contentSource || "\u672a\u8bbe\u7f6e",
+    contentSource: slide?.contentSource || "用户输入",
     bullets: toBulletList(slide?.bullets).join("\n"),
     speakerNotes: slide?.speakerNotes || "",
     visualIntent: slide?.visualIntent || "",
@@ -2265,7 +3130,7 @@ function splitDraftLines(value) {
 }
 
 function getSlideVisualImage(job, slide = {}, slideIndex = 0) {
-  const images = (job?.files || []).filter((file) => file.uploadUrl);
+  const images = (job?.files || []).filter((file) => file.uploadUrl && file.materialRole !== "visual-target-reference");
   if (!images.length) return null;
   if (images.length === 1) return images[0];
   const slideText = normalizeMatchText([slide.title, slide.subtitle, slide.visualIntent, ...toBulletList(slide.bullets), ...toBulletList(slide.imageSlots)].join(" "));
@@ -2278,6 +3143,38 @@ function getSlideVisualImage(job, slide = {}, slideIndex = 0) {
   });
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
   return scored[0]?.image || images[slideIndex % images.length];
+}
+
+function getSlideMaterialImages(job, slide = {}, slideIndex = 0) {
+  const images = (job?.files || []).filter((file) => file.uploadUrl && file.materialRole !== "visual-target-reference");
+  if (!images.length) return [];
+  const slots = toBulletList(slide.imageSlots).map(normalizeMatchText).filter(Boolean);
+  const picked = [];
+  for (const slot of slots) {
+    const match = images.find((image) => normalizeMatchText(image.originalName || "").includes(slot) || slot.includes(normalizeMatchText(image.originalName || "")));
+    if (match && !picked.some((item) => item.id === match.id)) picked.push(match);
+  }
+  if (picked.length) return picked.slice(0, 4);
+  const visualImage = getSlideVisualImage(job, slide, slideIndex);
+  if (visualImage && ["cover", "visual", "product-detail", "bundle"].includes(slide.layout)) return [visualImage];
+  return [];
+}
+
+function buildAssetBoxes(layout = "", count = 1) {
+  if (layout === "cover") return [{ x: 5, y: 8, w: 48, h: 78 }];
+  if (layout === "product-detail" || layout === "visual") return [{ x: 6, y: 10, w: 42, h: 72 }];
+  if (layout === "bundle" || count >= 3) {
+    return [
+      { x: 8, y: 18, w: 25, h: 48 },
+      { x: 37, y: 18, w: 25, h: 48 },
+      { x: 66, y: 18, w: 25, h: 48 },
+      { x: 37, y: 68, w: 25, h: 20 }
+    ];
+  }
+  return [
+    { x: 58, y: 18, w: 34, h: 56 },
+    { x: 58, y: 76, w: 34, h: 16 }
+  ];
 }
 
 function scoreImageLayout(name, layout) {
@@ -2299,69 +3196,91 @@ function getCompletion({ form, fileIds, job }) {
 }
 
 function generationProgressLabel(value = 0, mode = "") {
-  if (mode === "optimize") {
-    if (value < 35) return "\u672a\u8bbe\u7f6e";
-    if (value < 62) return "\u672a\u8bbe\u7f6e";
-    if (value < 82) return "\u672a\u8bbe\u7f6e";
-    return "\u672a\u8bbe\u7f6e";
+  if (mode === "style-preview") {
+    if (value < 30) return "正在读取资料、设计方向和已确认大纲";
+    if (value < 55) return "正在判断方向页和版式路线";
+    if (value < 78) return "正在生成 3-4 页主视觉方向";
+    if (value < 92) return "正在执行自动质检和视觉复审";
+    return "正在打包 visual-target.pptx 和预览图";
   }
-  if (value < 30) return "\u672a\u8bbe\u7f6e";
-  if (value < 55) return "\u672a\u8bbe\u7f6e";
-  if (value < 78) return "\u672a\u8bbe\u7f6e";
-  return "\u672a\u8bbe\u7f6e";
+  if (mode === "optimize") {
+    if (value < 35) return "正在解析旧 PPT 和素材";
+    if (value < 62) return "正在诊断页面并生成重构路线";
+    if (value < 82) return "正在渲染新版 PPTX 和预览图";
+    return "正在执行导出质检";
+  }
+  if (value < 30) return "正在整理资料和生成路线";
+  if (value < 55) return "正在生成页面结构和文案";
+  if (value < 78) return "正在渲染 PPTX";
+  return "正在生成预览图和执行质检";
 }
 
 function getStepState({ activeStep, fileIds, job, formats }) {
+  const blocked = isJobBlockedForFinal(job);
   return Object.fromEntries(STEPS.map((step) => {
     if (step.id === activeStep) return [step.id, UI.current];
     if (step.id === "materials") return [step.id, fileIds.length ? UI.done : UI.pending];
     if (step.id === "outline") return [step.id, job ? UI.done : UI.optional];
-    if (step.id === "generate") return [step.id, job ? UI.done : UI.pending];
-    if (step.id === "preview") return [step.id, job ? UI.editable : UI.waitingGenerate];
-    if (step.id === "export") return [step.id, job && formats.length ? UI.exportable : UI.pending];
+    if (step.id === "generate") return [step.id, job?.visualTarget?.sample?.status === "generated" ? UI.done : job ? UI.optional : UI.pending];
+    if (step.id === "visual-project") return [step.id, job?.visualProject?.status ? (job.visualProject.status === "ready" ? UI.done : job.visualProject.status === "blocked" ? UI.pending : UI.pending) : UI.pending];
+    if (step.id === "visual-qa") return [step.id, blocked ? UI.pending : job?.visualCompare?.score ? UI.done : job ? UI.optional : UI.pending];
+    if (step.id === "preview") return [step.id, job ? (blocked ? UI.pending : UI.editable) : UI.waitingGenerate];
+    if (step.id === "export") return [step.id, job && formats.length && !blocked ? UI.exportable : UI.pending];
     return [step.id, job?.feedback ? UI.done : UI.optional];
   }));
 }
 
+function isJobBlockedForFinal(job) {
+  return Boolean(job?.editReadiness?.ready === false || job?.editReadiness?.status === "blocked" || job?.hybridQa?.status === "block");
+}
+
 function fileExt(name = "") { const ext = name.split(".").pop(); return ext ? ext.slice(0, 4).toUpperCase() : "FILE"; }
-function getEffectiveProjectName(form = {}, files = []) { if (form.projectName?.trim()) return form.projectName.trim(); const fromNotes = String(form.notes || "").match(/[一-龥A-Za-z0-9][一-龥A-Za-z0-9s-]{3,28}/)?.[0]?.trim(); if (fromNotes) return fromNotes; const fromFile = files[0]?.originalName?.replace(/.[^.]+$/, "")?.trim(); return fromFile || "\u672a\u8bbe\u7f6e"; }
+function getEffectiveProjectName(form = {}, files = []) {
+  if (form.projectName?.trim()) return form.projectName.trim();
+  const fromNotes = String(form.notes || "").match(/[\u4e00-\u9fa5A-Za-z0-9][\u4e00-\u9fa5A-Za-z0-9\s-]{3,28}/)?.[0]?.trim();
+  if (fromNotes) return fromNotes;
+  const fromFile = files[0]?.originalName?.replace(/\.[^.]+$/, "")?.trim();
+  return fromFile || "未命名项目";
+}
 
 function inferMaterialTypes(files = []) {
   const types = new Set();
   for (const file of files) {
     const name = String(file?.originalName || file?.path || "").toLowerCase();
-    if (/.(png|jpe?g|webp|gif|svg)$/.test(name)) types.add("\u672a\u8bbe\u7f6e");
-    if (/.(ppt|pptx)$/.test(name)) types.add("? PPT");
-    if (/.(doc|docx|pdf|txt|md)$/.test(name)) types.add("\u672a\u8bbe\u7f6e");
-    if (/.(xls|xlsx|csv)$/.test(name)) types.add("\u672a\u8bbe\u7f6e");
-    if (/price|moq|quote|delivery/.test(name)) types.add("价格 / 交付");
-    if (/brand/.test(name)) types.add("品牌资料");
-    if (/compare|competitor/.test(name)) types.add("竞品资料");
-    if (/product|pack|sku/.test(name)) types.add("产品资料");
+    if (/\.(png|jpe?g|webp|gif|svg)$/.test(name)) types.add("图片素材");
+    if (/\.(ppt|pptx)$/.test(name)) types.add("PPT");
+    if (/\.(doc|docx|pdf|txt|md)$/.test(name)) types.add("文档资料");
+    if (/\.(xls|xlsx|csv)$/.test(name)) types.add("表格资料");
+    if (/price|moq|quote|delivery|价格|报价|交付/.test(name)) types.add("价格 / 交付");
+    if (/brand|logo|品牌/.test(name)) types.add("品牌资料");
+    if (/compare|competitor|竞品/.test(name)) types.add("竞品资料");
+    if (/product|pack|sku|产品|包装|礼盒/.test(name)) types.add("产品资料");
   }
   return [...types];
 }
 
-function formatBytes(value) { if (!value) return "\u672a\u8bbe\u7f6e"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }
-function inputStrengthLabel(value) { if (value === "strong") return "\u672a\u8bbe\u7f6e"; if (value === "weak") return "\u672a\u8bbe\u7f6e"; if (value === "empty") return "\u672a\u8bbe\u7f6e"; return "\u672a\u8bbe\u7f6e"; }
-function uniqueList(items = []) { return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))]; }
+function formatBytes(value) { if (!value) return "-"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }
+function inputStrengthLabel(value) { if (value === "strong") return "资料充分"; if (value === "weak") return "资料偏少"; if (value === "empty") return "无资料"; return "资料待识别"; }function uniqueList(items = []) { return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))]; }
 
 function getOutlineSourceMeta(step = {}) {
   const type = step.sourceType || (step.kind === "source" ? "original-ppt" : "");
-  if (type === "original-ppt") return { label: step.sourceLabel || "\u672a\u8bbe\u7f6e", tone: "source-original", evidence: step.evidence || "" };
-  if (type === "extracted") return { label: step.sourceLabel || "\u672a\u8bbe\u7f6e", tone: "source-extracted", evidence: step.evidence || "" };
-  if (type === "needs-confirmation" || step.needsConfirmation) return { label: step.sourceLabel || "\u672a\u8bbe\u7f6e", tone: "source-confirm", evidence: step.evidence || "" };
-  if (["prices", "products", "productDetail", "visual", "compare", "bundle"].includes(step.kind)) return { label: "\u672a\u8bbe\u7f6e", tone: "source-extracted", evidence: step.evidence || "" };
-  if (["risks", "assumptions"].includes(step.kind)) return { label: "\u672a\u8bbe\u7f6e", tone: "source-confirm", evidence: step.evidence || "" };
-  return { label: step.sourceLabel || "AI ??", tone: "source-inferred", evidence: step.evidence || "" };
+  if (type === "original-ppt") return { label: step.sourceLabel || "来自原 PPT", tone: "source-original", evidence: step.evidence || "" };
+  if (type === "extracted") return { label: step.sourceLabel || "资料抽取", tone: "source-extracted", evidence: step.evidence || "" };
+  if (type === "needs-confirmation" || step.needsConfirmation) return { label: step.sourceLabel || "待确认", tone: "source-confirm", evidence: step.evidence || "" };
+  if (["prices", "products", "productDetail", "visual", "compare", "bundle"].includes(step.kind)) return { label: "资料抽取", tone: "source-extracted", evidence: step.evidence || "" };
+  if (["risks", "assumptions"].includes(step.kind)) return { label: "待确认", tone: "source-confirm", evidence: step.evidence || "" };
+  return { label: step.sourceLabel || "AI 推断", tone: "source-inferred", evidence: step.evidence || "" };
 }
 
 function formatDuration(seconds = 0) { const value = Math.max(0, Number(seconds) || 0); if (value < 60) return `${value}s`; if (value < 3600) return `${Math.floor(value / 60)}m`; return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`; }
-function isMojibake(value = "") { return /[�]|Ã|ç|閿|鐢/.test(String(value)); }
+function isMojibake(value = "") { return /[�]|Ã|ç|閿|鐢|锟|脙|莽|闁|閻/.test(String(value)); }
 function findTemplatePack(packs = [], theme = {}) { return packs.find((pack) => pack.themeName === theme.name || pack.themeSlug === theme.slug); }
+function formatDesignDirectionName(name = "") {
+  return String(name || "").replace(/模板/g, "方向");
+}
 
 function makeOutlineStep(layout = "section") {
-  const map = { cover: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], visual: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], section: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], toc: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], kpi: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], pricing: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], "product-detail": ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], bundle: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], "risk-checklist": ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], compare: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], timeline: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], cards: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], quote: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"], closing: ["\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e", "\u672a\u8bbe\u7f6e"] };
+  const map = { cover: ["新封面", "建立主题和第一视觉印象", "开场"], visual: ["视觉页", "用大图承接核心场景", "视觉证明"], section: ["章节页", "切换叙事段落", "结构转场"], toc: ["目录", "说明整份内容结构", "导航"], kpi: ["关键指标", "突出数字和结果", "数据证明"], pricing: ["报价方案", "呈现价格与配置", "预算决策"], "product-detail": ["单品详情", "展示产品卖点和参数", "产品证明"], bundle: ["组合方案", "说明套餐和搭配逻辑", "组合推荐"], "risk-checklist": ["风险清单", "提示交付、价格和确认风险", "风险控制"], compare: ["对比分析", "比较不同选项", "辅助决策"], timeline: ["时间计划", "说明节点和推进节奏", "执行路径"], cards: ["要点卡片", "拆分关键信息", "卖点归纳"], quote: ["核心话术", "沉淀一句可复述表达", "记忆点"], closing: ["下一步行动", "收束确认事项", "行动收口"] };
   const [title, purpose, storyRole] = map[layout] || map.section;
   return { layout, title, purpose, storyRole, kind: layout, imageSlots: [] };
 }
@@ -2382,14 +3301,19 @@ function isRestorableJob(job = {}) {
   const text = [deck.title, deck.summary, firstSlide.title, firstSlide.subtitle, ...(firstSlide.bullets || []), job.input?.projectName, job.input?.notes].filter(Boolean).join(" ");
   if (!text.trim()) return false;
   const questionMarks = (text.match(/\?/g) || []).length;
-  const signalChars = text.replace(/[?sd.,??/\|:?;?()[]{}?-_*]/g, "").length;
+  const signalChars = text.replace(/[\s\d.,，。/\\|:：;；()（）[\]{}?？\-_*]/g, "").length;
   if (questionMarks >= 6 && questionMarks > signalChars * 0.25) return false;
   if (/<!doctype|not valid JSON/i.test(job.warning || "")) return false;
   return true;
 }
 
+function isFullDeckJob(job = {}) {
+  const slideCount = job.deck?.slides?.length || 0;
+  return job.mode !== "style-preview" && !job.input?.styleProof && slideCount > 4;
+}
+
 function isPreferredStartupJob(job = {}) { if (!isRestorableJob(job)) return false; const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const routeScore = Number(job.quality?.routeAdherence?.score ?? 1); const warningCount = Number(job.quality?.warningCount || job.quality?.warnings?.length || 0); if (!slideCount || previewCount < slideCount) return false; if (warningCount > 12 && routeScore < 0.5) return false; return true; }
 function jobHealthClass(job = {}) { const score = Number(job.quality?.routeAdherence?.score ?? 1); const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const blockingWarnings = getBlockingWarnings(job).length; if (!slideCount || previewCount < slideCount || score < 0.5) return "bad"; if (blockingWarnings || score < 0.85) return "warn"; return "good"; }
-function jobHealthLabel(job = {}) { const cls = jobHealthClass(job); const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const score = Number(job.quality?.routeAdherence?.score ?? 1); if (cls === "bad") return `\u9700\u4fee\u590d ? ${slideCount}\u9875 ? \u8def\u7531${Math.round(score * 100)}% ? \u9884\u89c8${previewCount}`; if (cls === "warn") return `\u53ef\u68c0\u67e5 ? ${slideCount}\u9875 ? \u8def\u7531${Math.round(score * 100)}%`; return `\u53ef\u7ee7\u7eed ? ${slideCount}\u9875`; }
+function jobHealthLabel(job = {}) { const cls = jobHealthClass(job); const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const score = Number(job.quality?.routeAdherence?.score ?? 1); if (cls === "bad") return `需修复 / ${slideCount}页 / 路由${Math.round(score * 100)}% / 预览${previewCount}`; if (cls === "warn") return `可检查 / ${slideCount}页 / 路由${Math.round(score * 100)}%`; return `可继续 / ${slideCount}页`; }
 
 createRoot(document.getElementById("root")).render(<App />);

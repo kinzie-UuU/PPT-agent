@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -9,6 +10,9 @@ import { PDFParse } from "pdf-parse";
 import { imageSize } from "image-size";
 import { outputDir, rootDir, uploadDir } from "./store.js";
 import { getTemplatePack, getThemeRecord } from "./designSystem.js";
+import { ensureSceneGraphForJob } from "./sceneGraph.js";
+import { inspectEditablePptx } from "./pptxEditability.js";
+import { writeEditableSceneGraphArtifacts } from "./visualProject.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_EXTRACTED_CHARS = 18000;
@@ -82,16 +86,14 @@ async function readSharedStrings(zip) {
 export async function extractPptxText(filePath) {
   const buffer = await fs.readFile(filePath);
   const zip = await JSZip.loadAsync(buffer);
-  const slideFiles = Object.keys(zip.files)
-    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-    .sort((a, b) => Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1]));
+  const slideFiles = await getOrderedSlideFiles(zip);
   const slides = [];
   for (const name of slideFiles) {
     const xml = await zip.files[name].async("text");
     const texts = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((m) => decodeXml(m[1]));
     slides.push(cleanText(texts.join(" ")));
   }
-  return slides.map((text, index) => `第 ${index + 1} 页：${text}`).join("\n");
+  return slides.map((text, index) => `-- ${index + 1} of ${slides.length} --\n${text}`).join("\n");
 }
 
 export async function extractPptxImages(file) {
@@ -99,15 +101,13 @@ export async function extractPptxImages(file) {
   if (ext !== ".pptx") return [];
   const buffer = await fs.readFile(file.path);
   const zip = await JSZip.loadAsync(buffer);
-  const slideFiles = Object.keys(zip.files)
-    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
-    .sort((a, b) => Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1]));
+  const slideFiles = await getOrderedSlideFiles(zip);
   const mediaDir = path.join(uploadDir, "pptx-media", file.id || safeName(path.basename(file.path || "pptx")));
   await fs.mkdir(mediaDir, { recursive: true });
   const images = [];
   const seen = new Set();
-  for (const slideName of slideFiles) {
-    const slideIndex = Number(slideName.match(/slide(\d+)\.xml$/)?.[1] || images.length + 1);
+  for (const [index, slideName] of slideFiles.entries()) {
+    const slideIndex = index + 1;
     const relsName = slideName.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
     const relsFile = zip.files[relsName];
     const slideFile = zip.files[slideName];
@@ -139,6 +139,7 @@ export async function extractPptxImages(file) {
         sourceUploadId: file.id || null,
         sourceUploadName: file.originalName || path.basename(file.path || ""),
         sourceSlide: slideIndex,
+        sourceSlideFile: slideName,
         sourceRelId: rel.id,
         sourceMediaPath: mediaPath,
         derived: true
@@ -148,6 +149,83 @@ export async function extractPptxImages(file) {
   return images;
 }
 
+export async function auditPptxIntake(file) {
+  const ext = path.extname(file.originalName || file.path || "").toLowerCase();
+  if (ext !== ".pptx") return null;
+  const buffer = await fs.readFile(file.path);
+  const zip = await JSZip.loadAsync(buffer);
+  const slideFiles = await getOrderedSlideFiles(zip);
+  const slides = [];
+  const warnings = [];
+  let embeddedImageRefs = 0;
+  let extractedImageRefs = 0;
+  let linkedImageRefs = 0;
+  let missingImageRefs = 0;
+  for (const [index, slideName] of slideFiles.entries()) {
+    const slideFile = zip.files[slideName];
+    if (!slideFile) {
+      warnings.push(`missing-slide-xml:${index + 1}`);
+      continue;
+    }
+    const slideXml = await slideFile.async("text");
+    const relsName = slideName.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
+    const relsXml = zip.files[relsName] ? await zip.files[relsName].async("text") : "";
+    const usedRelIds = new Set([...slideXml.matchAll(/(?:r:embed|r:link)="([^"]+)"/g)].map((match) => match[1]));
+    const textParts = [...slideXml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((m) => decodeXml(m[1]));
+    const imageRels = parseImageRelationships(relsXml).filter((rel) => usedRelIds.has(rel.id));
+    const embedded = [];
+    const linked = [];
+    const missing = [];
+    for (const rel of imageRels) {
+      if (/^https?:\/\//i.test(rel.target) || rel.targetMode === "External") {
+        linked.push(rel.id);
+        continue;
+      }
+      const mediaPath = resolvePptxTarget(slideName, rel.target);
+      if (zip.files[mediaPath]) embedded.push(rel.id);
+      else missing.push(rel.id);
+    }
+    embeddedImageRefs += embedded.length;
+    linkedImageRefs += linked.length;
+    missingImageRefs += missing.length;
+    extractedImageRefs += embedded.length;
+    const sourceNumber = slideName.match(/slide(\d+)/)?.[1] || String(index + 1);
+    const text = cleanText(textParts.join(" "));
+    slides.push({
+      page: index + 1,
+      slideFile: slideName,
+      textChars: text.length,
+      textPreview: text.slice(0, 120),
+      shapeTextRuns: textParts.length,
+      imageRefCount: imageRels.length,
+      embeddedImageRefCount: embedded.length,
+      linkedImageRefCount: linked.length,
+      missingImageRefCount: missing.length,
+      hasNotes: Boolean(zip.files[`ppt/notesSlides/notesSlide${sourceNumber}.xml`]),
+      hasChartRef: /\/chart/i.test(relsXml),
+      hasDiagramRef: /\/diagram/i.test(relsXml)
+    });
+  }
+  if (linkedImageRefs) warnings.push(`linked-images:${linkedImageRefs}`);
+  if (missingImageRefs) warnings.push(`missing-embedded-images:${missingImageRefs}`);
+  if (slides.some((slide) => slide.hasChartRef)) warnings.push("chart-text-not-fully-extracted");
+  if (slides.some((slide) => slide.hasDiagramRef)) warnings.push("smartart-text-may-be-partial");
+  if (slides.some((slide) => slide.hasNotes)) warnings.push("speaker-notes-not-used-in-main-text");
+  return {
+    version: 1,
+    deckName: file.originalName || path.basename(file.path || ""),
+    slideCount: slideFiles.length,
+    textSlideCount: slides.filter((slide) => slide.textChars > 0).length,
+    embeddedImageRefs,
+    extractedImageRefs,
+    linkedImageRefs,
+    missingImageRefs,
+    confidence: missingImageRefs || linkedImageRefs ? "medium" : "high",
+    slides: slides.slice(0, 80),
+    warnings
+  };
+}
+
 function parseImageRelationships(xml = "") {
   return [...xml.matchAll(/<Relationship\b([^>]*)\/?>/g)]
     .map((match) => {
@@ -155,10 +233,31 @@ function parseImageRelationships(xml = "") {
       return {
         id: attrs.match(/\bId="([^"]+)"/)?.[1] || "",
         type: attrs.match(/\bType="([^"]+)"/)?.[1] || "",
-        target: attrs.match(/\bTarget="([^"]+)"/)?.[1] || ""
+        target: attrs.match(/\bTarget="([^"]+)"/)?.[1] || "",
+        targetMode: attrs.match(/\bTargetMode="([^"]+)"/)?.[1] || ""
       };
     })
     .filter((rel) => rel.id && rel.target && /\/image$/i.test(rel.type));
+}
+
+async function getOrderedSlideFiles(zip) {
+  const fallback = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1]));
+  const presentation = zip.files["ppt/presentation.xml"];
+  const rels = zip.files["ppt/_rels/presentation.xml.rels"];
+  if (!presentation || !rels) return fallback;
+  const [presentationXml, relsXml] = await Promise.all([presentation.async("text"), rels.async("text")]);
+  const relMap = new Map([...relsXml.matchAll(/<Relationship\b([^>]*)\/?>/g)].map((match) => {
+    const attrs = match[1] || "";
+    const id = attrs.match(/\bId="([^"]+)"/)?.[1] || "";
+    const target = attrs.match(/\bTarget="([^"]+)"/)?.[1] || "";
+    return [id, path.posix.normalize(path.posix.join("ppt", target))];
+  }));
+  const ordered = [...presentationXml.matchAll(/<p:sldId\b[^>]*r:id="([^"]+)"/g)]
+    .map((match) => relMap.get(match[1]))
+    .filter((name) => name && zip.files[name] && /^ppt\/slides\/slide\d+\.xml$/.test(name));
+  return ordered.length ? ordered : fallback;
 }
 
 function resolvePptxTarget(baseSlidePath, target = "") {
@@ -200,6 +299,43 @@ function getTheme(style = "") {
   return { ...record.colors, name: record.name, slug: record.slug };
 }
 
+function getRenderTheme(job = {}) {
+  const routePlan = job.input?.routePlan || {};
+  const theme = getTheme(job.input?.style || routePlan.recommendedTheme);
+  const fingerprint = routePlan.styleReferenceStrategy?.fingerprint || null;
+  const styled = applyStyleFingerprintToTheme(theme, fingerprint);
+  styled.styleReferenceCount = routePlan.styleReferenceStrategy?.count || 0;
+  styled.styleFingerprint = fingerprint;
+  return styled;
+}
+
+function applyStyleFingerprintToTheme(theme = {}, fingerprint = null) {
+  if (!fingerprint?.palette?.length && !fingerprint?.traits?.length) return { ...theme };
+  const palette = fingerprint.palette || [];
+  const traits = fingerprint.traits || [];
+  const next = { ...theme };
+  const hasRed = palette.some((item) => /red/.test(item));
+  const hasOrange = palette.some((item) => /orange|yellow/.test(item));
+  const hasGreen = palette.some((item) => /green|olive|cyan/.test(item));
+  const hasBlue = palette.some((item) => /blue/.test(item));
+  const dark = fingerprint.brightness === "dark" || palette.some((item) => /^dark/.test(item));
+  const highContrast = traits.includes("high-contrast");
+  if (hasRed) next.accent = dark ? "9E1F16" : "B73625";
+  if (hasOrange) next.accent2 = dark ? "D86B2A" : "C96A2A";
+  if (hasGreen) next.olive = dark ? "5F6F50" : "6E765D";
+  if (!hasRed && hasBlue) next.accent = "2D74B8";
+  if (dark && hasRed) {
+    next.bg = "F3EBDD";
+    next.paper = "FBF6EA";
+    next.soft = "E9D8C3";
+    next.ink = "241B16";
+    next.muted = "75685C";
+  }
+  if (highContrast) next.soft = next.soft || "E7D6BF";
+  next.styleDriven = true;
+  return next;
+}
+
 export async function buildDeck(job) {
   const pptx = new pptxgen();
   pptx.layout = "LAYOUT_WIDE";
@@ -209,34 +345,145 @@ export async function buildDeck(job) {
   pptx.company = "Local";
   pptx.lang = "zh-CN";
   pptx.theme = { headFontFace: "Microsoft YaHei", bodyFontFace: "Microsoft YaHei", lang: "zh-CN" };
-  const theme = getTheme(job.input.style || job.input.routePlan?.recommendedTheme);
-  const templatePack = getTemplatePack(job.input.style || job.input.routePlan?.recommendedTheme);
+  const theme = getRenderTheme(job);
+  const templatePack = getTemplatePack(job.input.routePlan?.templatePack?.slug || job.input.routePlan?.recommendedTheme || job.input.style);
   theme.templatePack = templatePack;
   job.renderReport = { version: 1, createdAt: new Date().toISOString(), imagePlacements: [] };
+  ensureSceneGraphForJob(job);
 
-  job.deck.slides.forEach((item, index) => {
-    const slide = pptx.addSlide();
-    slide._pptDesignImagePlacements = [];
-    slide.background = { color: theme.bg };
-    if (item.speakerNotes) slide.addNotes(item.speakerNotes);
-    renderSlide(pptx, slide, item, index, job.deck.slides.length, theme, job);
-    job.renderReport.imagePlacements.push(...slide._pptDesignImagePlacements.map((placement) => ({
-      ...placement,
-      slideIndex: index + 1,
-      layout: item.layout || null,
-      title: cleanText(item.title || "")
-    })));
-  });
+  const sceneSlides = Array.isArray(job.sceneGraph?.slides) ? job.sceneGraph.slides : [];
+  if (!sceneSlides.length) {
+    throw new Error("SceneGraph has no slides; refusing legacy deck-json renderer");
+  }
+  job.renderReport.renderMode = "sceneGraph";
+  await writeEditableSceneGraphArtifacts(job);
+  renderSceneGraphDeck(pptx, job, theme);
 
   const jobDir = path.join(outputDir, job.id);
   await fs.mkdir(jobDir, { recursive: true });
-  const pptxPath = path.join(jobDir, `${safeName(job.deck.title || "deck")}.pptx`);
+  const pptxPath = path.join(jobDir, job.mode === "style-preview" ? `${safeName(job.deck.title || "style-preview")}.pptx` : "editable-final.pptx");
   await pptx.writeFile({ fileName: pptxPath });
+  const pptxEditability = await inspectEditablePptx(pptxPath).catch((error) => ({
+    version: 1,
+    source: "pptx-openxml-inspection",
+    status: "warn",
+    editable: false,
+    warnings: ["pptx-editability-inspection-failed"],
+    error: error.message || "PPTX editability inspection failed"
+  }));
   job.quality = {
     ...(job.quality || {}),
-    renderImageQa: summarizeRenderImageQa(job.renderReport)
+    renderImageQa: summarizeRenderImageQa(job.renderReport),
+    sceneGraphQa: job.sceneGraphQa || null,
+    visualCompare: job.visualCompare || null,
+    pptxEditability
   };
   return pptxPath;
+}
+
+function renderSceneGraphDeck(pptx, job, theme) {
+  const slides = job.sceneGraph.slides || [];
+  slides.forEach((sceneSlide, index) => {
+    const slide = pptx.addSlide();
+    slide._pptDesignImagePlacements = [];
+    slide.background = { color: resolveSceneColor(sceneSlide.background?.color, theme) || theme.bg };
+    if (sceneSlide.notes) slide.addNotes(sceneSlide.notes);
+    renderSceneSlide(pptx, slide, sceneSlide, theme);
+    job.renderReport.imagePlacements.push(...slide._pptDesignImagePlacements.map((placement) => ({
+      ...placement,
+      slideIndex: index + 1,
+      layout: sceneSlide.layout || sceneSlide.role || null,
+      title: cleanText(sceneSlide.texts?.find((item) => item.role === "title")?.text || "")
+    })));
+  });
+}
+
+function renderSceneSlide(pptx, slide, sceneSlide = {}, theme = {}) {
+  const allShapes = [...(sceneSlide.decorations || []), ...(sceneSlide.shapes || [])];
+  for (const shape of allShapes) renderSceneShape(pptx, slide, shape, theme);
+  for (const image of sceneSlide.images || []) renderSceneImage(slide, image, theme);
+  for (const text of sceneSlide.texts || []) renderSceneText(slide, text, theme);
+}
+
+function renderSceneShape(pptx, slide, shape = {}, theme = {}) {
+  const box = normalizeSceneBox(shape.box);
+  if (!box) return;
+  if (shape.type === "textDecor") {
+    slide.addText(shape.text || "", {
+      ...box,
+      fontSize: 42,
+      bold: true,
+      color: resolveSceneColor(shape.fillRole, theme),
+      margin: 0
+    });
+    return;
+  }
+  const shapeType = shape.type === "roundRect" ? pptx.ShapeType.roundRect : shape.type === "ellipse" ? pptx.ShapeType.ellipse : pptx.ShapeType.rect;
+  slide.addShape(shapeType, {
+    ...box,
+    rectRadius: shape.radius,
+    fill: { color: resolveSceneColor(shape.fill || shape.fillRole, theme), transparency: Number(shape.transparency || 0) },
+    line: { color: resolveSceneColor(shape.line || shape.lineRole || shape.fill || shape.fillRole, theme), transparency: Number(shape.lineTransparency || 0), width: Number(shape.lineWidth || 0.75) }
+  });
+}
+
+function renderSceneText(slide, text = {}, theme = {}) {
+  const box = normalizeSceneBox(text.box);
+  const value = cleanText(text.text || "");
+  if (!box || !value) return;
+  const style = text.style || {};
+  slide.addText(value, {
+    ...box,
+    fontFace: style.fontFace || "Microsoft YaHei",
+    fontSize: Number(style.fontSize || 11),
+    bold: Boolean(style.bold),
+    color: resolveSceneColor(style.color || style.colorRole, theme),
+    fit: style.fit || "shrink",
+    valign: style.valign || "top",
+    align: style.align || "left",
+    margin: 0.02,
+    breakLine: text.role === "bullet"
+  });
+}
+
+function renderSceneImage(slide, image = {}, theme = {}) {
+  const box = normalizeSceneBox(image.box);
+  if (!box || !image.path) return;
+  if (!fsSync.existsSync(image.path)) {
+    slide.addText(image.name || "image missing", { ...box, fontSize: 9, color: theme.accent, align: "center", valign: "mid", margin: 0 });
+    return;
+  }
+  if (image.fit === "cover") addImageCover(slide, image.path, box.x, box.y, box.w, box.h, theme);
+  else addImageContain(slide, image.path, box.x, box.y, box.w, box.h, theme);
+}
+
+function normalizeSceneBox(box = {}) {
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const w = Number(box.w);
+  const h = Number(box.h);
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+  return {
+    x: Math.max(0, Math.min(SLIDE_W, x)),
+    y: Math.max(0, Math.min(SLIDE_H, y)),
+    w: Math.max(0.05, Math.min(SLIDE_W, w)),
+    h: Math.max(0.05, Math.min(SLIDE_H, h))
+  };
+}
+
+function resolveSceneColor(value, theme = {}) {
+  const colorRoles = {
+    bg: theme.bg || "F7F8FC",
+    paper: theme.paper || theme.bg || "FFFFFF",
+    soft: theme.soft || "E8EEF8",
+    ink: theme.ink || "172033",
+    muted: theme.muted || "647087",
+    accent: theme.accent || "2D5BD7",
+    accent2: theme.accent2 || theme.accent || "2D5BD7"
+  };
+  if (!value) return colorRoles.ink;
+  if (colorRoles[value]) return colorRoles[value];
+  return String(value).replace(/^#/, "").slice(0, 6) || colorRoles.ink;
 }
 
 function renderSlide(pptx, slide, item, index, total, theme, job) {
@@ -350,14 +597,14 @@ function addTitle(slide, item, theme, options = {}) {
 
 function applyCanvasEdits(pptx, slide, item = {}, theme = {}) {
   const edits = item.canvasEdits && typeof item.canvasEdits === "object" ? item.canvasEdits : null;
+  // Do not overlay canvas text on top of rendered template text by default.
+  // The browser text layer is currently an editing aid; full coordinate export
+  // requires replacing template text per layout, otherwise PPTX gets duplicates.
+  if (!item.canvasEditsEnabled) return;
   if (!edits) return;
-  const fields = [
-    { key: "title", text: item.title, fontSize: 28, bold: true },
-    { key: "subtitle", text: item.subtitle, fontSize: 13, bold: false },
-    { key: "bullets", text: (item.bullets || []).join("\n"), fontSize: 10.5, bold: false }
-  ];
-  for (const field of fields) {
-    const box = edits[field.key]?.box;
+  for (const [key, edit] of Object.entries(edits)) {
+    const field = resolveCanvasEditField(key, item);
+    const box = edit?.box;
     const text = cleanText(field.text || "");
     if (!box || !text) continue;
     const x = percentToInch(box.x, SLIDE_W);
@@ -382,9 +629,28 @@ function applyCanvasEdits(pptx, slide, item = {}, theme = {}) {
       color: theme.ink || "1F261F",
       fit: "shrink",
       margin: 0.02,
-      breakLine: field.key === "bullets"
+      breakLine: field.breakLine
     });
   }
+}
+
+function resolveCanvasEditField(key, item = {}) {
+  const bulletMatch = /^bullet_(\d+)$/.exec(key);
+  if (bulletMatch) {
+    const text = Array.isArray(item.bullets) ? item.bullets[Number(bulletMatch[1])] : "";
+    return { key, text, fontSize: 10.5, bold: false, breakLine: false };
+  }
+  const dataMatch = /^data_(\d+)$/.exec(key);
+  if (dataMatch) {
+    const text = Array.isArray(item.dataPoints) ? item.dataPoints[Number(dataMatch[1])] : "";
+    return { key, text, fontSize: 10.5, bold: false, breakLine: false };
+  }
+  if (key === "title") return { key, text: item.title, fontSize: 28, bold: true, breakLine: false };
+  if (key === "subtitle") return { key, text: item.subtitle, fontSize: 13, bold: false, breakLine: false };
+  if (key === "bullets") return { key, text: (item.bullets || []).join("\n"), fontSize: 10.5, bold: false, breakLine: true };
+  if (key === "visualIntent") return { key, text: item.visualIntent, fontSize: 9.5, bold: false, breakLine: true };
+  if (key === "speakerNotes") return { key, text: item.speakerNotes, fontSize: 8.5, bold: false, breakLine: true };
+  return { key, text: item[key], fontSize: 10, bold: false, breakLine: true };
 }
 
 function percentToInch(value, size) {
@@ -1019,8 +1285,11 @@ function getImageFiles(job = {}) {
 function getSlideImage(job, item = {}, index = 0) {
   const images = getImageFiles(job);
   if (!images.length) return null;
-  if (images.length === 1) return images[0];
   const preferredSlots = (item.imageSlots || []).map(normalizeForMatch).filter(Boolean);
+  const hasExplicitSlots = preferredSlots.length > 0;
+  const imageRenderLayouts = new Set(["cover", "visual", "product-detail", "bundle", "closing"]);
+  if (!imageRenderLayouts.has(item.layout)) return null;
+  if (images.length === 1) return images[0];
   if (preferredSlots.length) {
     for (const slot of preferredSlots) {
       const exact = images.find((image) => image._normalizedName === slot);

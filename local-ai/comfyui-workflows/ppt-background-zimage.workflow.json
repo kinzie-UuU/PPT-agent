@@ -1,0 +1,45 @@
+{
+  "name": "ppt-background-zimage",
+  "version": 1,
+  "kind": "background-generation",
+  "savedBy": "ppt-design-tool",
+  "description": "Generate 16:9 PPT backgrounds with no readable text, no logo, and reserved text-safe area.",
+  "placeholders": {
+    "prompt": "{{prompt}}",
+    "negativePrompt": "text, words, letters, numbers, Chinese characters, captions, labels, logo, watermark, fake UI text, readable typography",
+    "width": "{{width|1024}}",
+    "height": "{{height|576}}",
+    "seed": "{{seed}}",
+    "steps": "{{steps|8}}",
+    "filenamePrefix": "{{filenamePrefix|ppt_background_zimage}}",
+    "model": "{{LOCAL_IMAGE_MODEL|z-image-turbo-fp8-e4m3fn.safetensors}}",
+    "textEncoder": "{{LOCAL_IMAGE_TEXT_ENCODER|qwen_3_4b_fp8_mixed.safetensors}}",
+    "vae": "{{LOCAL_IMAGE_VAE|ae.safetensors}}"
+  },
+  "workflow": {
+    "1": { "class_type": "CLIPLoader", "inputs": { "clip_name": "{{textEncoder}}", "type": "lumina2", "device": "default" } },
+    "2": { "class_type": "VAELoader", "inputs": { "vae_name": "{{vae}}" } },
+    "3": { "class_type": "UNETLoader", "inputs": { "unet_name": "{{model}}", "weight_dtype": "default" } },
+    "4": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["1", 0], "text": "{{prompt}}" } },
+    "5": { "class_type": "CLIPTextEncode", "inputs": { "clip": ["1", 0], "text": "{{negativePrompt}}" } },
+    "6": { "class_type": "EmptySD3LatentImage", "inputs": { "width": "{{width}}", "height": "{{height}}", "batch_size": 1 } },
+    "7": { "class_type": "ModelSamplingAuraFlow", "inputs": { "model": ["3", 0], "shift": 3 } },
+    "8": {
+      "class_type": "KSampler",
+      "inputs": {
+        "model": ["7", 0],
+        "seed": "{{seed}}",
+        "steps": "{{steps}}",
+        "cfg": 1,
+        "sampler_name": "res_multistep",
+        "scheduler": "simple",
+        "positive": ["4", 0],
+        "negative": ["5", 0],
+        "latent_image": ["6", 0],
+        "denoise": 1
+      }
+    },
+    "9": { "class_type": "VAEDecode", "inputs": { "samples": ["8", 0], "vae": ["2", 0] } },
+    "10": { "class_type": "SaveImage", "inputs": { "images": ["9", 0], "filename_prefix": "{{filenamePrefix}}" } }
+  }
+}

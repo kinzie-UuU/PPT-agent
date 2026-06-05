@@ -6,6 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const layoutSystem = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "design-system", "layouts.json"), "utf8"));
 const layouts = new Map(layoutSystem.layouts.map((layout) => [layout.id, layout]));
 const fallbackSequence = ["cover", "section", "cards", "kpi", "compare", "timeline", "quote", "closing"];
+const imageLedLayouts = new Set(["cover", "visual", "product-detail", "bundle", "closing"]);
 
 function cleanText(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -17,10 +18,10 @@ function clampText(value, maxLength) {
 }
 
 function toList(value) {
-  if (Array.isArray(value)) return value;
+  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean);
   if (!value) return [];
   return String(value)
-    .split(/\r?\n|[。；;]/)
+    .split(/\r?\n|[。；;]+/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -32,13 +33,13 @@ function chooseLayout(slide, index, total) {
   const dataPoints = toList(slide.dataPoints);
   const imageSlots = toList(slide.imageSlots);
   const text = [slide.title, slide.subtitle, ...bullets, ...dataPoints, ...imageSlots].join(" ");
-  if (imageSlots.length || /图片|包装图|产品图|效果图|开盒图|实物图/.test(text)) return "visual";
-  if ((text.match(/[¥￥]?\d+(?:\.\d+)?\s*元/g) || []).length >= 2 || /价格|报价|预算|套餐|梯度/.test(text)) return "pricing";
+  if (imageSlots.length || /图片|包装图|产品图|效果图|开箱图|实物图/.test(text)) return "visual";
+  if ((text.match(/[￥¥]?\d+(?:\.\d+)?\s*元/g) || []).length >= 2 || /价格|报价|预算|套餐|梯度/.test(text)) return "pricing";
   if (/目录|章节|阅读路径|toc/i.test(text)) return "toc";
   if (/单品|规格|礼盒详情|包装|主推/.test(text)) return "product-detail";
   if (/组合|入门|主推|升级|套餐/.test(text)) return "bundle";
   if (/风险|检查|库存|交期|报价|素材|口径/.test(text)) return "risk-checklist";
-  if (/[0-9]|%|％|¥|￥|元|MOQ|周期|天|周/.test(text)) return "kpi";
+  if (/[0-9]|%|￥|¥|元|MOQ|周期|天|周/.test(text)) return "kpi";
   if (/对比|相比|竞品|之前|之后|before|after/i.test(text)) return "compare";
   if (/流程|步骤|节奏|时间|交付|计划|里程碑/.test(text)) return "timeline";
   if (/话术|结论|原则|一句话|takeaway/i.test(text)) return "quote";
@@ -153,8 +154,9 @@ function buildRouteReport(slides = [], routePlan = null) {
       break;
     }
   }
-  if (routePlan.imageStrategy?.hasImages && !slides.some((slide) => slide.layout === "visual" && toList(slide.imageSlots).length)) {
-    routingWarnings.push("智能路由自检：有图片素材，但缺少带 imageSlots 的 visual 页。");
+  const hasImageLedPage = slides.some((slide) => imageLedLayouts.has(slide.layout) && toList(slide.imageSlots).length);
+  if (routePlan.imageStrategy?.hasImages && !hasImageLedPage) {
+    routingWarnings.push("智能路由自检：有图片素材，但缺少带 imageSlots 的图文页。");
   }
   if (expected.includes("pricing") && !slides.some((slide) => slide.layout === "pricing" && /\d/.test([...toList(slide.bullets), ...toList(slide.dataPoints)].join(" ")))) {
     routingWarnings.push("智能路由自检：路由包含 pricing，但价格页缺少明确数字。");
@@ -175,7 +177,7 @@ function buildDesignRisks(slides, layoutCounts) {
   const risks = [];
   if (slides.length >= 10 && !layoutCounts.toc) risks.push("长 deck 建议增加目录页。");
   if ((layoutCounts.visual || 0) > 0 && slides.some((slide) => slide.layout === "visual" && !toList(slide.imageSlots).length)) risks.push("存在主视觉页但缺少图片槽位。");
-  if ((layoutCounts.pricing || 0) > 0 && slides.some((slide) => slide.layout === "pricing" && !/[¥￥]?\d/.test([...toList(slide.bullets), ...toList(slide.dataPoints)].join(" ")))) risks.push("价格页缺少明确价格。");
+  if ((layoutCounts.pricing || 0) > 0 && slides.some((slide) => slide.layout === "pricing" && !/[￥¥]?\d/.test([...toList(slide.bullets), ...toList(slide.dataPoints)].join(" ")))) risks.push("价格页缺少明确价格。");
   if (!slides.every((slide) => slide.speakerNotes)) risks.push("部分页面缺少讲稿备注。");
   const maxRepeat = Math.max(0, ...Object.values(layoutCounts));
   if (slides.length >= 8 && maxRepeat > Math.ceil(slides.length / 2)) risks.push("版式重复偏多，建议增加变化。");

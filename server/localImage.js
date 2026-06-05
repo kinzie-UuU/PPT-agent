@@ -5,6 +5,8 @@ import { analyzeGeneratedImage } from "./imageQa.js";
 
 const DEFAULT_COMFY_URL = "http://127.0.0.1:8188";
 const DEFAULT_OUTPUT_DIR = "F:\\PPT工具\\ZImageLocal\\ComfyUI_windows_portable\\ComfyUI\\output";
+const WORKFLOW_ASSET_DIR = path.join(process.cwd(), "local-ai", "comfyui-workflows");
+const BACKGROUND_WORKFLOW_ASSET = path.join(WORKFLOW_ASSET_DIR, "ppt-background-zimage.workflow.json");
 
 export function getLocalImageConfig() {
   const env = globalThis.process?.env || {};
@@ -101,7 +103,7 @@ export async function generateLocalImage({
     height,
     steps,
     visualQa,
-    comfy: { promptId, filename: image.filename, subfolder: image.subfolder || "", workflowPath }
+    comfy: { promptId, filename: image.filename, subfolder: image.subfolder || "", workflowPath, workflowAsset: BACKGROUND_WORKFLOW_ASSET }
   };
 }
 

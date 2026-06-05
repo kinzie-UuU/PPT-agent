@@ -1,0 +1,39 @@
+{
+  "name": "ppt-foreground-cutout-rembg",
+  "version": 1,
+  "kind": "foreground-cutout",
+  "savedBy": "ppt-design-tool",
+  "status": "template-requires-plugin",
+  "requiredPlugins": [
+    "ComfyUI-RMBG or any node exposing RMBG/BRIA/background-removal image matting"
+  ],
+  "description": "Remove background from a product/foreground image and save transparent PNG for PPT composition.",
+  "placeholders": {
+    "inputImage": "{{inputImage}}",
+    "filenamePrefix": "{{filenamePrefix|ppt_cutout}}"
+  },
+  "workflow": {
+    "1": {
+      "class_type": "LoadImage",
+      "inputs": { "image": "{{inputImage}}" }
+    },
+    "2": {
+      "class_type": "RMBG",
+      "inputs": {
+        "image": ["1", 0]
+      },
+      "notes": "If your installed plugin uses a different node name, replace RMBG with the available background-removal node. Keep input image and output image ports compatible."
+    },
+    "3": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": ["2", 0],
+        "filename_prefix": "{{filenamePrefix}}"
+      }
+    }
+  },
+  "fallback": {
+    "currentProductionPath": "server/matting.js",
+    "method": "local PNG flood-fill first, cloud image edit only when configured and needed"
+  }
+}

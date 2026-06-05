@@ -35,7 +35,7 @@ export function getTemplatePack(style = "") {
 export function getTemplatePackPrompt(style = "") {
   const pack = getTemplatePack(style);
   return [
-    `模板包：${pack.name}`,
+    `设计方向包：${pack.name}`,
     `适用场景：${pack.scenario}`,
     `核心版式：${pack.coreLayouts.join(" / ")}`,
     `推荐页面顺序：${pack.preferredSequence.join(" > ")}`,

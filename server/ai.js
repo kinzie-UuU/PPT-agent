@@ -285,9 +285,10 @@ export async function generateDeckPlan(input, mode) {
   const baseUrl = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
   const model = env.OPENAI_MODEL || "gpt-4.1-mini";
   const provider = { configured: true, baseUrl, model };
-  const theme = getThemeRecord(input.style || input.routePlan?.recommendedTheme);
-  const templatePack = getTemplatePack(input.style || input.routePlan?.recommendedTheme);
-  const templatePackPrompt = getTemplatePackPrompt(input.style || input.routePlan?.recommendedTheme);
+  const selectedStyle = input.routePlan?.recommendedTheme || input.style;
+  const theme = getThemeRecord(selectedStyle);
+  const templatePack = getTemplatePack(selectedStyle);
+  const templatePackPrompt = getTemplatePackPrompt(selectedStyle);
   const layouts = getLayoutRecords();
   const skillRulePrompt = getSkillRulePrompt();
   const routePlan = input.routePlan || null;
@@ -310,13 +311,20 @@ export async function generateDeckPlan(input, mode) {
     input.materialBrief?.confirmationFields?.length ? `必须提示这些待确认字段：${input.materialBrief.confirmationFields.join("、")}` : "",
     `目标页数：${targetSlides} 页。必须尽量接近这个页数，不要只生成 5 页。`,
     `已选主题：${theme.name}。气质：${theme.tone.join(" / ")}。适合：${theme.bestFor}。`,
-    `已选模板包：${templatePack.name}。适用场景：${templatePack.scenario}。`,
+    `已选设计方向包：${templatePack.name}。适用场景：${templatePack.scenario}。`,
     `可用版式：${layouts.map((layout) => `${layout.id}=${layout.name}(${layout.bestFor}，最多 ${layout.maxBullets} 条)`).join("；")}`,
-    templatePackPrompt ? `模板包规则（必须遵守）：\n${templatePackPrompt}` : "",
+    templatePackPrompt ? `设计方向规则（必须遵守）：\n${templatePackPrompt}` : "",
     skillRulePrompt ? `PPT 技能规则：\n${skillRulePrompt}` : "",
     styleReferences.length ? `风格参考库（需要内化到调性里，不要直接复制图片内容）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "风格参考"}：${item.tone || "参考色彩、留白、质感和版式密度"}${item.styleFingerprint?.prompt ? `；本地风格指纹：${item.styleFingerprint.prompt}` : ""}`).join("\n")}` : "",
     routePlan?.styleReferenceStrategy?.fingerprint?.prompt ? `风格库综合指纹：${routePlan.styleReferenceStrategy.fingerprint.prompt}` : "",
     routePlan?.styleReferenceStrategy?.instruction ? `风格参考策略：${routePlan.styleReferenceStrategy.instruction}` : "",
+    input.reconstructionMode === "design-led" || input.designDirectorMode ? [
+      "设计总监模式：这不是普通 PPT 生成，而是把资料重构成视觉优质、提案级、可编辑的演示文稿。",
+      "必须先判断内容类型，再抽取或建立视觉 DNA：主色、背景、字体气质、图片语言、Logo/品牌露出、留白、装饰语言和页面密度。",
+      "页面角色必须按内容语义选择：封面、案例大图、产品画廊、方案配置、对比矩阵、时间线、数据证据、风险清单、总结页等，不允许自由乱排。",
+      "图片、图表、证据素材优先级高于长正文；正文必须压缩；标题必须强，优先写结论句。",
+      "禁止普通模板感、纯文字汇报风、过度总结导致图片变小、所有页面同一种卡片、弱化用户上传素材。"
+    ].join("\n") : "",
     routePlan?.aestheticPlan ? `PPT 美学分层系统（必须遵守）：背景层只服务文字可读性；文字安全区不能被底图、产品图或装饰遮挡；每页 visualIntent 要体现 pagePlans 中的 background/text/image/ornament 分层。\n${JSON.stringify(routePlan.aestheticPlan, null, 2)}` : "",
     input.styleProofConfirmation ? `已确认风格样张（完整 PPT 必须继承其调性，并避开样稿质检指出的问题）：\n${JSON.stringify(input.styleProofConfirmation, null, 2)}` : "",
     routePlan?.storyArc ? `推荐故事线（必须遵守）：${routePlan.storyArc}` : "",

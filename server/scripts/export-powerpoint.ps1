@@ -28,7 +28,7 @@ try {
     $pngDir = Join-Path $outDir "png"
     New-Item -ItemType Directory -Path $pngDir -Force | Out-Null
     $presentation.SaveAs($pngDir, 18)
-    $result.png = @(Get-ChildItem -LiteralPath $pngDir -Filter "*.PNG" | Sort-Object Name | ForEach-Object { $_.FullName })
+    $result.png = @(Get-ChildItem -LiteralPath $pngDir -Filter "*.PNG" | Sort-Object @{ Expression = { [int](($_.BaseName -replace '\D+', '') -replace '^$', '0') } }, Name | ForEach-Object { $_.FullName })
   }
 }
 finally {
