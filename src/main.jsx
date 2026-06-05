@@ -228,6 +228,8 @@ function App() {
   const [stylePreviewJob, setStylePreviewJob] = useState(null);
   const [stylePreviewBusy, setStylePreviewBusy] = useState(false);
   const [styleConfirmed, setStyleConfirmed] = useState(false);
+  const [intakeDraft, setIntakeDraft] = useState("");
+  const [intakeMessages, setIntakeMessages] = useState([]);
   const [rating, setRating] = useState(4);
   const [comment, setComment] = useState("");
   const [activeStep, setActiveStep] = useState("materials");
@@ -392,6 +394,30 @@ function App() {
     setDraft((current) => ({ ...current, [name]: value }));
   }
 
+  function submitIntakeMessage() {
+    const text = intakeDraft.trim();
+    if (!text && fileIds.length === 0) return;
+    const userText = text || "我已上传资料，请先理解内容。";
+    const now = Date.now();
+    setIntakeMessages((current) => [
+      ...current,
+      { id: `user-${now}`, role: "user", text: userText },
+      { id: `assistant-${now}`, role: "assistant", text: buildIntakeReply(userText, files) }
+    ]);
+    if (text) {
+      setForm((current) => ({ ...current, notes: [current.notes, text].filter(Boolean).join("\n") }));
+    }
+    setIntakeDraft("");
+    setError("");
+    setStatus("已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。");
+  }
+
+  function handleIntakeKeyDown(event) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent?.isComposing) return;
+    event.preventDefault();
+    submitIntakeMessage();
+  }
+
   function validatePreparation(nextForm = form) {
     if (!nextForm.notes.trim() && fileIds.length === 0) {
       setError("请至少填写一句话需求，或上传一份资料。");
@@ -410,6 +436,15 @@ function App() {
       const uploaded = data.files || [];
       setFiles((current) => mergeById(current, uploaded));
       setFileIds((current) => uniqueIds([...current, ...uploaded.map((file) => file.id)]));
+      if (uploaded.length) {
+        const names = uploaded.map((file) => file.originalName).filter(Boolean).join("、");
+        const now = Date.now();
+        setIntakeMessages((current) => [
+          ...current,
+          { id: `upload-${now}`, role: "user", text: `上传了 ${uploaded.length} 个资料：${names}` },
+          { id: `upload-reply-${now}`, role: "assistant", text: "已收到资料。现在可以选择保留原稿结构优化，或重新规划叙事；也可以继续补充你的目标、受众和风格要求。" }
+        ]);
+      }
       setStylePreviewJob(null);
       setStyleConfirmed(false);
       setStatus("资料已上传，可以继续补充需求或开始生成。");
@@ -1098,17 +1133,27 @@ function App() {
                   </label>
                   <input
                     className="chat-prompt"
-                    value={form.notes}
-                    onChange={(e) => update("notes", e.target.value)}
+                    value={intakeDraft}
+                    onChange={(e) => setIntakeDraft(e.target.value)}
+                    onKeyDown={handleIntakeKeyDown}
                     placeholder={UI.promptPlaceholder}
                   />
                   <div className="chat-toolbar">
                     <small>{selectedFileNames || UI.uploadHint}</small>
-                    <button className="send-button" type="button" onClick={planOutline} disabled={outlineBusy} aria-label={UI.sendOutline}>
+                    <button className="send-button" type="button" onClick={submitIntakeMessage} disabled={!intakeDraft.trim() && fileIds.length === 0} aria-label={UI.sendOutline}>
                       {outlineBusy ? "..." : "→"}
                     </button>
                   </div>
                 </div>
+                {intakeMessages.length > 0 && (
+                  <div className="intake-thread" aria-live="polite">
+                    {intakeMessages.map((message) => (
+                      <div className={`intake-message ${message.role}`} key={message.id}>
+                        {message.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {hasUploadedMaterials && (
                   <div className="outline-strategy-toggle" role="group" aria-label={UI.regenerateOutline}>
                     <button className={form.outlineStrategy !== "regenerate" ? "active" : ""} type="button" onClick={() => update("outlineStrategy", "keep-source")}>
@@ -1119,6 +1164,14 @@ function App() {
                       <b>重新规划</b>
                       <span>重新组织叙事、页序和版式路线</span>
                     </button>
+                  </div>
+                )}
+                {(form.notes.trim() || fileIds.length > 0) && (
+                  <div className="intake-next-actions">
+                    <button className="btn primary" type="button" onClick={() => planOutline()} disabled={outlineBusy}>
+                      {outlineBusy ? "正在理解资料" : "开始理解并生成大纲"}
+                    </button>
+                    <span>不会直接生成完整 PPT，会先出可确认的大纲。</span>
                   </div>
                 )}
                 {files.length > 0 && (
@@ -3257,6 +3310,18 @@ function inferMaterialTypes(files = []) {
     if (/product|pack|sku|产品|包装|礼盒/.test(name)) types.add("产品资料");
   }
   return [...types];
+}
+
+function buildIntakeReply(text = "", files = []) {
+  const normalized = String(text || "").trim();
+  const hasFiles = files.length > 0;
+  if (/你可以干嘛|能干嘛|怎么用|可以做什么|help/i.test(normalized)) {
+    return "我可以先和你聊清楚 PPT 目标、受众、风格和资料，再生成可确认的大纲；如果你上传旧 PPT/PDF/图片，我会先识别原文字、图片和素材身份，再决定是优化旧稿还是重新规划。";
+  }
+  if (hasFiles) {
+    return "我已把这条补充需求记到当前资料里。你可以继续补充目标、受众、风格，或点击开始理解并生成大纲。";
+  }
+  return "我已记录这条需求。你可以继续补充，也可以让我先按这句话理解目标并生成一版可确认的大纲。";
 }
 
 function formatBytes(value) { if (!value) return "-"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }

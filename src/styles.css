@@ -490,6 +490,52 @@ body:has(.right-panel .panel-tabs button:last-child.active) .workflow-settings {
   font-weight: 900;
 }
 
+.send-button:disabled {
+  cursor: not-allowed;
+  opacity: .38;
+}
+
+.intake-thread {
+  display: grid;
+  gap: 10px;
+  width: min(760px, 100%);
+}
+
+.intake-message {
+  max-width: min(620px, 86%);
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+  box-shadow: 0 10px 28px rgba(21,25,34,.05);
+}
+
+.intake-message.user {
+  justify-self: end;
+  border-color: rgba(40,84,216,.22);
+  background: #eef3ff;
+}
+
+.intake-message.assistant {
+  justify-self: start;
+}
+
+.intake-next-actions {
+  display: flex;
+  width: min(760px, 100%);
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.intake-next-actions span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .compact-files {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   width: min(760px, 100%);
