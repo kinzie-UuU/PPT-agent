@@ -1,7 +1,6 @@
 import { getTemplatePack } from "./designSystem.js";
 import { summarizeStyleFingerprints } from "./styleFingerprint.js";
 import { buildAestheticPlan } from "./aestheticSystem.js";
-import { applyTemplateReusePlan, buildTemplateReusePlan } from "./templateReuse.js";
 
 const EXPLICIT_SLIDE_COUNTS = [
   { pattern: /8/, count: 8 },
@@ -55,16 +54,8 @@ function detectDeckType({ mode, input = {}, materialBrief = {}, uploads = [] }) 
 }
 
 function chooseTheme(input = {}, deckType) {
-  if (input.style && !/系统|推荐|auto/i.test(input.style)) return input.style;
-  const map = {
-    销售战卡: "轻盈渐变风",
-    客户提案: "轻盈渐变风",
-    产品介绍: "东方自然风",
-    数据汇报: "蓝白科技风",
-    旧稿优化: "蓝白科技风",
-    轻量资料整理: "黑白画册风"
-  };
-  return map[deckType] || "轻盈渐变风";
+  if (input.style && !/\u7cfb\u7edf|\u63a8\u8350|auto/i.test(input.style)) return input.style;
+  return "skill-first-reference-driven";
 }
 
 function isDesignLed(input = {}) {
@@ -337,8 +328,8 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
   });
   const orderedBase = sourceBase ? templateReadyBase : reorderByTemplate(templateReadyBase, templatePack, weakOrEmpty);
   const rawLayoutSequence = fitSequence(orderedBase, targetSlides, includeRisk);
-  const templateReusePlan = buildTemplateReusePlan(rawLayoutSequence, materialBrief.sourceReport || null);
-  const layoutSequence = applyTemplateReusePlan(rawLayoutSequence, templateReusePlan);
+  const templateReusePlan = { status: "removed", reason: "legacy-template-reuse-disabled" };
+  const layoutSequence = rawLayoutSequence;
   const sourceIntegrity = buildSourceIntegrity(materialBrief.sourceReport || null);
   const aestheticPlan = buildAestheticPlan({
     style: input.style || recommendedTheme,
@@ -354,6 +345,11 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     inputStrength,
     targetSlides,
     recommendedTheme,
+    skillWorkflow: {
+      slug: "codex-ppt-to-image-to-editable-ppt",
+      name: "双技能工作流",
+      stages: ["codex-ppt", "image-to-editable-ppt"]
+    },
     templatePack: {
       slug: templatePack.slug,
       name: templatePack.name,
@@ -366,7 +362,7 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
       tone: styleReferences.map((item) => item.tone).filter(Boolean).join("；").slice(0, 420),
       fingerprint: styleFingerprintSummary,
       instruction: styleReferences.length
-        ? "生成时参考风格参考库的色彩、留白、质感、字体气质和画面密度；不要复制图片内容本身。"
+        ? "生成时参考可选参考图的色彩、留白、质感、字体气质和画面密度；不要复制图片内容本身，不要锁定固定版式。"
         : "未提供自定义风格参考，使用内置主题和设计方向规则。"
     },
     storyArc: layoutSequence.map((step) => `${step.index}. ${step.storyRole}: ${step.title}`).join(" → "),
@@ -399,7 +395,7 @@ export function routeDeck({ mode = "generate", input = {}, materialBrief = {}, u
     },
     routingReasons: [
       `deckType=${deckType}`,
-      `templatePack=${templatePack.slug}`,
+      "skillWorkflow=codex-ppt-to-image-to-editable-ppt",
       `inputStrength=${inputStrength}`,
       `targetSlides=${targetSlides}`,
       `outlineStrategy=${outlineStrategy}`,

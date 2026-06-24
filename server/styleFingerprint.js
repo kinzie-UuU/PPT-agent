@@ -232,7 +232,7 @@ function hueName(hue) {
 
 function inferTextTraits(text = "") {
   const traits = [];
-  if (/东方|自然|中式|国风|茶|山水|松|竹|禅/.test(text)) traits.push("eastern-natural");
+  if (/东方|自然|中式|国风|茶|山水|松|竹|禅/.test(text)) traits.push("reference-natural");
   if (/高级|克制|留白|画册|低饱和/.test(text)) traits.push("premium-restraint");
   if (/科技|蓝白|数据|系统|AI|SaaS/i.test(text)) traits.push("technical-structured");
   if (/潮玩|高饱和|强对比|活泼/.test(text)) traits.push("playful-vivid");

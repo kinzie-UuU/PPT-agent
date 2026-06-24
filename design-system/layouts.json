@@ -4,14 +4,14 @@
     {
       "id": "cover",
       "name": "封面",
-      "bestFor": "项目开场、产品名、核心价值主张",
+      "bestFor": "主题开场、任务目标、核心结论",
       "density": "low",
       "maxBullets": 2
     },
     {
       "id": "visual",
       "name": "主视觉展示",
-      "bestFor": "产品图、包装图、开盒图、实物图、设计效果图",
+      "bestFor": "关键图片、源页截图、参考图调性、视觉样张",
       "density": "low",
       "maxBullets": 3
     },
@@ -25,21 +25,21 @@
     {
       "id": "toc",
       "name": "目录导航",
-      "bestFor": "长 deck 目录、章节预告、汇报路径",
+      "bestFor": "长文档目录、章节预告、阅读路径",
       "density": "medium",
       "maxBullets": 6
     },
     {
       "id": "kpi",
       "name": "数据大字报",
-      "bestFor": "关键价格、MOQ、增长率、交付周期、核心数字",
+      "bestFor": "核心数字、指标、周期、规模、对比结论",
       "density": "medium",
       "maxBullets": 4
     },
     {
       "id": "pricing",
-      "name": "价格梯度",
-      "bestFor": "多档价格、产品价格带、套餐梯度、销售预算入口",
+      "name": "预算与规格",
+      "bestFor": "预算、报价、规格、成本、资源消耗和待确认数字",
       "density": "medium",
       "maxBullets": 6
     },
@@ -53,49 +53,49 @@
     {
       "id": "timeline",
       "name": "流程时间线",
-      "bestFor": "销售步骤、交付周期、活动节奏、项目里程碑",
+      "bestFor": "处理步骤、交付周期、活动节奏、项目里程碑",
       "density": "medium",
       "maxBullets": 5
     },
     {
       "id": "cards",
-      "name": "卖点卡片",
-      "bestFor": "产品卖点、推荐理由、价值点矩阵",
+      "name": "要点卡片",
+      "bestFor": "核心要点、推荐理由、价值点、证据矩阵",
       "density": "medium",
       "maxBullets": 5
     },
     {
       "id": "product-detail",
-      "name": "单品详情",
-      "bestFor": "单个产品、礼盒规格、价格、包装和核心卖点",
+      "name": "详情页",
+      "bestFor": "单个对象、方案模块、素材详情、规格和关键说明",
       "density": "medium",
       "maxBullets": 5
     },
     {
       "id": "bundle",
-      "name": "组合推荐",
-      "bestFor": "入门/主推/升级套餐、客户预算分层、销售推荐组合",
+      "name": "分组方案",
+      "bestFor": "多组方案、不同档位、对象分层、备选路径",
       "density": "medium",
       "maxBullets": 6
     },
     {
       "id": "risk-checklist",
-      "name": "风险清单",
-      "bestFor": "报价、库存、交期、素材、话术口径等交付检查",
+      "name": "确认清单",
+      "bestFor": "事实、素材、授权、交付边界和人工确认项",
       "density": "medium",
       "maxBullets": 6
     },
     {
       "id": "quote",
       "name": "大观点页",
-      "bestFor": "销售话术、核心结论、可被记住的一句话",
+      "bestFor": "核心结论、观点提炼、可被记住的一句话",
       "density": "low",
       "maxBullets": 2
     },
     {
       "id": "closing",
       "name": "行动收束",
-      "bestFor": "下一步动作、成交建议、总结页",
+      "bestFor": "下一步动作、交付建议、总结页",
       "density": "low",
       "maxBullets": 4
     }

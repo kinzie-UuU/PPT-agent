@@ -9,7 +9,7 @@ export const dataDir = path.join(rootDir, "data");
 export const uploadDir = path.join(rootDir, "uploads");
 export const outputDir = path.join(rootDir, "outputs");
 const dbPath = path.join(dataDir, "jobs.json");
-const emptyDb = () => ({ uploads: {}, jobs: {}, styleReferences: {}, styleGroups: {} });
+const emptyDb = () => ({ uploads: {}, jobs: {}, styleReferences: {} });
 
 export async function ensureDirs() {
   await fs.mkdir(dataDir, { recursive: true });
@@ -46,8 +46,7 @@ function normalizeDb(db) {
   return {
     uploads: db && typeof db.uploads === "object" && !Array.isArray(db.uploads) ? db.uploads : {},
     jobs: db && typeof db.jobs === "object" && !Array.isArray(db.jobs) ? db.jobs : {},
-    styleReferences: db && typeof db.styleReferences === "object" && !Array.isArray(db.styleReferences) ? db.styleReferences : {},
-    styleGroups: db && typeof db.styleGroups === "object" && !Array.isArray(db.styleGroups) ? db.styleGroups : {}
+    styleReferences: db && typeof db.styleReferences === "object" && !Array.isArray(db.styleReferences) ? db.styleReferences : {}
   };
 }
 
@@ -261,7 +260,7 @@ export async function addStyleReference(file, meta = {}) {
   }, meta).catch(() => null);
   const record = {
     id,
-    name: cleanMeta(meta.name) || originalName.replace(/\.[^.]+$/, "") || "风格参考",
+    name: cleanMeta(meta.name) || originalName.replace(/\.[^.]+$/, "") || "可选参考图",
     tone: cleanMeta(meta.tone) || "参考这张图的色彩、质感、版式气质和留白节奏。",
     themeName: cleanMeta(meta.themeName),
     themeSlug: cleanMeta(meta.themeSlug),
@@ -307,41 +306,6 @@ export async function listStyleReferences() {
   }
   if (changed) await writeDb(db);
   return Object.values(db.styleReferences).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-export async function addStyleGroup(meta = {}) {
-  const db = await readDb();
-  const name = cleanMeta(meta.name);
-  if (!name) throw new Error("风格库名称不能为空");
-  const existing = Object.values(db.styleGroups).find((group) => group.name === name);
-  if (existing) return existing;
-  const id = makeId("style_group");
-  const record = {
-    id,
-    slug: `custom-${id.replace(/^style_group_/, "")}`,
-    name,
-    tone: cleanMeta(meta.tone),
-    bestFor: cleanMeta(meta.bestFor || meta.tone),
-    custom: true,
-    createdAt: new Date().toISOString()
-  };
-  db.styleGroups[id] = record;
-  await writeDb(db);
-  return record;
-}
-
-export async function listStyleGroups() {
-  const db = await readDb();
-  return Object.values(db.styleGroups).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-export async function deleteStyleGroup(id) {
-  const db = await readDb();
-  const record = db.styleGroups[id];
-  if (!record) return null;
-  delete db.styleGroups[id];
-  await writeDb(db);
-  return record;
 }
 
 export async function deleteStyleReference(id) {

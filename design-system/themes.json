@@ -1,40 +1,18 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "themes": [
     {
-      "slug": "airy-gradient",
-      "name": "轻盈渐变风",
-      "tone": ["clean", "friendly", "sales-ready"],
-      "bestFor": "销售战卡、客户提案、节日礼盒、轻量商业汇报",
-      "colors": { "bg": "F7FBFF", "accent": "3158D4", "soft": "EAF1FF", "ink": "181715", "muted": "667085" }
-    },
-    {
-      "slug": "eastern-natural",
-      "name": "东方自然风",
-      "tone": ["warm", "premium", "seasonal"],
-      "bestFor": "节日礼盒、文化产品、食品茶饮、强调高级耐看的方案",
-      "colors": { "bg": "F8F1E4", "accent": "9E1F16", "soft": "EFE1CF", "ink": "241B16", "muted": "75685C", "accent2": "D86B2A", "olive": "6E765D", "paper": "FBF6EA" }
-    },
-    {
-      "slug": "monochrome-editorial",
-      "name": "黑白画册风",
-      "tone": ["editorial", "restrained", "premium"],
-      "bestFor": "品牌手册、设计汇报、高端产品介绍、需要克制质感的方案",
-      "colors": { "bg": "FFFFFF", "accent": "111111", "soft": "EFEFEF", "ink": "111111", "muted": "606060" }
-    },
-    {
-      "slug": "swiss-blue",
-      "name": "蓝白科技风",
-      "tone": ["structured", "technical", "confident"],
-      "bestFor": "技术方案、产品分析、数据汇报、工程或 AI 主题",
-      "colors": { "bg": "F6FAFF", "accent": "3546A4", "soft": "DDE8FF", "ink": "101828", "muted": "667085" }
-    },
-    {
-      "slug": "dark-tech",
-      "name": "暗黑科技风",
-      "tone": ["dramatic", "launch", "high-contrast"],
-      "bestFor": "新品发布、技术演示、趋势报告、需要强冲击的开场",
-      "colors": { "bg": "05070B", "accent": "19D3FF", "soft": "111827", "ink": "FFFFFF", "muted": "B8C1CC" }
+      "slug": "skill-first-reference-driven",
+      "name": "双技能参考驱动",
+      "tone": ["source-aware", "reference-driven", "editable-first"],
+      "bestFor": "围绕 codex-ppt 和 image-to-editable-ppt 的主流程；源页、用户说明和参考图决定视觉方向，不再套用旧模板包。",
+      "colors": {
+        "bg": "F8FAFC",
+        "accent": "2563EB",
+        "soft": "E2E8F0",
+        "ink": "111827",
+        "muted": "64748B"
+      }
     }
   ]
 }

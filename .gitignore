@@ -1,9 +1,13 @@
 node_modules/
+.venv/
 
 # Local runtime data
 data/
 uploads/
 outputs/
+workspace/
+final-deliverables/
+tmp_release_check/
 测试资料/
 skill/
 external/

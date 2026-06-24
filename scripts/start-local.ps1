@@ -18,7 +18,21 @@ New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
 function Get-Health {
   try {
-    return Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
+    if ($null -eq $health -or $health -is [string]) {
+      return $null
+    }
+    if (-not $health.ok -or -not $health.pid) {
+      return $null
+    }
+    if ($health.rootDir) {
+      $actualRoot = (Resolve-Path -LiteralPath ([string]$health.rootDir) -ErrorAction SilentlyContinue).Path
+      $expectedRoot = (Resolve-Path -LiteralPath $root -ErrorAction SilentlyContinue).Path
+      if ($actualRoot -and $expectedRoot -and $actualRoot -ne $expectedRoot) {
+        return $null
+      }
+    }
+    return $health
   } catch {
     return $null
   }
@@ -50,15 +64,26 @@ function Start-ServerProcess {
   $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
   $outLog = Join-Path $dataDir "server-$stamp.out.log"
   $errLog = Join-Path $dataDir "server-$stamp.err.log"
-  Set-Content -Path $outLog -Value "Started by scripts\start-local.ps1 at $(Get-Date -Format s)" -Encoding UTF8
-  Set-Content -Path $errLog -Value "" -Encoding UTF8
   $previousPort = $env:PORT
+  $previousUpperPath = [Environment]::GetEnvironmentVariable("PATH", "Process")
+  $previousMixedPath = [Environment]::GetEnvironmentVariable("Path", "Process")
+  $removedDuplicatePath = $false
+  if ($previousUpperPath -and $previousMixedPath) {
+    [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+    $removedDuplicatePath = $true
+  }
   $env:PORT = [string]$Port
-  $process = Start-Process -FilePath $node -ArgumentList "server/index.js" -WorkingDirectory $root -WindowStyle Hidden -PassThru
-  if ($null -eq $previousPort) {
-    Remove-Item Env:\PORT -ErrorAction SilentlyContinue
-  } else {
-    $env:PORT = $previousPort
+  try {
+    $process = Start-Process -FilePath $node -ArgumentList "server/index.js" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+  } finally {
+    if ($null -eq $previousPort) {
+      Remove-Item Env:\PORT -ErrorAction SilentlyContinue
+    } else {
+      $env:PORT = $previousPort
+    }
+    if ($removedDuplicatePath) {
+      [Environment]::SetEnvironmentVariable("PATH", $previousUpperPath, "Process")
+    }
   }
   return [PSCustomObject]@{
     Pid = $process.Id
@@ -83,7 +108,7 @@ if (-not $health) {
   $listener = Get-Listener
   if ($listener) {
     $owner = Get-ProcessLabel ([int]$listener.OwningProcess)
-    throw "Port $Port is already used by $owner, but /api/health did not respond. Close that process or use -Port."
+    throw "Port $Port is already used by $owner, but /api/health is not this project's health endpoint. Close that process or use -Port."
   }
 
   $startup = Start-ServerProcess

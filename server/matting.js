@@ -53,7 +53,7 @@ async function cloudImageCutout(file, options = {}) {
   if (env.CLOUD_MATTING_ENABLED === "false") throw new Error("CLOUD_MATTING_ENABLED=false");
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not configured for cloud matting");
   const baseUrl = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-  const model = env.OPENAI_IMAGE_MODEL || env.CLOUD_MATTING_MODEL || "gpt-image-1";
+  const model = env.OPENAI_IMAGE_MODEL || env.CLOUD_MATTING_MODEL || "gpt-image-2";
   const bytes = await fs.readFile(file.path);
   const form = new FormData();
   form.set("model", model);

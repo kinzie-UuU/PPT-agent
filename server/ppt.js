@@ -1467,8 +1467,19 @@ function safeName(name) {
 export async function exportWithPowerPoint(pptxPath, formats) {
   const script = path.join(rootDir, "server", "scripts", "export-powerpoint.ps1");
   const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-PptxPath", pptxPath, "-Formats", formats.join(",")];
-  const { stdout } = await execFileAsync("powershell.exe", args, { windowsHide: true, timeout: 120000, encoding: "utf8" });
+  const { stdout } = await execFileAsync(resolvePowerShellExecutable(), args, { windowsHide: true, timeout: 120000, encoding: "utf8" });
   return JSON.parse(stdout);
+}
+
+function resolvePowerShellExecutable() {
+  const windir = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
+  const candidates = [
+    process.env.POWERSHELL_EXE,
+    path.join(windir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    path.join(windir, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe"
+  ].filter(Boolean);
+  return candidates.find((candidate) => candidate === "powershell.exe" || fsSync.existsSync(candidate)) || "powershell.exe";
 }
 
 export async function renderPptxPreview(pptxPath) {

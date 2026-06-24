@@ -1,54 +1,30 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "rules": {
     "planning": [
-      "先抽取资料结构，再规划页面，不先套模板。",
-      "图片、产品、价格、适用对象要参与大纲规划，不后贴。",
-      "不确定的信息要进入风险或待补齐页，不伪造成确定结论。"
+      "先识别输入类型和页数，再规划 codex-ppt 到 image-to-editable-ppt 的双技能流程。",
+      "源 PPT、PDF、图片都先作为内容与视觉参考，不再套用旧模板或母版。",
+      "需要用户确认的内容、风格、额度和交付风险必须进入工作流关卡。"
     ],
-    "oldDeck": [
-      "Old PPT tasks must first build SlideIR, classify pages, run aesthetic diagnosis, then generate proof slides before full PPTX output.",
-      "AI may write structured diagnosis and redesign intent; coordinates, editable text, image placement, and export remain code-controlled.",
-      "Preserve critical facts from source decks: names, years, prices, quantities, client labels, risk notes, and delivery assumptions.",
-      "If AI JSON or PPTX image parsing fails, fall back to local rule-based diagnosis and text-first editable redesign."
+    "codexPpt": [
+      "codex-ppt 负责生成视觉统一的图片型 PPT，不承担最终可编辑对象重建。",
+      "样张确认后才允许进入全量图片页生成，避免浪费外部图片 API 额度。",
+      "参考图只作为调性、留白、质感和版式密度约束，不作为事实图片直接复刻。"
     ],
     "imageToEditable": [
-      "For scanned/image/PDF-like inputs, create an object-level manifest before PPTX output: text_inventory, visual_inventory, background_strategy, quality_checks, text_boxes, shapes, images, and asset_provenance.",
-      "Readable text must become native PPT text boxes; never rely on a full-slide screenshot as the only editable surface.",
-      "Full-slide source rasters are allowed only as references or background candidates, and must be flagged for fake-editable QA when text boxes are overlaid.",
-      "Small source-derived raster assets are allowed only for non-text visual objects such as icons, logos, product photos, or decorative marks, with provenance recorded.",
-      "Each page needs a visual/contact-sheet style QA pass before final acceptance: source comparison, text completeness, image/object coverage, font size calibration, and shape corner checks."
+      "image-to-editable-ppt/editppt 只接收图片型 PPT、PDF 或页面图片作为重建源。",
+      "每页必须产出对象级 manifest，包含文字、形状、图片、位置和资产来源。",
+      "整页大图只能作为参考或背景候选，不能替代可编辑文本和对象。"
     ],
-    "density": [
-      "每页只承载一个主信息；长文字先拆页或改写。",
-      "cover、quote 不超过 2 条 bullet；closing 不超过 4 条 bullet。",
-      "标题优先短句，不靠缩小字号解决拥挤。"
-    ],
-    "rhythm": [
-      "5 页以上至少 3 种 layout；8 页以上至少 5 种 layout。",
-      "避免连续 3 页使用同一种正文结构。",
-      "长 deck 前部可用 toc，中段穿插 section 或 quote 作为呼吸页。"
-    ],
-    "image": [
-      "有产品图、包装图或效果图时优先安排 visual 或 product-detail。",
-      "截图和信息图优先完整显示；照片和产品图优先保留完整包装。",
-      "同组多图保持相同比例、边距和视觉重心。"
-    ],
-    "editing": [
-      "保存文字后必须重建 PPTX 和预览图，并给 previewImages 加 mtime 版本号。",
-      "直接编辑只改当前页文字，不应意外重排整套 deck。",
-      "PNG 预览失败时保留网页兜底预览并显示 previewWarning。"
+    "ocr": [
+      "OCR 文本提示用于提升重建准确率，低置信度文字必须暴露给用户修正。",
+      "中文路径和原始文件名只做展示，内部运行目录使用 ASCII 路径。",
+      "文字提示更新后必须同步到 editable run，避免重建阶段使用旧文本。"
     ],
     "delivery": [
-      "导出前检查 previewImages、exportMeta、quality.warnings 和 events。",
-      "PPTX 是主交付物；PDF 或 PNG 失败不能阻塞 PPTX 下载。",
-      "最终结果要能被用户继续编辑，而不是只做成静态图片。"
-    ],
-    "templateReuse": [
-      "For uploaded PPTX templates, inspect slide layouts and placeholders before deciding whether to redraw a page.",
-      "Prefer used source layouts with title/body/picture placeholders when the planned slide role matches.",
-      "If a layout has no usable placeholders, treat it as style evidence only and rebuild editable objects in code.",
-      "Record template-profile warnings such as missing layout links, used layouts without placeholders, and noisy layout sets."
+      "最终交付以 editable-final.pptx、validation.json、页面证据和日志包为准。",
+      "页数不一致、页面 worker 失败、manifest 错误或整页假可编辑风险必须进入验收门禁。",
+      "旧版 PDF/PNG 导出和旧本地生成器不作为主交付入口。"
     ]
   }
 }

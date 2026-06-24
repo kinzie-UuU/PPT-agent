@@ -1,29 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { api, getErrorMessage, isConnectionError } from "./api/client.js";
+import { deriveWorkflowDeliveryStatus } from "./workflow/deliveryStatus.js";
+import { getWorkflowGuidedAction } from "./workflow/guidedAction.js";
+import { useWorkflowWorkerConsole } from "./workflow/useWorkflowWorkerConsole.js";
 import "./styles.css";
 
-const FALLBACK_THEMES = [
-  { name: "\u8f7b\u76c8\u6e10\u53d8\u98ce", bestFor: "\u9500\u552e\u6218\u5361\u3001\u5ba2\u6237\u63d0\u6848\u3001\u8282\u65e5\u793c\u76d2", colors: { bg: "F7FBFF", accent: "3158D4", soft: "EAF1FF" } },
-  { name: "\u4e1c\u65b9\u81ea\u7136\u98ce", bestFor: "\u8282\u65e5\u793c\u76d2\u3001\u6587\u5316\u4ea7\u54c1\u3001\u9ad8\u7ea7\u65b9\u6848", colors: { bg: "F7F3EA", accent: "68745E", soft: "EDE6D8" } },
-  { name: "\u9ed1\u767d\u753b\u518c\u98ce", bestFor: "\u54c1\u724c\u624b\u518c\u3001\u8bbe\u8ba1\u6c47\u62a5\u3001\u9ad8\u7aef\u4ea7\u54c1\u4ecb\u7ecd", colors: { bg: "FFFFFF", accent: "111111", soft: "EFEFEF" } },
-  { name: "\u84dd\u767d\u79d1\u6280\u98ce", bestFor: "\u6280\u672f\u65b9\u6848\u3001\u4ea7\u54c1\u5206\u6790\u3001\u6570\u636e\u6c47\u62a5", colors: { bg: "F6FAFF", accent: "3546A4", soft: "DDE8FF" } },
-  { name: "\u6697\u9ed1\u79d1\u6280\u98ce", bestFor: "\u65b0\u54c1\u53d1\u5e03\u3001\u6280\u672f\u6f14\u793a\u3001\u8d8b\u52bf\u62a5\u544a", colors: { bg: "05070B", accent: "19D3FF", soft: "111827" } }
-];
-
-const FALLBACK_TEMPLATE_PACKS = [
-  { themeName: "\u8f7b\u76c8\u6e10\u53d8\u98ce", name: "\u9500\u552e\u63d0\u6848 / \u6218\u5361\u6a21\u677f", scenario: "\u9500\u552e\u6218\u5361\u3001\u5ba2\u6237\u63d0\u6848\u3001\u8282\u65e5\u793c\u76d2", coreLayouts: ["pricing", "product-detail", "quote", "risk-checklist"] },
-  { themeName: "\u4e1c\u65b9\u81ea\u7136\u98ce", name: "\u793c\u76d2 / \u8282\u65e5 / \u6587\u5316\u4ea7\u54c1\u6a21\u677f", scenario: "\u8282\u65e5\u793c\u76d2\u3001\u98df\u54c1\u8336\u996e\u3001\u6587\u5316\u4ea7\u54c1", coreLayouts: ["visual", "product-detail", "bundle", "pricing"] },
-  { themeName: "\u9ed1\u767d\u753b\u518c\u98ce", name: "\u54c1\u724c\u753b\u518c / \u9ad8\u7aef\u4ea7\u54c1\u6a21\u677f", scenario: "\u54c1\u724c\u624b\u518c\u3001\u8bbe\u8ba1\u6c47\u62a5\u3001\u9ad8\u7aef\u4ea7\u54c1\u4ecb\u7ecd", coreLayouts: ["section", "visual", "quote", "product-detail"] },
-  { themeName: "\u84dd\u767d\u79d1\u6280\u98ce", name: "\u6280\u672f\u65b9\u6848 / \u6570\u636e\u6c47\u62a5\u6a21\u677f", scenario: "\u6280\u672f\u65b9\u6848\u3001\u4ea7\u54c1\u5206\u6790\u3001\u6570\u636e\u6c47\u62a5", coreLayouts: ["toc", "kpi", "compare", "timeline"] },
-  { themeName: "\u6697\u9ed1\u79d1\u6280\u98ce", name: "\u53d1\u5e03\u4f1a / \u8d8b\u52bf\u62a5\u544a\u6a21\u677f", scenario: "\u65b0\u54c1\u53d1\u5e03\u3001\u6280\u672f\u6f14\u793a\u3001\u8d8b\u52bf\u62a5\u544a", coreLayouts: ["cover", "kpi", "timeline", "closing"] }
-];
-
-const DESIGN_LED_INSTRUCTION = [
-  "\u9ad8\u7ea7\u8bbe\u8ba1\u4f18\u5316\uff1a\u4e0d\u7ba1\u662f\u4e0a\u4f20\u65e7 PPT/PDF/\u56fe\u7247\uff0c\u8fd8\u662f\u7eaf\u804a\u5929\u751f\u6210\uff0c\u90fd\u6309\u89c6\u89c9\u4f18\u5148\u7684\u63d0\u6848\u7ea7 PPT \u5904\u7406\u3002",
-  "\u5fc5\u987b\u5148\u5224\u65ad\u5185\u5bb9\u7c7b\u578b\uff1a\u9500\u552e\u63d0\u6848\u3001\u6848\u4f8b\u4f5c\u54c1\u96c6\u3001\u4ea7\u54c1\u4ecb\u7ecd\u3001\u54c1\u724c\u624b\u518c\u3001\u9879\u76ee\u6c47\u62a5\u3001\u57f9\u8bad\u8bfe\u4ef6\u3001\u62db\u5546\u65b9\u6848\u6216\u6570\u636e\u62a5\u544a\u3002",
-  "\u5fc5\u987b\u62bd\u53d6\u89c6\u89c9 DNA\uff1a\u4e3b\u8272\u3001\u80cc\u666f\u3001\u5b57\u4f53\u6c14\u8d28\u3001\u56fe\u7247\u8bed\u8a00\u3001Logo/\u54c1\u724c\u9732\u51fa\u3001\u7559\u767d\u3001\u88c5\u9970\u8bed\u8a00\u548c\u9875\u9762\u5bc6\u5ea6\u3002",
-  "\u8f93\u51fa\u5fc5\u987b\u662f\u53ef\u5728\u7ebf\u7f16\u8f91 PPTX\uff1a\u6587\u5b57\u3001\u56fe\u7247\u3001\u5f62\u72b6\u72ec\u7acb\u53ef\u7f16\u8f91\uff0c\u4e0d\u5141\u8bb8\u6574\u9875\u622a\u56fe\u5316\u3002"
-].join("\n");
+const SKILL_FIRST_RULES = {
+  "codex-ppt": [
+    "先生成视觉统一的图片型 PPT",
+    "样张确认后再进入全量图片页生成",
+    "外部图片 API 调用前必须记录额度授权"
+  ],
+  "image-to-editable-ppt": [
+    "只接收图片型 PPT / PDF / 页面图片作为重建源",
+    "页面级任务必须有真实产物证据",
+    "最终交付以 editable-final.pptx 和 validation 证据为准"
+  ]
+};
 
 const LAYOUT_LABELS = {
   cover: "\u5c01\u9762",
@@ -31,10 +25,10 @@ const LAYOUT_LABELS = {
   section: "\u7ae0\u8282",
   toc: "\u76ee\u5f55",
   kpi: "\u6570\u636e",
-  pricing: "\u4ef7\u683c",
-  "product-detail": "\u5355\u54c1",
-  bundle: "\u7ec4\u5408",
-  "risk-checklist": "\u6e05\u5355",
+  pricing: "\u9884\u7b97",
+  "product-detail": "\u8be6\u60c5",
+  bundle: "\u5206\u7ec4",
+  "risk-checklist": "\u786e\u8ba4",
   compare: "\u5bf9\u6bd4",
   timeline: "\u6d41\u7a0b",
   cards: "\u5361\u7247",
@@ -72,107 +66,219 @@ const UI = {
 const STEPS = [
   { id: "materials", number: "01", title: "\u8d44\u6599\u8bc6\u522b", desc: "\u62bd\u53d6\u6587\u5b57 / \u56fe\u7247 / \u7d20\u6750\u8eab\u4efd" },
   { id: "outline", number: "02", title: "\u5927\u7eb2\u89c4\u5212", desc: "\u9875\u9762\u89d2\u8272\u548c\u53d9\u4e8b\u8def\u7ebf" },
-  { id: "generate", number: "03", title: "\u751f\u6210", desc: "\u98ce\u683c / \u6837\u7a3f / PPTX" },
-  { id: "preview", number: "04", title: "\u7f16\u8f91", desc: "\u9884\u89c8 / \u56fe\u5c42 / \u6587\u6848" },
-  { id: "export", number: "05", title: "\u5bfc\u51fa", desc: "editable-final.pptx" }
+  { id: "generate", number: "03", title: "\u751f\u6210", desc: "codex-ppt / editppt" },
+  { id: "preview", number: "04", title: "\u590d\u6838", desc: "\u9875\u9762\u8bc1\u636e / \u4ea4\u4ed8\u9884\u89c8" },
+  { id: "export", number: "05", title: "\u4ea4\u4ed8", desc: "editable-final.pptx" }
 ];
 
-const api = {
-  async upload(files) {
-    const form = new FormData();
-    [...files].forEach((file) => form.append("files", file));
-    const response = await fetch("/api/uploads", { method: "POST", body: form });
-    return readJson(response);
-  },
-  async create(path, body) {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    return readJson(response);
-  },
-  async remove(path) {
-    const response = await fetch(path, { method: "DELETE" });
-    return readJson(response);
-  },
-  async jobs() {
-    const response = await fetch("/api/jobs");
-    return readJson(response);
-  },
-  async job(id) {
-    const response = await fetch(`/api/jobs/${id}`);
-    return readJson(response);
-  },
-  async designSystem() {
-    const response = await fetch("/api/design-system");
-    return readJson(response);
-  },
-  async health(signal) {
-    const response = await fetch("/api/health", { cache: "no-store", signal });
-    return readJson(response);
-  },
-  async localImageStatus(signal) {
-    const response = await fetch("/api/local-image/status", { cache: "no-store", signal });
-    return readJson(response);
-  },
-  async rescanLocalImageQa(id) {
-    return this.create(`/api/jobs/${id}/rescan-local-image-qa`, {});
-  },
-  async generateVisualTargetSample(id) {
-    return this.create(`/api/jobs/${id}/visual-target/sample`, {});
-  },
-  async config() {
-    const response = await fetch("/api/config", { cache: "no-store" });
-    return readJson(response);
-  },
-  async saveConfig(body) {
-    return this.create("/api/config", body);
-  },
-  async testConfig(body) {
-    return this.create("/api/config/test", body);
-  },
-  async models(body) {
-    return this.create("/api/config/models", body);
-  },
-  async styleReferences() {
-    const response = await fetch("/api/style-references", { cache: "no-store" });
-    return readJson(response);
-  },
-  async uploadStyleReferences(files, meta = {}) {
-    const form = new FormData();
-    [...files].forEach((file) => form.append("files", file));
-    Object.entries(meta).forEach(([key, value]) => form.append(key, value || ""));
-    const response = await fetch("/api/style-references", { method: "POST", body: form });
-    return readJson(response);
-  },
-  async deleteStyleReference(id) {
-    const response = await fetch(`/api/style-references/${id}`, { method: "DELETE" });
-    return readJson(response);
-  },
-};
-
-async function readJson(response) {
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "请求失败");
-  return data;
-}
-
-function getErrorMessage(error) {
-  const message = error?.message || String(error || "");
-  if (/Failed to fetch|fetch failed|NetworkError|Load failed/i.test(message)) {
-    return "本地服务连接失败，请刷新页面或确认服务已启动。";
-  }
-  if (/abort/i.test(message)) return "本地服务响应超时，请稍后重试。";
-  return message || "请求失败，请稍后重试。";
-}
-
-function isConnectionError(message = "") {
-  return /Failed to fetch|fetch failed|NetworkError|Load failed|本地服务连接失败|本地服务响应超时/i.test(message);
-}
+const CODEX_PPT_APPROVAL_GATES = [
+  { id: "outline", label: "大纲" },
+  { id: "style", label: "视觉风格" },
+  { id: "backend", label: "生图后端" },
+  { id: "sample", label: "样张" },
+  { id: "fullDeck", label: "全量生成" }
+];
 
 function uniqueIds(ids = []) {
   return [...new Set(ids.filter(Boolean))];
+}
+
+function formatReadyApprovalGateLabels(gates = []) {
+  const labels = gates.map((gate) => gate.label).filter(Boolean);
+  return labels.length ? labels.join("、") : "无";
+}
+
+const CODEX_PPT_NO_COST_APPROVAL_GATES = [
+  { id: "outline", label: "大纲", artifactKey: "codexPptOutline" },
+  { id: "style", label: "视觉风格", artifactKey: "codexPptStyle" },
+  { id: "backend", label: "生图后端", artifactKey: "codexPptBackendDecision" }
+];
+const LEGACY_CODEX_PPT_STYLE_RE = /轻盈渐变风|东方自然风|黑白画册风|蓝白科技风|暗黑科技风|旧模板|旧版模板|模板包|template[-_\s]?pack/i;
+
+function getApprovedCodexPptGateSet(job = {}) {
+  return new Set((Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
+    .filter((item) => item?.status === "approved" && item.gate)
+    .map((item) => item.gate));
+}
+
+function getNoCostCodexApprovalSummary(job = {}) {
+  const approved = getApprovedCodexPptGateSet(job);
+  const ready = CODEX_PPT_NO_COST_APPROVAL_GATES.filter((gate) => {
+    const artifact = job?.artifacts?.[gate.artifactKey];
+    if (gate.id === "style" && looksLikeLegacyCodexPptStyle(artifact)) return false;
+    return !approved.has(gate.id) && Boolean(artifact?.path || artifact?.relativePath);
+  });
+  return {
+    ready,
+    readyCount: ready.length,
+    labelText: formatReadyApprovalGateLabels(ready),
+    approvedCount: CODEX_PPT_NO_COST_APPROVAL_GATES.filter((gate) => approved.has(gate.id)).length,
+    total: CODEX_PPT_NO_COST_APPROVAL_GATES.length
+  };
+}
+
+function looksLikeLegacyCodexPptStyle(artifact = {}) {
+  const text = [
+    artifact?.styleBrief,
+    artifact?.title,
+    artifact?.source,
+    artifact?.path,
+    artifact?.relativePath,
+    artifact?.markdownPath,
+    artifact?.markdownRelativePath
+  ].filter(Boolean).join(" ");
+  return LEGACY_CODEX_PPT_STYLE_RE.test(text);
+}
+
+const UI_TEXT_REPLACEMENTS = [
+  ["Product v1 acceptance", "产品级 v1 验收"],
+  ["v1 acceptance needs evidence", "v1 验收仍缺少证据"],
+  ["v1 acceptance pending", "v1 验收待处理"],
+  ["v1 acceptance blocked", "v1 验收被阻断"],
+  ["v1 acceptance ready", "v1 验收就绪"],
+  ["Record sample spend authorization", "记录样张额度授权"],
+  ["Record full-deck spend authorization", "记录全量额度授权"],
+  ["Regenerate product visual sample", "重新生成产品级视觉样张"],
+  ["Generate product visual sample", "生成产品级视觉样张"],
+  ["Approve product visual sample", "确认产品级视觉样张"],
+  ["Approve full-deck generation", "确认全量生成"],
+  ["Confirm codex-ppt image API usage", "确认 codex-ppt 图片 API 用量"],
+  ["Confirm external image API usage", "确认外部图片 API 用量"],
+  ["Configure external image runtime", "配置外部图片运行环境"],
+  ["Current workflow step", "当前工作流步骤"],
+  ["Current delivery step", "当前交付步骤"],
+  ["Spend authorization", "额度授权"],
+  ["Spend authorization ledger", "额度授权账本"],
+  ["Product sample preflight", "产品样张预检"],
+  ["Waiting for image API confirmation", "等待图片 API 确认"],
+  ["Guided preflight", "引导预检"],
+  ["Ready before run", "运行前已就绪"],
+  ["Confirmation required", "需要确认"],
+  ["Manual step", "需要手动处理"],
+  ["Blocked before run", "运行前被阻断"],
+  ["Checking next action", "正在检查下一步"],
+  ["codex-ppt visual preflight", "codex-ppt 视觉预检"],
+  ["Ready to generate visuals", "已可生成视觉页"],
+  ["Needs spend confirmation", "需要确认额度"],
+  ["Runtime evidence", "运行环境证据"],
+  ["Runtime matches approval", "运行环境与确认一致"],
+  ["Worker batch preflight", "页面批处理预检"],
+  ["Ready to start", "可以开始"],
+  ["Needs confirmation", "需要确认"],
+  ["Blocked", "被阻断"],
+  ["Sample gate guard", "样张确认保护"],
+  ["Sample gate approved", "样张已确认"],
+  ["Product sample required", "需要产品级样张"],
+  ["Ready for human review", "等待人工复核"],
+  ["Waiting for sample evidence", "等待样张证据"],
+  ["codex-ppt full-deck image stage", "codex-ppt 全量图片阶段"],
+  ["Cost estimate", "费用预估"],
+  ["Workflow cleanup", "工作流清理"],
+  ["Preview cleanup", "预览清理页"],
+  ["Archive cleanup candidates", "归档清理候选"],
+  ["Source render", "源文件渲染"],
+  ["Image deck", "图片型 PPT"],
+  ["Editable rebuild", "可编辑重建"],
+  ["Delivery gate", "交付门禁"],
+  ["Ready", "就绪"],
+  ["Pending", "待处理"],
+  ["Running", "运行中"],
+  ["Recorded", "已记录"],
+  ["Failed", "失败"],
+  ["Missing", "缺失"],
+  ["Configured", "已配置"],
+  ["Required", "必需"],
+  ["Available", "可用"],
+  ["Optional", "可选"],
+  ["Online", "在线"],
+  ["Offline", "离线"],
+  ["Final ready", "最终文件就绪"],
+  ["Not ready", "未就绪"],
+  ["Not started", "未开始"],
+  ["not_started", "未开始"],
+  ["In workflow", "工作流中"],
+  ["Sample ready", "样张就绪"],
+  ["Rebuild stage", "重建阶段"],
+  ["Image PPT", "图片型 PPT"],
+  ["Sample approval", "样张确认"],
+  ["Worker queue", "页面任务队列"],
+  ["Upload files", "上传文件"],
+  ["Local image", "本地生图"],
+  ["connected", "已连接"],
+  ["Local image not ready", "本地生图未就绪"],
+  ["Product doctor complete", "产品环境检查完成"],
+  ["All required product runtime checks passed", "所有必需运行环境检查通过"],
+  ["Node.js runtime", "Node.js 运行时"],
+  ["Workflow job directory", "工作流任务目录"],
+  ["LLM provider", "对话模型"],
+  ["Image provider", "图片 API"],
+  ["OCR provider", "OCR"],
+  ["editppt runtime", "editppt 运行时"],
+  ["image-to-editable-ppt contract", "image-to-editable-ppt 契约"],
+  ["v0.3-compatible", "v0.3 兼容"],
+  ["legacy-or-unknown", "旧版或未知"],
+  ["PDF renderer", "PDF 渲染器"],
+  ["pdftoppm available", "pdftoppm 可用"],
+  ["doctor passed", "doctor 通过"],
+  ["registered", "已注册"],
+  ["Brief / outline source", "需求简述/大纲来源"],
+  ["QA blocked", "QA 已阻断"],
+  ["Product-ready", "产品可交付"],
+  ["Draft only", "仅草稿"],
+  ["Blocked file", "文件被阻断"],
+  ["Diagnostics", "诊断"],
+  ["Final QA checklist", "最终 QA 清单"],
+  ["Page count parity", "页数一致性"],
+  ["Page worker evidence", "页面任务证据"],
+  ["Finalize evidence", "最终生成证据"],
+  ["codex-ppt evidence", "codex-ppt 证据"],
+  ["manual-review", "人工复核"],
+  ["user input", "用户输入"],
+  ["user materials", "用户资料"],
+  ["user images", "用户图片"],
+  ["system inference + needs manual confirmation", "系统推断 + 需要人工确认"],
+  ["system inference", "系统推断"],
+  ["needs manual confirmation", "需要人工确认"],
+  ["unknown", "未知"],
+  ["generated", "已生成"],
+  ["items", "项"],
+  ["required", "必需"],
+  ["confirmed", "已确认"],
+  ["recorded", "已记录"],
+  ["missing", "缺失"],
+  ["pending", "待处理"],
+  ["ready", "就绪"],
+  ["blocked", "阻断"],
+  ["warning", "注意"],
+  ["pass", "通过"],
+  ["review", "需复核"],
+  ["manual", "手动"],
+  ["mutating", "会改动"],
+  ["read-only", "只读"],
+  ["not required", "不需要"],
+  ["not detected", "未发现"],
+  ["detected", "已发现"],
+  ["refresh", "刷新"],
+  ["current", "当前"],
+  ["waiting", "等待中"]
+];
+
+function uiZh(value = "") {
+  let text = String(value ?? "");
+  if (!text) return "";
+  for (const [from, to] of UI_TEXT_REPLACEMENTS) {
+    text = text.split(from).join(to);
+  }
+  return text
+    .replace(/\bpage\(s\)/g, "页")
+    .replace(/\bslide task\(s\)/g, "个图片页任务")
+    .replace(/\bselected\b/g, "已选择")
+    .replace(/\btotal\b/g, "总计")
+    .replace(/\bcall\(s\)/g, "次调用")
+    .replace(/\bimage calls?\b/gi, "图片调用")
+    .replace(/\bprovider pending\b/gi, "服务商待确认")
+    .replace(/\bconfigured runtime\b/gi, "已配置运行环境")
+    .replace(/\bruntime pending\b/gi, "运行环境待确认");
 }
 
 function mergeById(current = [], incoming = []) {
@@ -186,12 +292,11 @@ function mergeById(current = [], incoming = []) {
 
 function App() {
   const [form, setForm] = useState({
-    projectName: "2026 端午礼盒",
-    audience: "销售团队内部战卡",
+    projectName: "",
+    audience: "",
     pageCount: "系统推荐",
     notes: "",
-    style: "轻盈渐变风",
-    copyMode: "先确认每页文案，再排版",
+    copyMode: "先确认大纲和样张，再重建可编辑 PPT",
     outlineStrategy: "keep-source",
     primaryProduct: "",
     includeToc: true,
@@ -209,23 +314,36 @@ function App() {
   const [outlineBrief, setOutlineBrief] = useState(null);
   const [outlineInsertLayout, setOutlineInsertLayout] = useState("section");
   const [formats, setFormats] = useState(["pptx", "pdf", "png"]);
-  const [themes, setThemes] = useState(FALLBACK_THEMES);
-  const [templatePacks, setTemplatePacks] = useState(FALLBACK_TEMPLATE_PACKS);
-  const [skillRules, setSkillRules] = useState({});
+  const [skillRules] = useState(SKILL_FIRST_RULES);
   const [styleReferences, setStyleReferences] = useState([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [generationProgress, setGenerationProgress] = useState({ active: false, mode: "", value: 0, label: "" });
   const [intakeDraft, setIntakeDraft] = useState("");
   const [intakeMessages, setIntakeMessages] = useState([]);
+  const [directorDraft, setDirectorDraft] = useState("");
+  const [directorBusy, setDirectorBusy] = useState(false);
+  const [directorMessages, setDirectorMessages] = useState([
+    {
+      id: "director_welcome",
+      role: "assistant",
+      title: "PPT 智能体",
+      text: "我会围绕两套核心技能推进：先用 codex-ppt 生成视觉统一的图片型 PPT，再用 image-to-editable-ppt/editppt 重建可编辑 PPT。先上传源文件或输入需求，然后按确认关卡继续。",
+      facts: ["双技能工作流", "codex-ppt 图片型 PPT", "editppt 可编辑重建"],
+      actions: [
+        { id: "focus-upload", label: "上传文件", kind: "navigate", step: "materials" },
+        { id: "open-workflow", label: "打开工作流", event: "open-workflow" }
+      ]
+    }
+  ]);
   const [activeStep, setActiveStep] = useState("materials");
-  const [rightPanelMode, setRightPanelMode] = useState("closed");
+  const [rightPanelMode, setRightPanelMode] = useState("agent");
   const [focusPreview, setFocusPreview] = useState(false);
   const [connection, setConnection] = useState({ state: "checking", message: "正在检查本地服务..." });
-  const [localImage, setLocalImage] = useState({ state: "checking", message: "正在检查本地生图..." });
+  const [localImage, setLocalImage] = useState({ state: "checking", message: "正在检查本地生图服务..." });
+  const [doctor, setDoctor] = useState({ state: "checking", message: "正在检查产品运行环境..." });
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [templateBusy, setTemplateBusy] = useState(false);
-  const [apiConfig, setApiConfig] = useState({ apiKey: "", maskedApiKey: "", hasApiKey: false, baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" });
+  const [apiConfig, setApiConfig] = useState({ apiKey: "", maskedApiKey: "", hasApiKey: false, baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", imageModel: "gpt-image-2" });
   const [availableModels, setAvailableModels] = useState([]);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [draft, setDraft] = useState(makeSlideDraft(null));
@@ -233,32 +351,14 @@ function App() {
   const [draggedSlide, setDraggedSlide] = useState(null);
   const [dropTargetSlide, setDropTargetSlide] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [workflowJob, setWorkflowJob] = useState(null);
+  const [workflowJobs, setWorkflowJobs] = useState([]);
+  const [workflowShowArchived, setWorkflowShowArchived] = useState(false);
+  const [workflowBusy, setWorkflowBusy] = useState(false);
 
   useEffect(() => {
-    api.jobs().then((data) => {
-      const nextJobs = data.jobs || [];
-      setJobs(nextJobs);
-      const startupJob = nextJobs.find((item) => isFullDeckJob(item) && isPreferredStartupJob(item))
-        || nextJobs.find((item) => isFullDeckJob(item) && isRestorableJob(item))
-        || nextJobs.find(isPreferredStartupJob)
-        || nextJobs.find(isRestorableJob)
-        || null;
-      setJob(startupJob);
-      setFiles(startupJob?.files || []);
-      setFileIds((startupJob?.files || []).map((file) => file.id).filter(Boolean));
-      setSelectedSlide(0);
-      setActiveStep(startupJob ? "preview" : "materials");
-      setStatus(startupJob ? "已恢复最近任务" : "");
-    }).catch(() => {});
-    api.designSystem().then((data) => {
-      const nextThemes = data.themes || [];
-      if (nextThemes.length && !nextThemes.some((theme) => isMojibake(theme.name || theme.bestFor))) setThemes(nextThemes);
-      const nextPacks = data.templatePacks || [];
-      if (nextPacks.length && !nextPacks.some((pack) => isMojibake(pack.name || pack.scenario))) setTemplatePacks(nextPacks);
-      setSkillRules(data.skillRules || {});
-      setStyleReferences(data.styleReferences || []);
-    }).catch(() => {});
     api.styleReferences().then((data) => setStyleReferences(data.references || [])).catch(() => {});
+    loadWorkflowJobs({ restoreLatest: true });
     api.config().then((data) => {
       setApiConfig((current) => ({ ...current, ...data, apiKey: "" }));
     }).catch(() => {});
@@ -274,7 +374,7 @@ function App() {
         if (!active) return;
         setLocalImage({
           state: data.ok ? "online" : "offline",
-          message: data.ok ? `${data.provider || "本地生图"} 已连接` : (data.reason || "本地生图未就绪"),
+          message: data.ok ? ((data.provider || "本地生图") + " 已连接") : (data.reason || "本地生图未就绪"),
           details: data
         });
       } catch {
@@ -302,7 +402,7 @@ function App() {
         if (!active) return;
         setConnection({
           state: "online",
-          message: data.uptime ? `本地在线 ${formatDuration(data.uptime)}` : "本地在线",
+          message: data.uptime ? "本地在线 " + formatDuration(data.uptime) : "本地在线",
           details: data
         });
         setError((current) => (isConnectionError(current) ? "" : current));
@@ -321,22 +421,46 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    async function checkDoctor() {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 70000);
+      try {
+        const data = await api.doctor(controller.signal);
+        if (!active) return;
+        setDoctor({
+          state: data.level || (data.ok ? "ready" : "blocked"),
+          message: data.summary || "产品运行环境检查完成",
+          details: data
+        });
+      } catch (error) {
+        if (!active) return;
+        setDoctor({ state: "blocked", message: getErrorMessage(error) });
+      } finally {
+        window.clearTimeout(timer);
+      }
+    }
+    checkDoctor();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const slides = job?.deck?.slides || [];
   const currentSlide = slides[selectedSlide];
   const currentImage = job?.previewImages?.[selectedSlide];
   const savedDraft = useMemo(() => makeSlideDraft(currentSlide), [currentSlide]);
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(savedDraft), [draft, savedDraft]);
   const liveSlide = useMemo(() => draftToSlide(currentSlide, draft), [currentSlide, draft]);
-  const currentTemplate = getCurrentTemplate(job, templatePacks);
-  const currentStyle = job?.input?.style || job?.quality?.routePlan?.recommendedTheme || "";
-  const templateHit = getTemplateRenderHit(currentTemplate, dirty ? liveSlide : currentSlide);
-  const selectedFileNames = useMemo(() => files.map((file) => file.originalName).join("、"), [files]);
+  const selectedFileNames = useMemo(() => files.map((file) => file.originalName).join(" / "), [files]);
   const hasUploadedMaterials = files.length > 0;
   const intakeReadiness = useMemo(() => getIntakeReadiness(form.notes, files), [form.notes, files]);
   const inferredMaterials = useMemo(() => inferMaterialTypes(files), [files]);
   const completion = useMemo(() => getCompletion({ form, fileIds, job }), [form, fileIds, job]);
   const stepState = useMemo(() => getStepState({ activeStep, fileIds, job, formats }), [activeStep, fileIds, job, formats]);
   const finalExportBlocked = isJobBlockedForFinal(job);
+  const noCostApprovalSummary = useMemo(() => getNoCostCodexApprovalSummary(workflowJob), [workflowJob]);
 
   const topbarStateClass = error || connection.state === "offline" ? "state-dot error" : connection.state === "online" ? "state-dot active" : "state-dot checking";
   const topbarMessage = error || status || connection.message || "准备就绪";
@@ -370,9 +494,6 @@ function App() {
 
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
-    if (name === "style") {
-      setStatus("已切换设计方向。");
-    }
   }
 
   function updateDraft(name, value) {
@@ -387,15 +508,15 @@ function App() {
     const now = Date.now();
     setIntakeMessages((current) => [
       ...current,
-      { id: `user-${now}`, role: "user", text: userText },
-      { id: `assistant-${now}`, role: "assistant", text: intent.reply, kind: intent.kind }
+      { id: "user-" + now, role: "user", text: userText },
+      { id: "assistant-" + now, role: "assistant", text: intent.reply, kind: intent.kind }
     ]);
     if (text && intent.actionable) {
       setForm((current) => ({ ...current, notes: [current.notes, text].filter(Boolean).join("\n") }));
     }
     setIntakeDraft("");
     setError("");
-    setStatus(intent.actionable ? "已记录这条需求，可以继续补充，或让系统开始理解并生成大纲。" : "已作为对话处理，没有把它当成 PPT 需求。");
+    setStatus(intent.actionable ? "需求已记录。你可以继续补充细节，或开始生成大纲。" : "已按对话处理，未创建 PPT 需求。");
   }
 
   function handleIntakeKeyDown(event) {
@@ -406,7 +527,7 @@ function App() {
 
   function validatePreparation(nextForm = form) {
     if (!nextForm.notes.trim() && fileIds.length === 0) {
-      setError("请至少填写一句话需求，或上传一份资料。");
+      setError("请至少填写一句需求，或上传一份资料。");
       setStatus("");
       setActiveStep("materials");
       return false;
@@ -427,8 +548,8 @@ function App() {
         const now = Date.now();
         setIntakeMessages((current) => [
           ...current,
-          { id: `upload-${now}`, role: "user", text: `上传了 ${uploaded.length} 个资料：${names}` },
-          { id: `upload-reply-${now}`, role: "assistant", text: "已收到资料。现在可以选择保留原稿结构优化，或重新规划叙事；也可以继续补充你的目标、受众和风格要求。" }
+          { id: "upload-" + now, role: "user", text: `已上传 ${uploaded.length} 个文件：${names}` },
+          { id: "upload-reply-" + now, role: "assistant", text: "资料已收到。接下来可以继续补充要求，或进入双技能工作流。" }
         ]);
       }
       setStatus("资料已上传，可以继续补充需求或开始生成。");
@@ -443,11 +564,11 @@ function App() {
 
   async function removeUploadedFile(file) {
     if (!file?.id) return;
-    if (!window.confirm(`删除已上传文件「${file.originalName || file.id}」？本地源文件也会删除。`)) return;
+    if (!window.confirm("删除上传文件 " + (file.originalName || file.id) + "？本地源文件也会被移除。")) return;
     setError("");
     setStatus("正在删除上传文件...");
     try {
-      await api.remove(`/api/uploads/${file.id}`);
+      await api.remove("/api/uploads/" + file.id);
       setFiles((current) => current.filter((item) => item.id !== file.id));
       setFileIds((current) => current.filter((id) => id !== file.id));
       setStatus("上传文件已删除。");
@@ -465,37 +586,277 @@ function App() {
     }
   }
 
-  async function createJob(mode, confirmedOutline = null) {
-    if (!validatePreparation()) return;
-    const requestForm = getRequestFormForFiles(form);
+  async function runWorkflowRebuildPipeline() {
+    const sourceUploadId = fileIds[0];
+    if (!sourceUploadId) {
+      setError("请先上传 PPT/PDF/图片作为可编辑重建源文件。");
+      setActiveStep("materials");
+      return;
+    }
+    setWorkflowBusy(true);
     setError("");
-    setStatus(mode === "optimize" ? "正在解析旧 PPT 并生成新版..." : "正在生成新 PPT...");
-    setGenerationProgress({
-      active: true,
-      mode,
-      value: 8,
-      label: mode === "optimize" ? "正在读取旧稿内容" : "正在整理资料和生成路线"
-    });
+    setStatus("正在创建可编辑重建 workflow...");
     try {
-      const data = await api.create(mode === "optimize" ? "/api/jobs/optimize" : "/api/jobs/generate", {
-        ...requestForm,
-        projectName: getEffectiveProjectName(requestForm, files),
-        fileIds,
-        materials: inferredMaterials,
-        outlinePlan: confirmedOutline,
-        mode
+      let next = await api.createWorkflowJob({
+        sourceUploadId,
+        mode: "ppt-rebuild",
+        notes: "frontend-workflow-pipeline"
       });
-      setJob(data);
-      setSelectedSlide(0);
-      setActiveStep("preview");
-      setRightPanelMode("status");
-      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus(data.warning || "一键链路已完成：可先审阅视觉目标与可编辑结果，再进入在线编辑或导出。");
-      setGenerationProgress({ active: false, mode: "", value: 100, label: "生成完成" });
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+
+      const run = async (action, body, label) => {
+        setStatus(label);
+        next = await api.workflowAction(next.id, action, body);
+        setWorkflowJob(next);
+        return next;
+      };
+
+      await run("source/render", {}, "正在渲染源页面...");
+      setStatus("正在记录 codex-ppt 大纲证据...");
+      next = await api.recordCodexPptOutline(next.id, buildCodexPptOutlineRecordBody("frontend-upload-skill-first"));
+      setWorkflowJob(next);
+      setStatus("正在记录 codex-ppt 风格和后端决策...");
+      next = await api.recordCodexPptStyle(next.id, buildCodexPptStyleRecordBody("frontend-upload-skill-first"));
+      next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-upload-skill-first"));
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+      setStatus("工作流已创建。请复核源页面，确认 codex-ppt 大纲/风格/后端后，再生成视觉样张。");
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
-      setGenerationProgress({ active: false, mode: "", value: 0, label: "" });
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function runBriefWorkflowPipeline() {
+    const sourceBrief = buildSkillFirstBriefSource({ form, outlinePlan, files, inferredMaterials });
+    if (!sourceBrief.trim()) {
+      setError("创建双技能工作流前，请先输入需求简述或确认大纲。");
+      setActiveStep("materials");
+      return;
+    }
+    setWorkflowBusy(true);
+    setError("");
+    setStatus("正在根据需求创建双技能工作流...");
+    try {
+      let next = await api.createWorkflowJob({
+        sourceBrief,
+        sourceOriginalName: getEffectiveProjectName(form, files) + "-brief.md",
+        sourceMimeType: "text/markdown",
+        mode: "codex-ppt-brief",
+        notes: "frontend-brief-skill-first-workflow"
+      });
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+
+      setStatus("正在渲染简述来源...");
+      next = await api.workflowAction(next.id, "source/render", {});
+      setWorkflowJob(next);
+      setStatus("正在记录 codex-ppt 大纲证据...");
+      next = await api.recordCodexPptOutline(next.id, buildCodexPptOutlineRecordBody("frontend-brief-skill-first", sourceBrief));
+      setWorkflowJob(next);
+      setStatus("正在记录 codex-ppt 风格和后端决策...");
+      next = await api.recordCodexPptStyle(next.id, buildCodexPptStyleRecordBody("frontend-brief-skill-first"));
+      next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-brief-skill-first"));
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+      setStatus("简述工作流已创建。请确认 codex-ppt 大纲/风格/后端后，再生成视觉样张。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function startSkillFirstWorkflow() {
+    if (!fileIds.length) {
+      await runBriefWorkflowPipeline();
+      return;
+    }
+    await runWorkflowRebuildPipeline();
+  }
+
+  function buildCodexPptOutlineRecordBody(source, sourceBrief = "") {
+    return {
+      outlinePlan,
+      source,
+      sourceBrief: sourceBrief || buildSkillFirstBriefSource({ form, outlinePlan, files, inferredMaterials }),
+      title: getEffectiveProjectName(form, files),
+      recordedBy: "frontend-skill-first",
+      notes: "codex-ppt outline artifact required before outline approval"
+    };
+  }
+
+  function buildCodexPptStyleRecordBody(source) {
+    return {
+      source,
+      title: getEffectiveProjectName(form, files),
+      styleBrief: "以源页内容、用户说明和可选参考图作为视觉依据；codex-ppt 负责统一调性、留白、层级和页面节奏，不套用旧模板包或固定版式。",
+      audience: form.audience || "",
+      references: files.map((file) => file.originalName || file.id).filter(Boolean),
+      recordedBy: "frontend-skill-first",
+      notes: "codex-ppt style artifact required before style approval"
+    };
+  }
+
+  function buildCodexPptBackendRecordBody(source) {
+    return {
+      source,
+      recordedBy: "frontend-skill-first",
+      notes: "codex-ppt backend artifact required before backend approval"
+    };
+  }
+
+  async function loadWorkflowJobs({ activeId = "", includeArchived = workflowShowArchived, restoreLatest = false } = {}) {
+    try {
+      const data = await api.workflowJobs({ includeArchived });
+      const nextJobs = (data.jobs || []).filter(isUserWorkflowJob);
+      setWorkflowJobs(nextJobs);
+      const active = activeId ? nextJobs.find((item) => item.id === activeId) : null;
+      const latest = restoreLatest ? selectDefaultWorkflowJob(nextJobs) : null;
+      if (active || (restoreLatest && (!workflowJob || isInternalWorkflowJob(workflowJob)) && latest)) {
+        setWorkflowJob(active || latest);
+      } else if (restoreLatest && !latest && (!workflowJob || isInternalWorkflowJob(workflowJob))) {
+        setWorkflowJob(null);
+      }
+      return nextJobs;
+    } catch {
+      return [];
+    }
+  }
+
+  async function toggleWorkflowArchive(jobId, archive = true) {
+    if (!jobId) return;
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      const body = {
+        reason: archive ? "Archived from workflow workspace" : "Restored from workflow workspace",
+        archivedBy: "operator",
+        restoredBy: "operator"
+      };
+      const next = archive
+        ? await api.archiveWorkflowJob(jobId, body)
+        : await api.restoreWorkflowJob(jobId, body);
+      if (!archive) setWorkflowJob(next);
+      const nextJobs = await loadWorkflowJobs({ activeId: archive ? "" : next.id, includeArchived: workflowShowArchived, restoreLatest: archive });
+      if (archive && workflowJob?.id === jobId) {
+        setWorkflowJob(nextJobs.find((item) => !item.archived) || null);
+      }
+      setStatus(archive ? "工作流已归档，产物仍保留在磁盘。" : "工作流已恢复。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function setWorkflowArchiveVisibility(nextShowArchived) {
+    setWorkflowShowArchived(nextShowArchived);
+    await loadWorkflowJobs({ activeId: workflowJob?.id || "", includeArchived: nextShowArchived, restoreLatest: true });
+  }
+
+  async function selectWorkflowJob(id) {
+    if (!id) return;
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      const next = await api.workflowJob(id);
+      setWorkflowJob(next);
+      setStatus("已切换 workflow。");
+      await loadWorkflowJobs({ activeId: id });
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function refreshWorkflowJob() {
+    if (!workflowJob?.id) return;
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      const next = await api.workflowJob(workflowJob.id);
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+      setStatus("workflow 状态已刷新。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function runWorkflowStep(action, body = {}, label = "正在执行 workflow 阶段...") {
+    if (!workflowJob?.id) return;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus(label);
+    try {
+      const next = await api.workflowAction(workflowJob.id, action, body);
+      setWorkflowJob(next);
+      setStatus("workflow 阶段已完成。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function runWorkflowNextAction(label = "正在执行下一步双技能工作流操作...", body = {}) {
+    if (!workflowJob?.id) return null;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus(label);
+    try {
+      const result = await api.workflowNextAction(workflowJob.id, { ...body, requestedBy: "frontend-guided-next" });
+      if (result.job) {
+        setWorkflowJob(result.job);
+        await loadWorkflowJobs({ activeId: result.job.id });
+      }
+      setStatus(result.manualRequired ? uiZh(result.reason || "需要手动处理。") : result.didRun ? "工作流下一步已完成。" : uiZh(result.reason || "工作流已刷新。"));
+      return result;
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+      return null;
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function approveNoCostCodexGates() {
+    if (!workflowJob?.id || !noCostApprovalSummary.readyCount) return;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus(`正在确认 ${noCostApprovalSummary.labelText}，不会生成图片...`);
+    try {
+      for (const gate of noCostApprovalSummary.ready) {
+        const preflight = await api.preflightCodexPptGate(workflowJob.id, gate.id, { note: `frontend-main-${gate.id}-approval` });
+        if (!preflight.ready && !preflight.passed) {
+          throw new Error(preflight.error || `${gate.label} 还不能确认`);
+        }
+        await api.approveCodexPptGate(workflowJob.id, gate.id, {
+          note: `frontend-main-${gate.id}-approval`,
+          approvedBy: "frontend-skill-first"
+        });
+      }
+      const next = await api.workflowJob(workflowJob.id);
+      setWorkflowJob(next);
+      await loadWorkflowJobs({ activeId: next.id });
+      setActiveStep("generate");
+      setStatus(`已确认 ${noCostApprovalSummary.labelText}。这一步未生成图片，样张前仍需要外部图片 API 授权。`);
+      window.setTimeout(() => document.getElementById("workflow-compliance-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
     }
   }
 
@@ -507,33 +868,6 @@ function App() {
     return hasUploadedMaterials ? current : { ...current, outlineStrategy: "regenerate" };
   }
 
-  function buildDesignLedForm(current = form) {
-    const existingNotes = String(current.notes || "").trim();
-    const notes = existingNotes && existingNotes.includes("高级设计优化")
-      ? existingNotes
-      : [existingNotes, DESIGN_LED_INSTRUCTION].filter(Boolean).join("\n\n");
-    return {
-      ...current,
-      audience: current.audience || "对外展示 / 提案沟通 / 视觉化表达",
-      copyMode: "高级设计优化：视觉优先，标题优先，图片优先，可编辑交付",
-      reconstructionMode: "design-led",
-      designDirectorMode: true,
-      designPriority: "visual-first",
-      editableOutput: true,
-      outlineStrategy: "keep-source",
-      includeToc: current.includeToc,
-      includeRiskChecklist: true,
-      notes
-    };
-  }
-
-  async function activateDesignLedMode() {
-    const nextForm = buildDesignLedForm();
-    setForm(nextForm);
-    setStatus("已切换为高级设计优化：视觉优先、可编辑交付，正在生成设计重构大纲...");
-    await planOutline(nextForm);
-  }
-
   async function planOutline(formOverride = null) {
     const requestForm = getRequestFormForFiles(formOverride || form);
     if (!validatePreparation(requestForm)) return;
@@ -541,7 +875,7 @@ function App() {
     setOutlineBusy(true);
     setStatus("正在生成可确认大纲...");
     try {
-      const data = await api.create("/api/jobs/outline", {
+      const data = await api.planWorkflowOutline({
         ...requestForm,
         projectName: getEffectiveProjectName(requestForm, files),
         fileIds,
@@ -649,7 +983,7 @@ function App() {
       const data = await api.rescanLocalImageQa(job.id);
       setJob(data);
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setStatus("本地图 QA 已刷新，文字污染和安全区风险已重新计算。");
+      setStatus("本地图片 QA 已刷新，文字污染和安全区风险已重新计算。");
       setRightPanelMode("status");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -666,8 +1000,26 @@ function App() {
       setJob(data);
       setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
       const sampleStatus = data.visualTarget?.sample?.status;
-      setStatus(sampleStatus === "generated" ? "视觉目标方向图已生成；最终 PPT 仍从 SceneGraph 渲染。" : "视觉目标方向图已记录为待生成；请确认本地生图服务在线。");
+      setStatus(sampleStatus === "generated" ? "视觉目标样张已生成。最终 PPT 仍会以 SceneGraph 渲染。" : "视觉目标样张已排队。请确认本地生图服务在线。");
       setRightPanelMode("status");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    }
+  }
+
+  async function generateDirectorVisualProject() {
+    if (!job?.id) return;
+    setError("");
+    setStatus("正在按 PPT 智能体流程生成视觉项目...");
+    try {
+      const data = await api.generateVisualProject(job.id, { maxSlides: "all", overwrite: false });
+      setJob(data);
+      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
+      const generated = data.visualProject?.generatedImages || 0;
+      const total = data.visualProject?.slideCount || 0;
+      setStatus("视觉项目已更新：" + generated + "/" + total + " 页。");
+      setRightPanelMode("agent");
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
@@ -727,7 +1079,7 @@ function App() {
     if (!job) return;
     if (finalExportBlocked && formats.some((format) => format !== "pptx")) {
       setError("");
-      setStatus("QA blocked：当前 editable PPTX 已作为草稿保留，修复阻断项后才能正式导出 PDF/PNG。");
+      setStatus("QA 已阻断：当前 editable PPTX 只作为草稿保留，修复阻断项后才能正式导出 PDF/PNG。");
       setRightPanelMode("status");
       return;
     }
@@ -758,6 +1110,30 @@ function App() {
     }
   }
 
+  async function savePaddleOcrToken() {
+    const token = String(apiConfig.paddleOcrToken || "").trim();
+    if (!token) {
+      setError("请先粘贴 PaddleOCR 令牌。");
+      return;
+    }
+    setSettingsBusy(true);
+    setError("");
+    setStatus("正在把 PaddleOCR 令牌保存到 editppt 配置...");
+    try {
+      const data = await api.savePaddleOcrToken({ paddleOcrToken: token });
+      setApiConfig((current) => ({
+        ...current,
+        paddleOcrToken: "",
+        editppt: data.editppt || current.editppt
+      }));
+      setStatus("PaddleOCR 令牌已保存。可在现有工作流中运行“重新生成 editppt 提示”刷新文字提示。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   async function testApiConfig() {
     setSettingsBusy(true);
     setStatus("\u6b63\u5728\u6d4b\u8bd5 API \u8fde\u63a5...");
@@ -775,6 +1151,27 @@ function App() {
     }
   }
 
+  async function testImageApiConfig() {
+    setSettingsBusy(true);
+    setStatus("正在测试外部图片 API 配置...");
+    setError("");
+    try {
+      const data = await api.testProvider({
+        ...apiConfig,
+        target: "image",
+        generateProbe: false
+      });
+      const image = data.result?.image || {};
+      if (!image.ok) throw new Error(image.error || "图片 API 配置测试失败。");
+      const provider = image.provider || {};
+      setStatus(image.message || `图片 API 已配置：${provider.model || apiConfig.imageModel || "图片模型"} / ${provider.baseUrl || apiConfig.baseUrl || "服务商"}。`);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
   async function detectModels() {
     setSettingsBusy(true);
     setStatus("\u6b63\u5728\u68c0\u6d4b\u53ef\u7528\u6a21\u578b...");
@@ -782,12 +1179,15 @@ function App() {
     try {
       const data = await api.models(apiConfig);
       const models = data.models || [];
+      const imageModels = data.imageModels || [];
       setAvailableModels(models);
       const nextModel = models.length && !models.includes(apiConfig.model) ? models[0] : apiConfig.model;
+      const nextImageModel = imageModels.length && !imageModels.includes(apiConfig.imageModel) ? imageModels[0] : (apiConfig.imageModel || "gpt-image-2");
       setApiConfig((current) => ({
         ...current,
         baseUrl: data.usedBaseUrl || current.baseUrl,
-        model: nextModel
+        model: nextModel,
+        imageModel: nextImageModel
       }));
       setStatus(models.length ? `\u5df2\u68c0\u6d4b\u5230 ${models.length} \u4e2a\u53ef\u7528\u6a21\u578b\uff0c\u5df2\u81ea\u52a8\u4f7f\u7528 ${data.usedBaseUrl || apiConfig.baseUrl}\u3002` : "\u6ca1\u6709\u68c0\u6d4b\u5230\u53ef\u7528\u804a\u5929\u6a21\u578b\u3002");
     } catch (err) {
@@ -800,11 +1200,11 @@ function App() {
   async function uploadStyleReference(files, meta) {
     if (!files?.length) return;
     setSettingsBusy(true);
-    setStatus("\u6b63\u5728\u52a0\u5165\u98ce\u683c\u53c2\u8003\u5e93...");
+    setStatus("正在加入可选参考图...");
     try {
       const data = await api.uploadStyleReferences(files, meta);
       setStyleReferences((current) => [...(data.references || []), ...current]);
-      setStatus("\u98ce\u683c\u53c2\u8003\u5df2\u52a0\u5165\uff0c\u540e\u7eed\u751f\u6210\u4f1a\u53c2\u8003\u8fd9\u7ec4\u8c03\u6027\u3002");
+      setStatus("可选参考图已加入，后续生成会参考这组调性。");
     } catch (err) {
       setStatus(getErrorMessage(err));
     } finally {
@@ -818,82 +1218,11 @@ function App() {
     try {
       await api.deleteStyleReference(id);
       setStyleReferences((current) => current.filter((item) => item.id !== id));
-      setStatus("\u5df2\u4ece\u98ce\u683c\u53c2\u8003\u5e93\u5220\u9664\u3002");
+      setStatus("已删除可选参考图。");
     } catch (err) {
       setStatus(getErrorMessage(err));
     } finally {
       setSettingsBusy(false);
-    }
-  }
-
-  function selectJob(item) {
-    setJob(item);
-    setFiles(item.files || []);
-    setFileIds((item.files || []).map((file) => file.id).filter(Boolean));
-    setSelectedSlide(0);
-    setActiveStep("preview");
-    setRightPanelMode("edit");
-  }
-
-  async function deleteHistoryJob(item) {
-    if (!item?.id) return;
-    if (!window.confirm(`删除历史任务「${item.deck?.title || item.id}」？对应导出文件也会删除。`)) return;
-    setError("");
-    setStatus("正在删除历史任务...");
-    try {
-      await api.remove(`/api/jobs/${item.id}`);
-      setJobs((current) => current.filter((jobItem) => jobItem.id !== item.id));
-      if (job?.id === item.id) {
-        setJob(null);
-        setFiles([]);
-        setFileIds([]);
-        setSelectedSlide(0);
-        setActiveStep("materials");
-      }
-      setStatus("历史任务已删除。");
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
-    }
-  }
-
-  async function deleteHistoryJobs(items = []) {
-    const targets = items.filter(Boolean);
-    if (!targets.length) return;
-    if (!window.confirm(`批量删除 ${targets.length} 个历史任务？对应导出文件也会删除。`)) return;
-    setError("");
-    setStatus("正在批量删除历史任务...");
-    try {
-      for (const item of targets) await api.remove(`/api/jobs/${item.id}`);
-      const targetIds = new Set(targets.map((item) => item.id));
-      setJobs((current) => current.filter((item) => !targetIds.has(item.id)));
-      if (job?.id && targetIds.has(job.id)) {
-        setJob(null);
-        setFiles([]);
-        setFileIds([]);
-        setSelectedSlide(0);
-        setActiveStep("materials");
-      }
-      setStatus(`已删除 ${targets.length} 个历史任务。`);
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
-    }
-  }
-
-  async function repairHistoryJob(item) {
-    if (!item?.id) return;
-    setError("");
-    setStatus("正在修复历史任务...");
-    try {
-      const data = await api.create(`/api/jobs/${item.id}/repair`, {});
-      setJobs((current) => [data, ...current.filter((historyItem) => historyItem.id !== data.id)]);
-      if (job?.id === data.id) setJob(data);
-      setStatus(data.previewWarning || "历史任务已修复。");
-      setRightPanelMode("history");
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
     }
   }
 
@@ -913,26 +1242,6 @@ function App() {
       setStatus("");
     } finally {
       setPreviewBusy(false);
-    }
-  }
-
-  async function rerenderTemplate(style) {
-    if (!job || !style || templateBusy) return;
-    setTemplateBusy(true);
-    setError("");
-    setStatus("正在按新设计方向重新渲染 PPT...");
-    try {
-      const data = await api.create(`/api/jobs/${job.id}/template`, { style });
-      setJob(data);
-      setJobs((current) => [data, ...current.filter((item) => item.id !== data.id)]);
-      setForm((current) => ({ ...current, style }));
-      setStatus(data.previewWarning || "页面结构已更新，PPTX 和预览已刷新。");
-      setRightPanelMode("status");
-    } catch (err) {
-      setError(getErrorMessage(err));
-      setStatus("");
-    } finally {
-      setTemplateBusy(false);
     }
   }
 
@@ -983,21 +1292,97 @@ function App() {
     setRightPanelMode((current) => (current === "settings" ? (activeStep === "preview" ? "edit" : "closed") : "settings"));
   }
 
+  async function sendDirectorMessage(textOverride = "") {
+    const text = (textOverride || directorDraft).trim();
+    if (!text || directorBusy) return;
+    const userMessage = { id: `director_user_${Date.now()}`, role: "user", text };
+    setDirectorMessages((current) => [...current, userMessage]);
+    setDirectorDraft("");
+    setDirectorBusy(true);
+    setError("");
+    try {
+      const reply = await api.directorChat({
+        message: text,
+        fileIds,
+        jobId: job?.id || "",
+        workflowJobId: workflowJob?.id || "",
+        workflowStage: workflowJob?.currentStage || workflowJob?.status || "",
+        skillFirst: true,
+        activeStep
+      });
+      setDirectorMessages((current) => [...current, { ...reply, id: `director_reply_${Date.now()}` }]);
+    } catch (err) {
+      setDirectorMessages((current) => [...current, {
+        id: `director_error_${Date.now()}`,
+        role: "assistant",
+        title: "连接失败",
+        text: getErrorMessage(err),
+        facts: [],
+        actions: []
+      }]);
+    } finally {
+      setDirectorBusy(false);
+    }
+  }
+
+  function handleDirectorKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendDirectorMessage();
+    }
+  }
+
+  async function handleDirectorAction(action = {}) {
+    if (action.kind === "navigate" && action.step) {
+      setActiveStep(action.step);
+      return;
+    }
+    if (action.event === "plan-outline") {
+      setActiveStep("outline");
+      await planOutline();
+      return;
+    }
+    if (action.event === "create-job") {
+      if (!outlinePlan?.layoutSequence?.length) await planOutline();
+      await startSkillFirstWorkflow();
+      return;
+    }
+    if (action.event === "open-workflow") {
+      setActiveStep("generate");
+      return;
+    }
+    if (action.event === "refresh-workflow") {
+      setActiveStep("generate");
+      await refreshWorkflowJob();
+      return;
+    }
+    if (action.event === "visual-sample") {
+      setActiveStep("generate");
+      await generateVisualTargetSample();
+      return;
+    }
+    if (action.event === "visual-project") {
+      setActiveStep("generate");
+      await generateDirectorVisualProject();
+    }
+  }
+
   const editBlocked = Boolean(job?.editReadiness && job.editReadiness.ready === false);
   const hasEditableContext = Boolean(job && currentSlide && !editBlocked);
+  const allowAdvancedEdit = activeStep === "preview" && hasEditableContext;
   const showRightPanel = (activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed";
   const visibleRightPanelMode = rightPanelMode === "closed"
-    ? (hasEditableContext ? "edit" : "status")
-    : (!hasEditableContext && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
-  const rightPanelTabs = hasEditableContext
-    ? [["edit", "编辑"], ["history", "历史"]]
-    : [["history", "历史"]];
+    ? "status"
+    : (!allowAdvancedEdit && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
+  const rightPanelTabs = allowAdvancedEdit
+    ? [["status", "状态"], ["edit", "高级修正"], ["history", "历史"]]
+    : [["status", "状态"], ["history", "历史"]];
 
   return (
     <div className="workspace-shell">
       <header className="topbar">
         <div>
-          <span className="brand">PPT Design OS</span>
+          <span className="brand">PPT 智能体工作台</span>
         </div>
         <div className="topbar-status">
           <span className={topbarStateClass} />
@@ -1038,7 +1423,7 @@ function App() {
               <div className="chat-intake">
                 <div className="intake-agent-panel">
                   <div>
-                    <b>PPT Agent</b>
+                    <b>PPT 智能体</b>
                     <span>{intakeReadiness.label}</span>
                   </div>
                   <small>{intakeReadiness.hint}</small>
@@ -1054,7 +1439,7 @@ function App() {
                 )}
                 {!intakeMessages.length && (
                   <div className="intake-suggestions">
-                    {["你可以干嘛？", "我要从零做一份提案 PPT", "我想优化旧 PPT", "先问我几个问题"].map((item) => (
+                    {["说明双技能流程", "重制现有 PPT", "从需求创建工作流", "先确认素材"].map((item) => (
                       <button type="button" key={item} onClick={() => setIntakeDraft(item)}>{item}</button>
                     ))}
                   </div>
@@ -1074,7 +1459,7 @@ function App() {
                   <div className="chat-toolbar">
                     <small>{selectedFileNames || UI.uploadHint}</small>
                     <button className="send-button" type="button" onClick={submitIntakeMessage} disabled={!intakeDraft.trim() && fileIds.length === 0} aria-label={UI.sendOutline}>
-                      {outlineBusy ? "..." : "→"}
+                      {outlineBusy ? "..." : "发送"}
                     </button>
                   </div>
                 </div>
@@ -1095,7 +1480,7 @@ function App() {
                     <button className="btn primary" type="button" onClick={() => planOutline()} disabled={outlineBusy || !intakeReadiness.ready}>
                       {outlineBusy ? "正在理解资料" : "开始理解并生成大纲"}
                     </button>
-                    <span>{intakeReadiness.ready ? "不会直接生成完整 PPT，会先出可确认的大纲。" : intakeReadiness.nextQuestion}</span>
+                    <span>{intakeReadiness.ready ? "这里会先生成可确认的大纲，不会直接生成完整 PPT。" : uiZh(intakeReadiness.nextQuestion)}</span>
                   </div>
                 )}
                 {files.length > 0 && (
@@ -1112,30 +1497,50 @@ function App() {
                     ))}
                   </div>
                 )}
+                <SkillFirstProductConsole
+                  approvalSummary={noCostApprovalSummary}
+                  busy={workflowBusy || generationProgress.active}
+                  fileCount={fileIds.length}
+                  hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                  job={workflowJob}
+                  jobCount={workflowJobs.length}
+                  onApproveNoCostGates={approveNoCostCodexGates}
+                  onCreate={startSkillFirstWorkflow}
+                  onOpenWorkflow={() => setActiveStep("generate")}
+                  onRefresh={() => loadWorkflowJobs({ activeId: workflowJob?.id || "", restoreLatest: !workflowJob?.id })}
+                  status={deriveWorkflowDeliveryStatus(workflowJob, [])}
+                />
+                <ProductReadinessPanel
+                  connection={connection}
+                  doctor={doctor}
+                  job={workflowJob}
+                  localImage={localImage}
+                  status={deriveWorkflowDeliveryStatus(workflowJob, [])}
+                />
               </div>
             </SectionCard>
           )}
 
           {activeStep === "outline" && (
-            <SectionCard className="outline-card" title="确认大纲" desc="先确认页序、版式、标题和每页用途，再进入最终生成。">
+            <SectionCard className="outline-card" title="确认大纲" desc="正式生成前，先确认页序、版式、标题和每页目标。">
               <div className="readiness">
                 <Metric label="资料文件" value={fileIds.length} />
-                <Metric label="自动识别资料" value={inferredMaterials.length ? `${inferredMaterials.length} 类` : "待识别"} />
+                <Metric label="自动识别素材" value={inferredMaterials.length ? `${inferredMaterials.length} 类` : "待处理"} />
                 <Metric label="需求完整度" value={`${completion}%`} />
               </div>
               <div className="outline-panel">
                 <div>
                   <b>大纲方案</b>
-                  <span>{outlineBrief ? `${inputStrengthLabel(outlineBrief.inputStrength)} / 产品 ${outlineBrief.productCount || 0} / 价格 ${outlineBrief.priceCount || 0} / 图片 ${outlineBrief.imageCount || 0}` : "先生成页序、版式、标题和每页用途，再确认生成。"}</span>
+                  <span>{outlineBrief ? `${inputStrengthLabel(outlineBrief.inputStrength)} / 产品 ${outlineBrief.productCount || 0} / 价格 ${outlineBrief.priceCount || 0} / 图片 ${outlineBrief.imageCount || 0}` : "先生成页序、版式、标题和页面目标，再确认生成。"} </span>
                 </div>
                 <div className="button-row tight">
                   <button className="btn ghost" type="button" onClick={planOutline} disabled={outlineBusy}>{outlineBusy ? "正在生成大纲" : "重新生成大纲"}</button>
-                  <button className="btn primary" type="button" onClick={() => setActiveStep("generate")} disabled={!outlinePlan?.layoutSequence?.length}>确认大纲，进入生成</button>
+                  <button className="btn primary" type="button" onClick={() => setActiveStep("generate")} disabled={!outlinePlan?.layoutSequence?.length}>确认大纲并生成</button>
                 </div>
                 {outlinePlan?.layoutSequence?.length ? (
                   <div className="outline-list outline-card-list">
                     <div className="outline-digest">
-                      <strong>故事线</strong>
+                      <strong>叙事线</strong>
                       <span>{outlinePlan.layoutSequence.map((step, index) => `${index + 1}. ${step.title || LAYOUT_LABELS[step.layout] || step.layout}`).slice(0, 8).join(" / ")}</span>
                     </div>
                     <div className="outline-insert-bar">
@@ -1160,12 +1565,12 @@ function App() {
                           <input value={step.title || ""} onChange={(event) => updateOutlineStep(index, "title", event.target.value)} placeholder="页面标题" />
                           <textarea value={step.purpose || ""} onChange={(event) => updateOutlineStep(index, "purpose", event.target.value)} placeholder="这一页的用途" />
                         </div>
-                        <div className="outline-actions" aria-label={`第 ${index + 1} 页操作`}>
-                          <button type="button" title="上移这一页" aria-label="上移这一页" onClick={() => outlineAction(index, "move-up")} disabled={index === 0}>↑</button>
-                          <button type="button" title="下移这一页" aria-label="下移这一页" onClick={() => outlineAction(index, "move-down")} disabled={index === outlinePlan.layoutSequence.length - 1}>↓</button>
-                          <button type="button" title="在后面新增一页" aria-label="在后面新增一页" onClick={() => outlineAction(index, "insert-after")}>+</button>
-                          <button type="button" title="复制这一页" aria-label="复制这一页" onClick={() => outlineAction(index, "duplicate")}>⧉</button>
-                          <button type="button" title="删除这一页" aria-label="删除这一页" onClick={() => outlineAction(index, "delete")} disabled={outlinePlan.layoutSequence.length <= 1}>×</button>
+                        <div className="outline-actions" aria-label={"page " + (index + 1) + " actions"}>
+                          <button type="button" title="上移页面" aria-label="上移页面" onClick={() => outlineAction(index, "move-up")} disabled={index === 0}>上移</button>
+                          <button type="button" title="下移页面" aria-label="下移页面" onClick={() => outlineAction(index, "move-down")} disabled={index === outlinePlan.layoutSequence.length - 1}>下移</button>
+                          <button type="button" title="在后面插入" aria-label="在后面插入" onClick={() => outlineAction(index, "insert-after")}>+</button>
+                          <button type="button" title="复制页面" aria-label="复制页面" onClick={() => outlineAction(index, "duplicate")}>复制</button>
+                          <button type="button" title="删除页面" aria-label="删除页面" onClick={() => outlineAction(index, "delete")} disabled={outlinePlan.layoutSequence.length <= 1}>删除</button>
                         </div>
                         <small className="outline-action-hint">上移 / 下移 / 新增 / 复制 / 删除</small>
                       </div>
@@ -1177,40 +1582,68 @@ function App() {
           )}
 
           {activeStep === "generate" && (
-            <SectionCard title="生成可编辑 PPT" desc="确认设计方向后直接生成整套可编辑 PPTX；风格参考图会作为调性和排版参考。">
+            <SectionCard title="生成可编辑 PPT" desc="确认大纲、风格和图片后端关卡后，创建双技能工作流并重建可编辑 PPTX。">
+              <WorkflowAgentMainGuidePanel
+                busy={workflowBusy || generationProgress.active}
+                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                job={workflowJob}
+                onCreateWorkflow={startSkillFirstWorkflow}
+                onGoMaterials={() => setActiveStep("materials")}
+                onGoNext={() => document.getElementById("workflow-agent-simple")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              />
               <div className="readiness">
                 <Metric label="资料文件" value={fileIds.length} />
                 <Metric label="大纲状态" value={outlinePlan?.layoutSequence?.length ? "已确认" : "未确认"} />
                 <Metric label="需求完整度" value={`${completion}%`} />
               </div>
-              <TemplatePreflightSelector
-                style={form.style}
-                themes={themes}
-                templatePacks={templatePacks}
-                styleReferences={styleReferences}
-                onChange={(style) => update("style", style)}
-              />
               {generationProgress.active ? <GenerationProgress progress={generationProgress} /> : null}
               <div className="action-grid single-action">
-                <button className="primary-action" onClick={() => createJob(getGenerationMode(), outlinePlan)} disabled={generationProgress.active || !outlinePlan?.layoutSequence?.length}>
-                  <b>{generationProgress.active ? "正在生成" : "生成整套可编辑 PPT"}</b>
-                  <span>输出 editable-final.pptx，并自动生成预览图和交付自检。</span>
-                </button>
+                {workflowJob?.id ? (
+                  <button className="primary-action" onClick={noCostApprovalSummary.readyCount ? approveNoCostCodexGates : () => document.getElementById("workflow-compliance-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })} disabled={workflowBusy || generationProgress.active}>
+                    <b>{noCostApprovalSummary.readyCount ? "确认就绪关卡（不生成图片）" : "继续当前工作流"}</b>
+                    <span>{noCostApprovalSummary.readyCount ? `可无费用确认：${noCostApprovalSummary.labelText}。确认后再生成产品级样张。` : "沿用下面的引导步骤和 codex-ppt 确认关卡，不重复创建工作流。"}</span>
+                  </button>
+                ) : (
+                  <button className="primary-action" onClick={startSkillFirstWorkflow} disabled={workflowBusy || generationProgress.active || (!fileIds.length && !form.notes.trim() && !outlinePlan?.layoutSequence?.length)}>
+                    <b>{workflowBusy ? "正在创建双技能工作流" : "创建双技能 PPT 工作流"}</b>
+                    <span>先走 codex-ppt 确认，再进入 image-to-editable-ppt/editppt 重建，不伪造最终可编辑文件。</span>
+                  </button>
+                )}
               </div>
+              <WorkflowRebuildPanel
+                busy={workflowBusy}
+                files={files}
+                hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                job={workflowJob}
+                jobs={workflowJobs}
+                onRefresh={refreshWorkflowJob}
+                onRefreshList={() => loadWorkflowJobs({ activeId: workflowJob?.id || "" })}
+                onRunPipeline={startSkillFirstWorkflow}
+                onRunNextAction={runWorkflowNextAction}
+                onRunStep={runWorkflowStep}
+                onSelectJob={selectWorkflowJob}
+                onToggleArchive={toggleWorkflowArchive}
+                onToggleArchivedVisibility={setWorkflowArchiveVisibility}
+                showArchived={workflowShowArchived}
+              />
             </SectionCard>
           )}
 
           {activeStep === "preview" && (
-            <SectionCard title="预览与单页编辑" desc="左侧选页，中间看稿并可直接编辑，右侧修改当前页。">
+            <SectionCard title="复核页面证据" desc="查看源页、视觉页、可编辑重建和 validation 证据；必要时再进入高级修正。">
               {!job ? (
                 <StageEmptyState
-                  title="还没有可编辑结果"
-                  body="先上传资料或输入需求，完成视觉方向和 SceneGraph 重建后，这里才显示可编辑预览、素材层和文字层。"
+                  title="还没有可复核结果"
+                  body="先上传资料或输入需求，按工作流完成 codex-ppt 图片型 PPT 和 image-to-editable-ppt 可编辑重建后，这里会显示页面证据和交付预览。"
                   action="回到资料识别"
                   onAction={() => setActiveStep("materials")}
                 />
               ) : (
                 <>
+                  <div className="skill-first-review-notice">
+                    <b>复核以工作流证据为准</b>
+                    <span>这里用于检查页面预览和必要修正；产品交付状态以 validation、页面任务记录和最终 PPTX 门禁为准。</span>
+                  </div>
                   <EditReadinessGate
                     readiness={job?.editReadiness}
                     localImage={localImage}
@@ -1221,8 +1654,6 @@ function App() {
                   <PreviewCanvas
                     currentImage={currentImage}
                     currentSlide={currentSlide}
-                    currentStyle={currentStyle}
-                    currentTemplate={currentTemplate}
                     draft={draft}
                     dirty={dirty}
                     focusPreview={focusPreview}
@@ -1237,11 +1668,6 @@ function App() {
                     onSaveText={saveSlideText}
                     onRetryPreview={retryPreview}
                     previewBusy={previewBusy}
-                    templateBusy={templateBusy}
-                    templateHit={templateHit}
-                    themes={themes}
-                    templatePacks={templatePacks}
-                    onRerenderTemplate={rerenderTemplate}
                   />
                 </>
               )}
@@ -1249,29 +1675,20 @@ function App() {
           )}
 
           {activeStep === "export" && (
-            <SectionCard title="导出文件" desc="选择需要的格式。PPTX 直接生成，PDF/PNG 调用本机 PowerPoint。">
-              {!job ? (
-                <StageEmptyState
-                  title="暂无可导出文件"
-                  body="生成整套 PPT 后，这里会出现 editable-final.pptx。visual-target.pptx 只作为中间视觉目标展示。"
-                  action="回到资料识别"
-                  onAction={() => setActiveStep("materials")}
-                />
-              ) : (
-                <div className="export-layout">
-                  <div className="format-list">
-                    {["pptx", "pdf", "png"].map((format) => (
-                      <label className="format-option" key={format}>
-                        <input type="checkbox" checked={formats.includes(format)} onChange={() => setFormats((current) => toggle(current, format))} disabled={finalExportBlocked && format !== "pptx"} />
-                        <span>{format.toUpperCase()}</span>
-                      </label>
-                    ))}
-                    {finalExportBlocked ? <p className="export-blocked-note">QA blocked：当前只能保留可编辑 PPTX 草稿，PDF/PNG 正式导出需先修复阻断项。</p> : null}
-                    <button className="btn primary wide" onClick={exportJob} disabled={formats.length === 0 || (finalExportBlocked && formats.some((format) => format !== "pptx"))}>开始导出</button>
-                  </div>
-                  <DownloadLinks job={job} />
-                </div>
-              )}
+            <SectionCard title="交付文件" desc="下载图片型 PPT、可编辑 PPT、validation 和日志包；PDF/PNG 属于后续导出格式。">
+              <WorkflowDeliveryPortal
+                job={workflowJob}
+                onCreateWorkflow={startSkillFirstWorkflow}
+                onGoMaterials={() => setActiveStep("materials")}
+                onOpenPageTasks={() => {
+                  setActiveStep("generate");
+                  window.setTimeout(() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+                }}
+                onOpenWorkflow={() => {
+                  setActiveStep("generate");
+                  window.setTimeout(() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+                }}
+              />
             </SectionCard>
           )}
 
@@ -1280,11 +1697,27 @@ function App() {
         {showRightPanel && (
         <aside className="right-panel">
           <div className="panel-tabs">
+            <button className={visibleRightPanelMode === "agent" ? "active" : ""} type="button" onClick={() => setRightPanelMode("agent")}>助手</button>
             {rightPanelTabs.map(([id, label]) => (
               <button className={visibleRightPanelMode === id ? "active" : ""} key={id} onClick={() => setRightPanelMode(id)}>{label}</button>
             ))}
             <button className={visibleRightPanelMode === "settings" ? "active" : ""} type="button" onClick={() => setRightPanelMode("settings")}>设置</button>
           </div>
+          {visibleRightPanelMode === "agent" && (
+            <DirectorChatPanel
+              busy={directorBusy}
+              draft={directorDraft}
+              files={files}
+              job={job}
+              messages={directorMessages}
+              setDraft={setDirectorDraft}
+              workflowJob={workflowJob}
+              onAction={handleDirectorAction}
+              onKeyDown={handleDirectorKeyDown}
+              onSend={() => sendDirectorMessage()}
+              onSuggestion={sendDirectorMessage}
+            />
+          )}
           {visibleRightPanelMode === "edit" && (
             <EditorPanel
               currentSlide={currentSlide}
@@ -1310,17 +1743,52 @@ function App() {
               onUndoJob={undoJob}
             />
           )}
-          {visibleRightPanelMode === "status" && <StatusPanel job={job} files={files} fileIds={fileIds} status={status} error={error} connection={connection} localImage={localImage} skillRules={skillRules} onRepairDelivery={repairDelivery} onApplyImageSupplement={applyImageSupplement} onApplyLocalImageSupplement={applyLocalImageSupplement} onRescanLocalImageQa={rescanLocalImageQa} onGenerateVisualTargetSample={generateVisualTargetSample} />}
-          {visibleRightPanelMode === "history" && <HistoryPanel jobs={jobs} onSelect={selectJob} onDelete={deleteHistoryJob} onDeleteMany={deleteHistoryJobs} onRepair={repairHistoryJob} />}
+          {visibleRightPanelMode === "status" && (
+            workflowJob ? (
+              <WorkflowSideStatusPanel
+                connection={connection}
+                doctor={doctor}
+                job={workflowJob}
+                jobs={workflowJobs}
+                localImage={localImage}
+                onOpenWorkflow={() => setActiveStep("generate")}
+                onRefresh={refreshWorkflowJob}
+              />
+            ) : (
+              <ProductOnlyStatusPanel
+                connection={connection}
+                doctor={doctor}
+                localImage={localImage}
+                onOpenMaterials={() => setActiveStep("materials")}
+                onOpenWorkflow={() => setActiveStep("generate")}
+              />
+            )
+          )}
+          {visibleRightPanelMode === "history" && (
+            <WorkflowHistoryPanel
+              activeId={workflowJob?.id || ""}
+              busy={workflowBusy}
+              jobs={workflowJobs}
+              onRefresh={() => loadWorkflowJobs({ activeId: workflowJob?.id || "" })}
+              onSelect={(id) => {
+                setActiveStep("generate");
+                selectWorkflowJob(id);
+              }}
+              onToggleArchive={toggleWorkflowArchive}
+              onToggleArchivedVisibility={setWorkflowArchiveVisibility}
+              showArchived={workflowShowArchived}
+            />
+          )}
           {visibleRightPanelMode === "settings" && (
             <SettingsPanel
               config={apiConfig}
               busy={settingsBusy}
               models={availableModels}
-              themes={themes}
               onChange={setApiConfig}
               onSave={saveApiConfig}
+              onSavePaddleOcrToken={savePaddleOcrToken}
               onTest={testApiConfig}
+              onTestImage={testImageApiConfig}
               onDetectModels={detectModels}
               styleReferences={styleReferences}
               onUploadStyleReference={uploadStyleReference}
@@ -1353,6 +1821,5606 @@ function WorkflowStrip({ activeStep, completion, rightPanelMode, setActiveStep, 
         ))}
       </div>
       <button className="workflow-settings" type="button" onClick={() => setRightPanelMode(rightPanelMode === "settings" ? "history" : "settings")}>{"\u8bbe\u7f6e"}</button>
+    </div>
+  );
+}
+
+function SkillFirstProductConsole({ approvalSummary = null, busy, fileCount = 0, hasBrief = false, job = null, jobCount = 0, onApproveNoCostGates, onCreate, onOpenWorkflow, onRefresh, onRefreshStyleEvidence, status, styleRefreshAction = null, styleRefreshBusy = false }) {
+  const hasInput = fileCount > 0 || hasBrief;
+  const workflowHasSource = Boolean(job?.artifacts?.source || job?.input?.sourceOriginalName || job?.input?.sourceBrief);
+  const sourceCount = fileCount || (workflowHasSource ? 1 : 0);
+  const flowStatus = status || deriveWorkflowDeliveryStatus(job, []);
+  const activeLabel = job?.id ? workflowJobLabel(job) : "未选择工作流";
+  const currentStage = job?.currentStage || job?.status || "not_started";
+  const finalPath = job?.artifacts?.editableFinal?.path || "";
+  const steps = [
+    { key: "source", title: "输入", state: hasInput || workflowHasSource ? "ready" : "waiting" },
+    { key: "codex", title: "codex-ppt", state: job?.artifacts?.visualImages?.length || job?.artifacts?.imageDeck ? "ready" : job?.id ? "working" : "waiting" },
+    { key: "editable", title: "editppt", state: job?.artifacts?.editableRun ? "ready" : job?.id ? "working" : "waiting" },
+    { key: "workers", title: "页面任务", state: job?.artifacts?.editableWorkerPrompts?.length ? "ready" : job?.id ? "working" : "waiting" },
+    { key: "final", title: "最终 PPTX", state: finalPath ? "ready" : "waiting" }
+  ];
+
+  return (
+    <div className="skill-first-console">
+      <div className="skill-first-console-head">
+        <div>
+          <b>双技能 PPT 流程</b>
+          <span>先用 codex-ppt 生成视觉统一的图片型 PPT，再用 image-to-editable-ppt 重建为可编辑 PPTX。</span>
+        </div>
+        <div className={`skill-first-status ${flowStatus.level || "pending"}`}>
+          <strong>{uiZh(flowStatus.title || "交付状态")}</strong>
+          <span>{uiZh(flowStatus.summary || "等待工作流")}</span>
+        </div>
+      </div>
+      <div className="skill-first-flow">
+        {steps.map((step, index) => (
+          <div className={`skill-first-flow-step ${step.state}`} key={step.key}>
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <b>{step.title}</b>
+            <small>{uiZh(step.state)}</small>
+          </div>
+        ))}
+      </div>
+      <div className="skill-first-console-meta">
+        <Metric label="源文件" value={sourceCount} />
+        <Metric label="工作流" value={jobCount} />
+        <Metric label="当前阶段" value={uiZh(currentStage)} />
+        <Metric label="当前工作流" value={activeLabel} />
+      </div>
+      {job?.id && styleRefreshAction ? (
+        <div className="skill-first-next-card style-refresh">
+          <div>
+            <b>下一步：刷新风格证据</b>
+            <span>当前 codex-ppt 风格证据仍带旧模板调性，先刷新为双技能工作流证据。</span>
+            <small>{uiZh(styleRefreshAction.detail || "这一步只更新本地证据，不生成图片，也不调用外部图片 API。")}</small>
+          </div>
+          <button className="btn primary" type="button" onClick={onRefreshStyleEvidence} disabled={busy || styleRefreshBusy || !onRefreshStyleEvidence}>
+            {styleRefreshBusy ? "正在刷新..." : "刷新风格证据"}
+          </button>
+        </div>
+      ) : job?.id && approvalSummary?.readyCount ? (
+        <div className="skill-first-next-card no-cost">
+          <div>
+            <b>下一步：无费用确认</b>
+            <span>可无费用确认：{approvalSummary.labelText}。这一步只记录 codex-ppt 证据，不生成图片。</span>
+            <small>生成样张和全量图片前，会单独要求外部图片 API 授权。</small>
+          </div>
+          <button className="btn primary" type="button" onClick={onApproveNoCostGates} disabled={busy}>
+            确认这些关卡
+          </button>
+        </div>
+      ) : null}
+      <div className="skill-first-console-actions">
+        {job?.id ? (
+          <>
+            <button className="btn primary" type="button" onClick={onOpenWorkflow}>
+              继续工作流
+            </button>
+            <button className="btn ghost" type="button" onClick={onCreate} disabled={busy || !hasInput}>
+              {busy ? "处理中..." : "创建新工作流"}
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="btn primary" type="button" onClick={onCreate} disabled={busy || !hasInput}>
+              {busy ? "处理中..." : "创建双技能工作流"}
+            </button>
+            <button className="btn ghost" type="button" onClick={onOpenWorkflow}>
+              打开工作流控制台
+            </button>
+          </>
+        )}
+        <button className="btn ghost" type="button" onClick={onRefresh} disabled={busy}>
+          刷新工作流
+        </button>
+      </div>
+      {!hasInput ? (
+        <p className="skill-first-console-note">
+          {job?.id
+            ? "已恢复当前工作流。打开工作流控制台继续；只有创建新工作流时才需要重新上传文件或输入需求。"
+            : "创建产品级工作流前，请上传 PPT/PDF/图片或提交需求简述。"}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductReadinessPanel({ connection, doctor, job = null, localImage, status }) {
+  const providers = connection?.details?.providers || {};
+  const artifacts = job?.artifacts || {};
+  const doctorChecks = Array.isArray(doctor?.details?.checks) ? doctor.details.checks : [];
+  const doctorCheckById = new Map(doctorChecks.map((check) => [check.id, check]));
+  const ocrDoctorCheck = doctorCheckById.get("ocr-provider") || null;
+  const imageEditDoctorCheck = doctorCheckById.get("image-edit-provider") || null;
+  const failedDoctorChecks = doctorChecks.filter((check) => !check.ok);
+  const visibleDoctorChecks = doctorChecks.filter((check) => [
+    "node",
+    "workflow-root",
+    "llm-provider",
+    "image-provider",
+    "image-edit-provider",
+    "ocr-provider",
+    "editppt",
+    "image-to-editable-contract",
+    "powerpoint",
+    "pdf-renderer"
+  ].includes(check.id));
+  const checks = [
+    {
+      id: "service",
+      label: "本地服务",
+      value: connection?.state === "online" ? "在线" : "离线",
+      state: connection?.state === "online" ? "ready" : "blocked",
+      detail: connection?.details?.version ? `v${connection.details.version}` : connection?.message || "等待服务"
+    },
+    {
+      id: "llm",
+      label: "对话模型",
+      value: providers.llm?.configured ? "已配置" : "缺失",
+      state: providers.llm?.configured ? "ready" : "blocked",
+      detail: providers.llm?.model || "请设置 API Key 和对话模型"
+    },
+    {
+      id: "image",
+      label: "图片 API",
+      value: providers.image?.configured && providers.image?.enabled ? "已配置" : "必需",
+      state: providers.image?.configured && providers.image?.enabled ? "ready" : "blocked",
+      detail: providers.image?.model || "codex-ppt 视觉页生成必需"
+    },
+    {
+      id: "image-edit",
+      label: "参考图重绘",
+      value: imageEditDoctorCheck ? (imageEditDoctorCheck.ok ? "可用" : "需处理") : providers.image?.supportsImageEdit ? "可用" : "需处理",
+      state: imageEditDoctorCheck ? (imageEditDoctorCheck.ok ? "ready" : "blocked") : providers.image?.supportsImageEdit ? "ready" : "blocked",
+      detail: imageEditDoctorCheck?.message || providers.image?.editEndpoint || "产品样张需要源页参考图重绘"
+    },
+    {
+      id: "ocr",
+      label: "OCR",
+      value: ocrDoctorCheck ? (ocrDoctorCheck.ok ? "可用" : "需处理") : providers.ocr?.enabled ? "检查中" : "可选",
+      state: ocrDoctorCheck ? (ocrDoctorCheck.ok ? "ready" : "blocked") : providers.ocr?.enabled ? "working" : "pending",
+      detail: ocrDoctorCheck ? (ocrDoctorCheck.message || providers.ocr?.provider) : providers.ocr?.provider || localImage?.details?.provider || "用于可编辑重建的文字提示"
+    },
+    {
+      id: "codex",
+      label: "codex-ppt",
+      value: artifacts.imageDeck ? "图片型 PPT" : artifacts.visualSample ? "样张就绪" : job?.id ? "工作流中" : "未开始",
+      state: artifacts.imageDeck || artifacts.visualSample ? "ready" : job?.id ? "working" : "pending",
+      detail: artifacts.imageDeck ? shortPath(artifacts.imageDeck.relativePath || artifacts.imageDeck.path) : "大纲、风格、后端、样张、全量确认关卡"
+    },
+    {
+      id: "editable",
+      label: "可编辑 PPT",
+      value: artifacts.editableFinal?.path ? "最终文件就绪" : artifacts.editableRun ? "重建阶段" : "未就绪",
+      state: artifacts.editableFinal?.path ? "ready" : artifacts.editableRun ? "working" : "pending",
+      detail: artifacts.editableFinal?.path ? shortPath(artifacts.editableFinal.path) : "image-to-editable-ppt/editppt 閲嶅缓"
+    }
+  ];
+  const readyCount = checks.filter((item) => item.state === "ready").length;
+  const blockedCount = checks.filter((item) => item.state === "blocked").length;
+  const overallState = blockedCount ? "blocked" : readyCount === checks.length ? "ready" : job?.id ? "working" : "pending";
+  const overallLabel = overallState === "ready" ? "产品链路就绪" : overallState === "blocked" ? "需要配置" : overallState === "working" ? "工作流进行中" : "可以开始";
+  const nextAction = uiZh(status?.summary || (job?.id ? "打开工作流控制台，按推荐下一步继续。" : "上传 PPT/PDF/图片或输入需求简述，然后创建双技能工作流。"));
+
+  return (
+    <div className={`product-readiness-panel ${overallState}`}>
+      <div className="product-readiness-head">
+        <div>
+          <b>产品就绪度</b>
+          <span>codex-ppt 到可编辑 PPT 管线的实时状态。</span>
+        </div>
+        <div>
+          <strong>{overallLabel}</strong>
+          <small>{readyCount}/{checks.length} 就绪</small>
+        </div>
+      </div>
+      <div className="product-readiness-grid">
+        {checks.map((item) => (
+          <div className={`product-readiness-card ${item.state}`} key={item.id}>
+            <span>{uiZh(item.label)}</span>
+            <b>{uiZh(item.value)}</b>
+            <small title={uiZh(item.detail)}>{uiZh(item.detail)}</small>
+          </div>
+        ))}
+      </div>
+      <div className="product-readiness-next">
+        <span>下一步</span>
+        <b>{nextAction}</b>
+      </div>
+      <div className={`product-doctor-strip ${doctor?.state || "checking"}`}>
+        <div>
+          <span>环境检查</span>
+          <b>{uiZh(doctor?.message || "正在检查产品运行环境...")}</b>
+        </div>
+        <small>{doctorChecks.length ? `${doctorChecks.length - failedDoctorChecks.length}/${doctorChecks.length} 项通过` : "等待中"}</small>
+      </div>
+      {visibleDoctorChecks.length ? (
+        <div className="product-doctor-grid">
+          {visibleDoctorChecks.map((check) => (
+            <div className={check.ok ? "pass" : "fail"} key={check.id}>
+              <span>{uiZh(check.label)}</span>
+              <b>{check.ok ? "通过" : "失败"}</b>
+              <small title={uiZh(check.message)}>{uiZh(check.message || "-")}</small>
+              {!check.ok && check.nextAction ? <em title={uiZh(check.nextAction)}>{uiZh(check.nextAction)}</em> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkflowRebuildPanel({ busy, files = [], hasBrief = false, job, jobs = [], onRefresh, onRefreshList, onRunNextAction, onRunPipeline, onRunStep, onSelectJob, onToggleArchive, onToggleArchivedVisibility, showArchived = false }) {
+  const sourceName = files[0]?.originalName
+    || job?.input?.sourceOriginalName
+    || (job?.input?.sourceBrief ? "需求简述 / 大纲来源" : "")
+    || job?.artifacts?.source?.originalName
+    || shortPath(job?.artifacts?.source?.relativePath || job?.artifacts?.source?.path)
+    || (hasBrief ? "需求简述 / 大纲来源" : "未选择来源");
+  const stages = workflowStageRows(job);
+  const artifacts = job?.artifacts || {};
+  const workflowAcceptanceSourceName = job?.artifacts?.source?.originalName || job?.input?.sourceOriginalName || "";
+  const canUseWorkflowAcceptanceSource = Boolean(job?.id && /\.pptx$/i.test(workflowAcceptanceSourceName || job?.artifacts?.source?.path || ""));
+  const promptCount = Array.isArray(artifacts.editableWorkerPrompts) ? artifacts.editableWorkerPrompts.length : 0;
+  const nextStage = artifacts.editableNext?.next?.stage || artifacts.editableRun?.next?.stage || "";
+  const finalPath = artifacts.editableFinal?.path || "";
+  const hasWorkflowInput = files.length > 0 || hasBrief;
+  const {
+    acceptOfflineTextHints,
+    agentId,
+    claimWorkerTask,
+    confirmSpawned,
+    promptError,
+    promptLoading,
+    prompts,
+    runWorkerAction,
+    selectedPageId,
+    selectedPrompt,
+    selectedTask,
+    setAcceptOfflineTextHints,
+    setAgentId,
+    setConfirmSpawned,
+    setSelectedPageId,
+    syncWorkerTasks,
+    loadPrompts,
+    loadWorkerTasks,
+    loadWorkerRuns,
+    loadWorkerBatchPreflight,
+    buildWorkerBriefs,
+    startWorkerBatch,
+    resetSelectedWorkerTask,
+    workerTaskBundle,
+    workerBatchPreflightBundle,
+    workerRunBundle,
+    workerTasks
+  } = useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunStep });
+  const [deliveryBundle, setDeliveryBundle] = useState(null);
+  const [artifactBundle, setArtifactBundle] = useState(null);
+  const [complianceBundle, setComplianceBundle] = useState(null);
+  const [costBundle, setCostBundle] = useState(null);
+  const [authorizationBundle, setAuthorizationBundle] = useState(null);
+  const [v1ReadinessBundle, setV1ReadinessBundle] = useState(null);
+  const [v1AcceptanceReport, setV1AcceptanceReport] = useState(null);
+  const [v1AcceptanceRun, setV1AcceptanceRun] = useState(null);
+  const [v1AcceptanceSourcePath, setV1AcceptanceSourcePath] = useState("");
+  const [v1AcceptanceRunBusy, setV1AcceptanceRunBusy] = useState(false);
+  const [v1AcceptanceRunMessage, setV1AcceptanceRunMessage] = useState("");
+  const [v1AcceptancePreflight, setV1AcceptancePreflight] = useState(null);
+  const [v1AcceptancePreflightBusy, setV1AcceptancePreflightBusy] = useState(false);
+  const [productVisualReadiness, setProductVisualReadiness] = useState(null);
+  const [productVisualReadinessBusy, setProductVisualReadinessBusy] = useState(false);
+  const [productVisualReadinessMessage, setProductVisualReadinessMessage] = useState("");
+  const [productVisualSamplePreflight, setProductVisualSamplePreflight] = useState(null);
+  const [productVisualSamplePreflightBusy, setProductVisualSamplePreflightBusy] = useState(false);
+  const [productVisualSamplePreflightMessage, setProductVisualSamplePreflightMessage] = useState("");
+  const [productVisualSamplePromptPreview, setProductVisualSamplePromptPreview] = useState(null);
+  const [productVisualSamplePromptPreviewBusy, setProductVisualSamplePromptPreviewBusy] = useState(false);
+  const [productVisualSamplePromptPreviewMessage, setProductVisualSamplePromptPreviewMessage] = useState("");
+  const [productVisualSampleRunResult, setProductVisualSampleRunResult] = useState(null);
+  const [productVisualSampleRunBusy, setProductVisualSampleRunBusy] = useState(false);
+  const [productVisualSampleRunMessage, setProductVisualSampleRunMessage] = useState("");
+  const [productVisualSampleApprovalPreflight, setProductVisualSampleApprovalPreflight] = useState(null);
+  const [productVisualSampleApprovalBusy, setProductVisualSampleApprovalBusy] = useState(false);
+  const [productVisualSampleApprovalMessage, setProductVisualSampleApprovalMessage] = useState("");
+  const [productVisualFullDeckPreflight, setProductVisualFullDeckPreflight] = useState(null);
+  const [productVisualFullDeckPreflightBusy, setProductVisualFullDeckPreflightBusy] = useState(false);
+  const [productVisualFullDeckPreflightMessage, setProductVisualFullDeckPreflightMessage] = useState("");
+  const [productVisualFullDeckApprovalPreflight, setProductVisualFullDeckApprovalPreflight] = useState(null);
+  const [productVisualFullDeckApprovalBusy, setProductVisualFullDeckApprovalBusy] = useState(false);
+  const [productVisualFullDeckApprovalMessage, setProductVisualFullDeckApprovalMessage] = useState("");
+  const [productVisualFullDeckRunResult, setProductVisualFullDeckRunResult] = useState(null);
+  const [productVisualFullDeckRunBusy, setProductVisualFullDeckRunBusy] = useState(false);
+  const [productVisualFullDeckRunMessage, setProductVisualFullDeckRunMessage] = useState("");
+  const [editablePreparePreflight, setEditablePreparePreflight] = useState(null);
+  const [editablePreparePreflightBusy, setEditablePreparePreflightBusy] = useState(false);
+  const [editablePreparePreflightMessage, setEditablePreparePreflightMessage] = useState("");
+  const latestProductVisualNext = v1AcceptanceReport?.latest?.productVisualNext
+    || v1AcceptanceReport?.latest?.acceptance?.productVisualNext
+    || v1AcceptanceReport?.productVisualNext
+    || v1AcceptanceReport?.acceptance?.productVisualNext
+    || {};
+  const productVisualTargetPages = clamp(Number(latestProductVisualNext.targetPages || 15), 1, 50);
+  const [productVisualFullDeckMode, setProductVisualFullDeckMode] = useState("test");
+  const productVisualFullDeckTargetPages = productVisualFullDeckMode === "test" ? Math.min(2, productVisualTargetPages) : productVisualTargetPages;
+  const [eventsBundle, setEventsBundle] = useState(null);
+  const [codexSlideBundle, setCodexSlideBundle] = useState(null);
+  const [codexSlideLoading, setCodexSlideLoading] = useState(false);
+  const [codexSlideError, setCodexSlideError] = useState("");
+  const [focusedUnifiedTask, setFocusedUnifiedTask] = useState(null);
+  const [guidedActionNote, setGuidedActionNote] = useState("");
+  const [pageRetryBusy, setPageRetryBusy] = useState("");
+  const [pageRetryError, setPageRetryError] = useState("");
+  const [confirmEditableImageSpend, setConfirmEditableImageSpend] = useState(false);
+  const [confirmCodexImageSpend, setConfirmCodexImageSpend] = useState(false);
+  const [confirmVisualSampleSpend, setConfirmVisualSampleSpend] = useState(false);
+  const [authorizationBusy, setAuthorizationBusy] = useState("");
+  const [authorizationMessage, setAuthorizationMessage] = useState("");
+  const [styleRefreshBusy, setStyleRefreshBusy] = useState(false);
+  const [styleRefreshMessage, setStyleRefreshMessage] = useState("");
+  const [codexSlideBatchPreflightBundle, setCodexSlideBatchPreflightBundle] = useState(null);
+  const [guidedPreflightBundle, setGuidedPreflightBundle] = useState(null);
+  const [cleanupBundle, setCleanupBundle] = useState(null);
+  const [cleanupBusy, setCleanupBusy] = useState("");
+  const [cleanupMessage, setCleanupMessage] = useState("");
+  const localDeliveryStatus = deriveWorkflowDeliveryStatus(job, workerTasks);
+  const deliveryStatus = deliveryBundle?.status || localDeliveryStatus;
+  const deliveryGate = deliveryBundle?.finalGate || null;
+  const guidedDelivery = {
+    level: deliveryGate?.level || deliveryStatus.level || "pending",
+    title: uiZh(deliveryGate?.title || deliveryStatus.title || "交付状态"),
+    label: uiZh(deliveryGate?.label || deliveryStatus.summary || "未就绪")
+  };
+  const codexSlideTasks = Array.isArray(codexSlideBundle?.tasks)
+    ? codexSlideBundle.tasks
+    : Array.isArray(artifacts.codexPptSlideWorkerTasks)
+      ? artifacts.codexPptSlideWorkerTasks
+      : [];
+  const hasVisualImages = Array.isArray(artifacts.visualImages) && artifacts.visualImages.length > 0;
+  const hasRecordedCodexSlideImages = codexSlideTasks.some((task) => task.status === "recorded" && task.imagePath);
+  const canAssembleImageDeck = hasVisualImages || hasRecordedCodexSlideImages;
+  const editableBatchReadyCount = workerTaskBundle?.summary?.ready || prompts.length || 20;
+  const editableBatchPreflight = workerBatchPreflightBundle || null;
+  const editableImageProvider = editableBatchPreflight?.provider || costBundle?.providers?.image || {};
+  const editableImageModel = editableImageProvider.model || "已配置图片模型";
+  const editableBatchSelectedCount = editableBatchPreflight?.selectedCount || editableBatchReadyCount;
+  const editableWorkerAuthorization = editableBatchPreflight?.authorization || null;
+  const editableWorkerAuthorizationPersisted = Boolean(editableWorkerAuthorization?.persisted);
+  const editableWorkerImageCalls = editableWorkerAuthorization?.imageCalls || editableBatchSelectedCount || 0;
+  const editableImageSpendConfirmed = confirmEditableImageSpend || editableWorkerAuthorizationPersisted;
+  const editableOfflineHintsAccepted = acceptOfflineTextHints || Boolean(job?.artifacts?.editableTextHintsAcknowledgement?.accepted);
+  const approvedCodexPptGates = new Set((complianceBundle?.codexPpt?.approvals?.gates || [])
+    .filter((gate) => gate.passed)
+    .map((gate) => gate.id));
+  const canGenerateVisualSample = ["outline", "style", "backend"].every((gate) => approvedCodexPptGates.has(gate));
+  const canGenerateVisualDeck = canGenerateVisualSample && ["sample", "fullDeck"].every((gate) => approvedCodexPptGates.has(gate));
+  const canRunProductVisualSample = canGenerateVisualSample && confirmVisualSampleSpend;
+  const productStyleAction = (v1ReadinessBundle?.actionGroups?.style || [])
+    .find((action) => action.targetStepId === "refresh-style-approval");
+  const productSampleAction = (v1ReadinessBundle?.actionGroups?.codexSlide || [])
+    .find((action) => action.targetStepId === "generate-sample");
+  const productSampleProvider = v1ReadinessBundle?.checks
+    ?.find((check) => check.id === "provider-runtime")
+    ?.evidence?.runtimeKey || v1ReadinessBundle?.codexSlideBatchPreflight?.provider?.model || "";
+  const codexFullDeckImageCalls = v1ReadinessBundle?.codexSlideBatchPreflight?.cost?.imageCalls || codexSlideTasks.length || 0;
+  const baseGuidedAction = getWorkflowGuidedAction(complianceBundle?.runbook, {
+    job,
+    canAssembleImageDeck,
+    canGenerateVisualDeck,
+    canGenerateVisualSample,
+    nextStage,
+    promptCount
+  });
+  const guidedAction = productStyleAction ? {
+    title: "刷新 codex-ppt 风格证据",
+    label: "刷新风格证据",
+    description: productStyleAction.detail || "当前风格证据仍包含旧模板调性，需要先刷新为双技能工作流证据。",
+    kind: "style-refresh",
+    action: "refresh-codex-ppt-style-evidence",
+    message: "正在刷新 codex-ppt 风格证据...",
+    disabled: false
+  } : baseGuidedAction;
+  const guidedPreflightBody = useMemo(() => ({
+    ...(guidedAction?.body || {}),
+    ...(guidedAction?.action === "visual/sample" ? { confirmExternalImageSpend: confirmVisualSampleSpend } : {}),
+    ...(guidedAction?.action === "visual/generate" ? { confirmExternalImageSpend: confirmCodexImageSpend } : {})
+  }), [guidedAction?.action, confirmCodexImageSpend, confirmVisualSampleSpend]);
+  const selectedEditableStatus = selectedTask?.status || (selectedPrompt ? "ready" : "pending");
+  const selectedEditableMode = selectedPrompt?.executionMode === "local" ? "主智能体本地重建" : "真实页面任务";
+  const selectedEditablePath = shortPath(selectedTask?.pageResult || selectedTask?.relativePath || selectedPrompt?.relativePath || selectedPrompt?.promptFile);
+  const selectedEditableNext = getEditableWorkerNextAction({ selectedPrompt, selectedTask, nextStage });
+  const workerRuns = Array.isArray(workerRunBundle?.runs) ? workerRunBundle.runs : [];
+  const latestWorkerRun = workerRuns[0] || null;
+
+  useEffect(() => {
+    if (!job?.id || latestWorkerRun?.status !== "running") return undefined;
+    const timer = window.setInterval(() => {
+      loadWorkerRuns(job.id);
+      loadWorkerTasks(job.id);
+      onRefresh?.();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [job?.id, latestWorkerRun?.id, latestWorkerRun?.status]);
+
+  useEffect(() => {
+    if (!job?.id) {
+      setDeliveryBundle(null);
+      setArtifactBundle(null);
+      setComplianceBundle(null);
+      setCostBundle(null);
+      setAuthorizationBundle(null);
+      setV1ReadinessBundle(null);
+      setV1AcceptanceReport(null);
+      setV1AcceptanceRun(null);
+      setEventsBundle(null);
+      setCodexSlideBundle(null);
+      setCodexSlideBatchPreflightBundle(null);
+      setEditablePreparePreflight(null);
+      setEditablePreparePreflightMessage("");
+      setCodexSlideError("");
+      return;
+    }
+    const controller = new AbortController();
+    Promise.allSettled([
+      api.workflowDeliveryStatus(job.id, controller.signal),
+      api.workflowArtifacts(job.id, controller.signal),
+      api.workflowCompliance(job.id, controller.signal),
+      api.workflowCostEstimate(job.id, controller.signal),
+      api.workflowAuthorizations(job.id, controller.signal),
+      api.workflowV1Readiness(job.id, controller.signal),
+      api.latestV1Acceptance(controller.signal),
+      api.v1AcceptanceRunStatus(controller.signal),
+      api.workflowEvents(job.id, { limit: 80 }, controller.signal)
+    ]).then(([deliveryResult, artifactResult, complianceResult, costResult, authorizationResult, v1ReadinessResult, v1AcceptanceResult, v1AcceptanceRunResult, eventsResult]) => {
+      setDeliveryBundle(deliveryResult.status === "fulfilled" ? deliveryResult.value : null);
+      setArtifactBundle(artifactResult.status === "fulfilled" ? artifactResult.value : null);
+      setComplianceBundle(complianceResult.status === "fulfilled" ? complianceResult.value : null);
+      setCostBundle(costResult.status === "fulfilled" ? costResult.value : null);
+      setAuthorizationBundle(authorizationResult.status === "fulfilled" ? authorizationResult.value : null);
+      setV1ReadinessBundle(v1ReadinessResult.status === "fulfilled" ? v1ReadinessResult.value : null);
+      setV1AcceptanceReport(v1AcceptanceResult.status === "fulfilled" ? v1AcceptanceResult.value : null);
+      setProductVisualReadiness(v1AcceptanceResult.status === "fulfilled" ? v1AcceptanceResult.value?.productVisualReadiness || null : null);
+      setProductVisualSamplePreflight(null);
+      setProductVisualFullDeckPreflight(null);
+      setProductVisualFullDeckRunMessage("");
+      setV1AcceptanceRun(v1AcceptanceRunResult.status === "fulfilled" ? v1AcceptanceRunResult.value : null);
+      setEventsBundle(eventsResult.status === "fulfilled" ? eventsResult.value : null);
+    });
+    return () => controller.abort();
+  }, [job?.id, job?.updatedAt, workerTasks.length]);
+
+  useEffect(() => {
+    if (!job?.id) {
+      setEditablePreparePreflight(null);
+      setEditablePreparePreflightMessage("");
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api.workflowEditablePreparePreflight(job.id, {})
+        .then((bundle) => {
+          if (!controller.signal.aborted) setEditablePreparePreflight(bundle);
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            setEditablePreparePreflight({
+              ok: false,
+              ready: false,
+              startReady: false,
+              error: getErrorMessage(error),
+              blockingIssues: [getErrorMessage(error)]
+            });
+          }
+        });
+    }, 150);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [job?.id, job?.updatedAt, artifacts.imageDeck?.path, artifacts.visualQuality?.path]);
+
+  useEffect(() => {
+    if (v1AcceptanceRun?.run?.status !== "running") return undefined;
+    const timer = window.setInterval(() => {
+      api.v1AcceptanceRunStatus()
+        .then((bundle) => setV1AcceptanceRun(bundle))
+        .catch(() => {});
+      api.latestV1Acceptance()
+        .then((bundle) => setV1AcceptanceReport(bundle))
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [v1AcceptanceRun?.run?.status]);
+
+  useEffect(() => {
+    if (!job?.id) {
+      setCodexSlideBundle(null);
+      setCodexSlideBatchPreflightBundle(null);
+      setGuidedPreflightBundle(null);
+      setCodexSlideError("");
+      return;
+    }
+    loadCodexSlideTasks(job.id);
+  }, [job?.id]);
+
+  useEffect(() => {
+    if (!job?.id || !guidedAction) {
+      setGuidedPreflightBundle(null);
+      return undefined;
+    }
+    if (guidedAction.kind === "style-refresh") {
+      setGuidedPreflightBundle({
+        ok: true,
+        preview: true,
+        didRun: false,
+        jobId: job.id,
+        action: guidedAction.action,
+        title: guidedAction.title,
+        summary: guidedAction.description,
+        startReady: true,
+        manualRequired: false,
+        requiredConfirmation: "",
+        externalImageCalls: 0,
+        mutatesWorkflow: true,
+        blockingIssues: [],
+        warnings: [],
+        reason: "可以先刷新 codex-ppt 风格证据；此操作只更新本地工作流证据，不调用外部图片 API。"
+      });
+      return undefined;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api.workflowNextActionPreflight(job.id, guidedPreflightBody)
+        .then((bundle) => {
+          if (!controller.signal.aborted) setGuidedPreflightBundle(bundle);
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            setGuidedPreflightBundle({
+              ok: false,
+              startReady: false,
+              error: getErrorMessage(error),
+              blockingIssues: [getErrorMessage(error)]
+            });
+          }
+        });
+    }, 160);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [job?.id, job?.updatedAt, guidedAction?.kind, guidedAction?.action, confirmCodexImageSpend, confirmVisualSampleSpend]);
+
+  useEffect(() => {
+    if (!job?.id) return undefined;
+    const readyCount = codexSlideTasks.filter((task) => task.status === "ready" || task.status === "failed").length;
+    const timer = window.setTimeout(() => {
+      loadCodexSlideBatchPreflight(job.id, {
+        maxPages: readyCount || codexSlideTasks.length || 20,
+        confirmExternalImageSpend: confirmCodexImageSpend,
+        assembleImageDeck: true,
+        prepareEditable: true,
+        buildEditablePrompts: true,
+        syncEditableWorkerTasks: true
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [job?.id, job?.updatedAt, codexSlideTasks.length, codexSlideBundle?.summary?.ready, codexSlideBundle?.summary?.failed, confirmCodexImageSpend]);
+
+  useEffect(() => {
+    if (!job?.id || !promptCount) return undefined;
+    const timer = window.setTimeout(() => {
+      loadWorkerBatchPreflight(job.id, {
+        mode: "model",
+        maxPages: editableBatchReadyCount,
+        agentPrefix: "product-page-worker",
+        confirmExternalImageSpend: editableImageSpendConfirmed,
+        acceptOfflineTextHints: editableOfflineHintsAccepted,
+        autoFinalize: true
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [job?.id, job?.updatedAt, promptCount, editableBatchReadyCount, editableImageSpendConfirmed, editableOfflineHintsAccepted]);
+
+  async function loadCodexSlideTasks(id = job?.id) {
+    if (!id) return;
+    setCodexSlideLoading(true);
+    setCodexSlideError("");
+    try {
+      setCodexSlideBundle(await api.codexPptSlideTasks(id));
+    } catch (error) {
+      setCodexSlideError(getErrorMessage(error));
+    } finally {
+      setCodexSlideLoading(false);
+    }
+  }
+
+  async function loadCodexSlideBatchPreflight(id = job?.id, options = {}) {
+    if (!id) return;
+    try {
+      setCodexSlideBatchPreflightBundle(await api.codexPptSlideBatchPreflight(id, options));
+    } catch (error) {
+      setCodexSlideBatchPreflightBundle({
+        ok: false,
+        ready: false,
+        startReady: false,
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
+  async function refreshEditablePreparePreflight() {
+    if (!job?.id) return;
+    setEditablePreparePreflightBusy(true);
+    setEditablePreparePreflightMessage("");
+    try {
+      const result = await api.workflowEditablePreparePreflight(job.id, {});
+      setEditablePreparePreflight(result);
+      setEditablePreparePreflightMessage(result.ready ? "准备预检通过，可以进入 editppt。" : "准备条件未满足，请查看阻断项。");
+    } catch (error) {
+      const message = getErrorMessage(error);
+      setEditablePreparePreflight({
+        ok: false,
+        ready: false,
+        startReady: false,
+        error: message,
+        blockingIssues: [message]
+      });
+      setEditablePreparePreflightMessage(message);
+    } finally {
+      setEditablePreparePreflightBusy(false);
+    }
+  }
+
+  async function syncCodexSlideTasks() {
+    if (!job?.id) return;
+    setCodexSlideLoading(true);
+    setCodexSlideError("");
+    try {
+      setCodexSlideBundle(await api.syncCodexPptSlideTasks(job.id, {}));
+      await loadCodexSlideBatchPreflight(job.id, {
+        confirmExternalImageSpend: confirmCodexImageSpend,
+        assembleImageDeck: true,
+        prepareEditable: true,
+        buildEditablePrompts: true,
+        syncEditableWorkerTasks: true
+      });
+      await onRefresh?.();
+    } catch (error) {
+      setCodexSlideError(getErrorMessage(error));
+    } finally {
+      setCodexSlideLoading(false);
+    }
+  }
+
+  async function startCodexSlideBatch() {
+    if (!job?.id) return;
+    const preflight = codexSlideBatchPreflightBundle || await api.codexPptSlideBatchPreflight(job.id, {
+      maxPages: codexSlideTasks.filter((task) => task.status === "ready" || task.status === "failed").length || codexSlideTasks.length || 20,
+      confirmExternalImageSpend: confirmCodexImageSpend,
+      assembleImageDeck: true,
+      prepareEditable: true,
+      buildEditablePrompts: true,
+      syncEditableWorkerTasks: true
+    });
+    if (!preflight.startReady) {
+      const issue = [...(preflight.blockingIssues || []), ...(preflight.warnings || [])].join(" ") || "Codex-ppt slide batch preflight is not start-ready.";
+      setCodexSlideError(uiZh(issue));
+      setCodexSlideBatchPreflightBundle(preflight);
+      return;
+    }
+    const readyCount = preflight.selectedCount || codexSlideBundle?.summary?.ready || codexSlideTasks.filter((task) => task.status === "ready" || task.status === "failed").length || 1;
+    const confirmed = window.confirm(`将运行 ${readyCount} 个 codex-ppt 图片页任务，组装图片型 PPT，并准备 editppt 可编辑重建。此操作可能消耗图片 API 额度，是否继续？`);
+    if (!confirmed) return;
+    setCodexSlideLoading(true);
+    setCodexSlideError("");
+    try {
+      const result = await api.runCodexPptSlideBatch(job.id, {
+        maxPages: readyCount,
+        pages: preflight.startBody?.pages || "",
+        agentPrefix: "product-codex-slide-batch",
+        confirmExternalImageSpend: confirmCodexImageSpend,
+        assembleImageDeck: true,
+        prepareEditable: true,
+        buildEditablePrompts: true,
+        syncEditableWorkerTasks: true,
+        editableMaxConcurrentPages: 6
+      });
+      setCodexSlideBundle(result.taskBundle || result);
+      await loadCodexSlideBatchPreflight(job.id, {
+        confirmExternalImageSpend: confirmCodexImageSpend,
+        assembleImageDeck: true,
+        prepareEditable: true,
+        buildEditablePrompts: true,
+        syncEditableWorkerTasks: true
+      });
+      await onRefresh?.();
+    } catch (error) {
+      setCodexSlideError(getErrorMessage(error));
+    } finally {
+      setCodexSlideLoading(false);
+    }
+  }
+
+  async function startEditableWorkerBatch() {
+    if (!editableOfflineHintsAccepted) {
+      setPageRetryError("启动后台页面批处理前，请确认离线内置文字提示，或配置 PaddleOCR。");
+      return;
+    }
+    if (!editableImageSpendConfirmed) {
+      setPageRetryError("启动后台页面批处理前，请确认外部图片 API 额度使用。");
+      return;
+    }
+    const preflight = await loadWorkerBatchPreflight(job.id, {
+      mode: "model",
+      maxPages: editableBatchReadyCount,
+      agentPrefix: "product-page-worker",
+      confirmExternalImageSpend: editableImageSpendConfirmed,
+      acceptOfflineTextHints: editableOfflineHintsAccepted,
+      autoFinalize: true
+    });
+    if (!preflight?.ready) {
+      setPageRetryError(`页面批处理预检被阻断：${uiZh((preflight?.blockingIssues || []).join(" ") || "未就绪")}`);
+      return;
+    }
+    if (!preflight?.startReady) {
+      setPageRetryError(`页面批处理需要确认：${uiZh((preflight?.warnings || []).join(" ") || "缺少确认")}`);
+      return;
+    }
+    const confirmed = window.confirm(`将使用 ${preflight.provider?.model || editableImageModel} 运行 ${preflight.selectedCount || editableBatchReadyCount} 个 image-to-editable-ppt 页面任务。此操作可能消耗外部图片 API 额度，是否继续？`);
+    if (!confirmed) return;
+    setPageRetryError("");
+    await startWorkerBatch({
+      mode: "model",
+      maxPages: preflight.selectedCount || editableBatchReadyCount,
+      pages: preflight.startBody?.pages || "",
+      agentPrefix: "product-page-worker",
+      confirmExternalImageSpend: editableImageSpendConfirmed,
+      acceptOfflineTextHints: editableOfflineHintsAccepted,
+      offlineTextHintsReason: "frontend background worker batch confirmation",
+      autoFinalize: true
+    });
+    await loadWorkerRuns();
+  }
+
+  function focusUnifiedTask(detail) {
+    if (!detail) return;
+    setFocusedUnifiedTask(detail);
+    if (detail.skillId === "image-to-editable-ppt" && detail.taskId) {
+      setSelectedPageId(detail.taskId);
+    }
+    const targetId = detail.skillId === "codex-ppt" ? "codex-slide-worker-panel" : "editable-page-worker-panel";
+    setTimeout(() => document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function focusCodexSlideWorker() {
+    setTimeout(() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function focusDeliveryNextStep(step = {}) {
+    const targetId = deliveryStepTargetId(step.id);
+    if (!targetId) return;
+    setTimeout(() => document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  async function retryUnifiedTask(detail) {
+    if (!job?.id || !detail?.taskId) return;
+    const busyKey = detail.key || `${detail.skillId}:${detail.taskId}`;
+    setPageRetryBusy(busyKey);
+    setPageRetryError("");
+    try {
+      await api.retryWorkflowPage(job.id, detail.taskId, {
+        skillId: detail.skillId,
+        reason: "product retry from unified task board"
+      });
+      await Promise.allSettled([
+        onRefresh?.(),
+        detail.skillId === "codex-ppt" ? loadCodexSlideTasks(job.id) : loadWorkerTasks()
+      ]);
+    } catch (error) {
+      setPageRetryError(getErrorMessage(error));
+    } finally {
+      setPageRetryBusy("");
+    }
+  }
+
+  async function retryAllFailedUnifiedTasks() {
+    if (!job?.id) return;
+    setPageRetryBusy("bulk-failed");
+    setPageRetryError("");
+    try {
+      const result = await api.retryFailedWorkflowPages(job.id, {
+        reason: "product bulk retry from failed recovery panel"
+      });
+      if (!result.retried && result.requested) {
+        setPageRetryError("没有可重置的失败页面任务。");
+      }
+      await Promise.allSettled([
+        onRefresh?.(),
+        loadCodexSlideTasks(job.id),
+        loadWorkerTasks()
+      ]);
+    } catch (error) {
+      setPageRetryError(getErrorMessage(error));
+    } finally {
+      setPageRetryBusy("");
+    }
+  }
+
+  async function runGuidedAction() {
+    if (!guidedAction || guidedAction.disabled) return;
+    setGuidedActionNote("");
+    if (guidedAction.kind === "focus") {
+      setGuidedActionNote(guidedAction.note || guidedAction.message || "");
+      if (guidedAction.targetId) {
+        setTimeout(() => document.getElementById(guidedAction.targetId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+      }
+      return;
+    }
+    if (guidedAction.kind === "sync-codex-slides") {
+      const result = await onRunNextAction?.(guidedAction.message || "正在执行下一步双技能工作流操作...");
+      if (result?.manualRequired) setGuidedActionNote(result.reason || "");
+      await loadCodexSlideTasks(job.id);
+      return;
+    }
+    if (guidedAction.kind === "load-prompts") {
+      await loadPrompts();
+      return;
+    }
+    if (guidedAction.kind === "style-refresh") {
+      await refreshCodexPptStyleEvidence();
+      setGuidedActionNote("已刷新 codex-ppt 风格证据；下一步请重新确认风格关卡。");
+      return;
+    }
+    if (guidedAction.kind === "workflow") {
+      if (guidedAction.action === "visual/sample" && !confirmVisualSampleSpend) {
+        setGuidedActionNote("生成产品级 codex-ppt 样张前，请确认 1 次外部图片 API 调用。");
+        return;
+      }
+      if (guidedAction.action === "visual/generate" && !confirmCodexImageSpend) {
+        setGuidedActionNote("生成完整 codex-ppt 图片型 PPT 前，请确认外部图片 API 用量。");
+        return;
+      }
+      const body = {
+        ...(guidedAction.body || {}),
+        ...(guidedAction.action === "visual/sample" ? { confirmExternalImageSpend: confirmVisualSampleSpend } : {}),
+        ...(guidedAction.action === "visual/generate" ? { confirmExternalImageSpend: confirmCodexImageSpend } : {})
+      };
+      const result = await onRunNextAction?.(guidedAction.message || "正在执行下一步双技能工作流操作...", body);
+      if (result?.manualRequired) setGuidedActionNote(uiZh(result.reason || ""));
+    }
+  }
+
+  async function recordExternalImageAuthorization(scope = "visual-sample", requestedImageCalls = null) {
+    if (!job?.id) return;
+    const imageCalls = Number(requestedImageCalls || 0) || (scope === "full-deck" ? codexFullDeckImageCalls : scope === "editable-workers" ? editableWorkerImageCalls : 1);
+    setAuthorizationBusy(scope);
+    setAuthorizationMessage("");
+    try {
+      const result = await api.authorizeExternalImageSpend(job.id, {
+        scope,
+        imageCalls,
+        confirmedBy: "frontend-operator",
+        reason: `前端操作员确认 ${scope} 外部图片 API 用量。`
+      });
+      setAuthorizationBundle({
+        ok: true,
+        jobId: job.id,
+        externalImageSpend: [
+          ...(authorizationBundle?.externalImageSpend || []),
+          result.authorization
+        ],
+        summary: result.summary
+      });
+      setAuthorizationMessage(`已记录 ${imageCalls} 次${scope === "visual-sample" ? "样张" : scope === "editable-workers" ? "页面任务" : "全量"}外部图片 API 授权。`);
+      const refreshes = [onRefresh?.()];
+      if (scope === "editable-workers") {
+        setConfirmEditableImageSpend(true);
+        refreshes.push(
+          loadWorkerBatchPreflight(job.id, {
+            mode: "model",
+            maxPages: editableBatchReadyCount,
+            agentPrefix: "product-page-worker",
+            confirmExternalImageSpend: true,
+            acceptOfflineTextHints: editableOfflineHintsAccepted,
+            autoFinalize: true
+          }),
+          loadWorkerTasks(job.id),
+          loadWorkerRuns(job.id),
+          api.workflowDeliveryStatus(job.id).then(setDeliveryBundle)
+        );
+        setAuthorizationMessage(`已记录 ${imageCalls} 次页面任务外部图片 API 授权，并刷新页面批处理预检。`);
+      } else if (scope === "full-deck") {
+        setConfirmCodexImageSpend(true);
+        refreshes.push(
+          loadCodexSlideBatchPreflight(job.id, {
+            confirmExternalImageSpend: true,
+            assembleImageDeck: true,
+            prepareEditable: true,
+            buildEditablePrompts: true,
+            syncEditableWorkerTasks: true
+          }),
+          api.workflowV1Readiness(job.id).then(setV1ReadinessBundle)
+        );
+        setAuthorizationMessage(`已记录 ${imageCalls} 次全量 codex-ppt 图片 API 授权，并刷新图片页批处理预检。`);
+      } else {
+        refreshes.push(api.workflowV1Readiness(job.id).then(setV1ReadinessBundle));
+      }
+      await Promise.allSettled(refreshes);
+    } catch (error) {
+      setAuthorizationMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setAuthorizationBusy("");
+    }
+  }
+
+  async function refreshCodexPptStyleEvidence() {
+    if (!job?.id) return;
+    setStyleRefreshBusy(true);
+    setStyleRefreshMessage("");
+    try {
+      await api.recordCodexPptStyle(job.id, buildRefreshedCodexPptStyleBody(job));
+      setStyleRefreshMessage("已刷新 codex-ppt 风格证据；请重新确认视觉风格关卡。");
+      await onRefresh?.();
+    } catch (error) {
+      setStyleRefreshMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setStyleRefreshBusy(false);
+    }
+  }
+
+  async function preflightRealPptAcceptanceRun(useWorkflowSource = false) {
+    const fromWorkflow = useWorkflowSource === true;
+    const sourcePath = v1AcceptanceSourcePath.trim();
+    if (!fromWorkflow && !sourcePath) {
+      setV1AcceptanceRunMessage("请先填写本地 PPTX 路径。");
+      return;
+    }
+    if (fromWorkflow && !canUseWorkflowAcceptanceSource) {
+      setV1AcceptanceRunMessage("当前工作流源文件不是 PPTX，不能作为真实 15 页验收输入。");
+      return;
+    }
+    setV1AcceptancePreflightBusy(true);
+    setV1AcceptanceRunMessage("");
+    try {
+      const result = await api.preflightV1AcceptanceRun(fromWorkflow ? { workflowJobId: job.id, maxPages: 15 } : { sourcePath, maxPages: 15 });
+      setV1AcceptancePreflight(result);
+      setV1AcceptanceRunMessage(result.ready ? "真实验收预检通过，可以启动验收任务。" : uiZh(result.summary || "真实验收预检未通过。"));
+    } catch (error) {
+      setV1AcceptanceRunMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setV1AcceptancePreflightBusy(false);
+    }
+  }
+
+  async function startRealPptAcceptanceRun(useWorkflowSource = false) {
+    const fromWorkflow = useWorkflowSource === true;
+    const sourcePath = v1AcceptanceSourcePath.trim();
+    if (!fromWorkflow && !sourcePath) {
+      setV1AcceptanceRunMessage("请先填写本地 PPTX 路径。");
+      return;
+    }
+    if (fromWorkflow && !canUseWorkflowAcceptanceSource) {
+      setV1AcceptanceRunMessage("当前工作流源文件不是 PPTX，不能作为真实 15 页验收输入。");
+      return;
+    }
+    setV1AcceptanceRunBusy(true);
+    setV1AcceptanceRunMessage("");
+    try {
+      const result = await api.startV1AcceptanceRun(fromWorkflow ? { workflowJobId: job.id, maxPages: 15 } : { sourcePath, maxPages: 15 });
+      setV1AcceptanceRun(result);
+      setV1AcceptanceRunMessage("真实 15 页验收已启动，运行中会自动刷新状态。");
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) setV1AcceptanceReport(latest);
+    } catch (error) {
+      setV1AcceptanceRunMessage(uiZh(getErrorMessage(error)));
+      const status = await api.v1AcceptanceRunStatus().catch(() => null);
+      if (status) setV1AcceptanceRun(status);
+    } finally {
+      setV1AcceptanceRunBusy(false);
+    }
+  }
+
+  async function runProductVisualReadiness() {
+    setProductVisualReadinessBusy(true);
+    setProductVisualReadinessMessage("");
+    setProductVisualSamplePreflight(null);
+    setProductVisualSamplePreflightMessage("");
+    setProductVisualSamplePromptPreview(null);
+    setProductVisualSamplePromptPreviewMessage("");
+    setProductVisualSampleRunResult(null);
+    setProductVisualSampleRunMessage("");
+    setProductVisualSampleApprovalPreflight(null);
+    setProductVisualSampleApprovalMessage("");
+    setProductVisualFullDeckPreflight(null);
+    setProductVisualFullDeckPreflightMessage("");
+    setProductVisualFullDeckRunResult(null);
+    setProductVisualFullDeckRunMessage("");
+    try {
+      const result = await api.runProductVisualReadiness({ maxPages: productVisualTargetPages });
+      setProductVisualReadiness(result);
+      const jobId = result.result?.jobId || result.workflowJobId || "";
+      const step = result.result?.runbook?.currentTitle || result.result?.runbook?.currentStep || "等待真实样张授权";
+      setProductVisualReadinessMessage(`无费用产品视觉预检通过${jobId ? `，${jobId}` : ""}，下一步：${step}。`);
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) {
+        setV1AcceptanceReport(latest);
+        setProductVisualReadiness(latest.productVisualReadiness || result);
+      }
+    } catch (error) {
+      setProductVisualReadinessMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualReadinessBusy(false);
+    }
+  }
+
+  async function preflightProductVisualSample() {
+    setProductVisualSamplePreflightBusy(true);
+    setProductVisualSamplePreflightMessage("");
+    setProductVisualSamplePromptPreview(null);
+    setProductVisualSamplePromptPreviewMessage("");
+    setProductVisualSampleRunResult(null);
+    setProductVisualSampleRunMessage("");
+    setProductVisualSampleApprovalPreflight(null);
+    setProductVisualSampleApprovalMessage("");
+    setProductVisualFullDeckPreflight(null);
+    setProductVisualFullDeckPreflightMessage("");
+    setProductVisualFullDeckRunResult(null);
+    setProductVisualFullDeckRunMessage("");
+    try {
+      const result = await api.preflightProductVisualSample({});
+      setProductVisualSamplePreflight(result);
+      setProductVisualSamplePreflightMessage(result.readyIfConfirmed
+        ? `真实样张条件已满足：确认后将使用 ${result.externalImageCalls || 1} 次图片 API。`
+        : uiZh(result.summary || "真实样张条件未满足。"));
+    } catch (error) {
+      setProductVisualSamplePreflightMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualSamplePreflightBusy(false);
+    }
+  }
+
+  async function previewProductVisualSamplePrompt() {
+    setProductVisualSamplePromptPreviewBusy(true);
+    setProductVisualSamplePromptPreviewMessage("");
+    try {
+      const result = await api.previewProductVisualSamplePrompt({});
+      setProductVisualSamplePromptPreview(result);
+      setProductVisualSamplePromptPreviewMessage(result.ready
+        ? "样张 prompt 已生成预览；该步骤不调用图片 API。"
+        : uiZh(result.summary || "样张 prompt 暂不可预览。"));
+      if (result.preflight) setProductVisualSamplePreflight(result.preflight);
+    } catch (error) {
+      setProductVisualSamplePromptPreviewMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualSamplePromptPreviewBusy(false);
+    }
+  }
+
+  async function preflightProductVisualFullDeck() {
+    setProductVisualFullDeckPreflightBusy(true);
+    setProductVisualFullDeckPreflightMessage("");
+    setProductVisualFullDeckRunResult(null);
+    setProductVisualFullDeckRunMessage("");
+    try {
+      const result = await api.preflightProductVisualFullDeck({ maxPages: productVisualFullDeckTargetPages });
+      setProductVisualFullDeckPreflight(result);
+      setProductVisualFullDeckPreflightMessage(result.readyIfConfirmed
+        ? `全量生成条件已满足：确认后将使用 ${result.externalImageCalls || 15} 次图片 API。`
+        : uiZh(result.summary || "全量生成条件未满足。"));
+    } catch (error) {
+      setProductVisualFullDeckPreflightMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualFullDeckPreflightBusy(false);
+    }
+  }
+
+  function changeProductVisualFullDeckMode(mode) {
+    const nextMode = mode === "full" ? "full" : "test";
+    setProductVisualFullDeckMode(nextMode);
+    setProductVisualFullDeckPreflight(null);
+    setProductVisualFullDeckPreflightMessage("");
+    setProductVisualFullDeckRunResult(null);
+    setProductVisualFullDeckRunMessage("");
+  }
+
+  async function runProductVisualSample() {
+    if (!productVisualSamplePreflight?.readyIfConfirmed) {
+      setProductVisualSampleRunMessage("请先检查真实样张条件。");
+      return;
+    }
+    const confirmed = window.confirm("将使用 1 次外部图片 API 生成真实 codex-ppt 视觉样张。确认继续？");
+    if (!confirmed) return;
+    setProductVisualSampleRunBusy(true);
+    setProductVisualSampleRunMessage("");
+    setProductVisualFullDeckPreflight(null);
+    setProductVisualFullDeckPreflightMessage("");
+    setProductVisualFullDeckApprovalPreflight(null);
+    setProductVisualFullDeckApprovalMessage("");
+    try {
+      const result = await api.runProductVisualSample({
+        confirmExternalImageSpend: true,
+        confirmProductVisualSample: true,
+        confirmPromptPreview: true,
+        promptPreviewJobId: productVisualSamplePreflight.jobId,
+        confirmedBy: "frontend-operator",
+        reason: "前端确认产品级 v1 真实样张生成"
+      });
+      setProductVisualSampleRunResult(result);
+      setProductVisualSampleRunMessage(result.summary || "真实样张已生成，请复核后确认样张关卡。");
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) setV1AcceptanceReport(latest);
+      const nextPreflight = await api.preflightProductVisualSample({}).catch(() => null);
+      if (nextPreflight) setProductVisualSamplePreflight(nextPreflight);
+      const approvalPreflight = await api.preflightProductVisualSampleApproval({}).catch(() => null);
+      if (approvalPreflight) {
+        setProductVisualSampleApprovalPreflight(approvalPreflight);
+        setProductVisualSampleApprovalMessage(approvalPreflight.ready ? "样张已可确认，复核后点击确认样张关卡。" : uiZh(approvalPreflight.summary || ""));
+      }
+    } catch (error) {
+      if (error.data?.preflight) {
+        setProductVisualSamplePreflight(error.data.preflight);
+      }
+      setProductVisualSampleRunResult(null);
+      setProductVisualSampleRunMessage(uiZh(error.data?.preflight?.summary || getErrorMessage(error)));
+    } finally {
+      setProductVisualSampleRunBusy(false);
+    }
+  }
+
+  async function preflightProductVisualSampleApproval() {
+    setProductVisualSampleApprovalBusy(true);
+    setProductVisualSampleApprovalMessage("");
+    try {
+      const result = await api.preflightProductVisualSampleApproval({});
+      setProductVisualSampleApprovalPreflight(result);
+      setProductVisualSampleApprovalMessage(result.ready
+        ? "样张已可确认，复核后点击确认样张关卡。"
+        : uiZh(result.summary || "样张确认条件未满足。"));
+    } catch (error) {
+      if (error.data?.preflight) {
+        setProductVisualSampleApprovalPreflight(error.data.preflight);
+      }
+      setProductVisualSampleApprovalMessage(uiZh(error.data?.preflight?.summary || getErrorMessage(error)));
+    } finally {
+      setProductVisualSampleApprovalBusy(false);
+    }
+  }
+
+  async function approveProductVisualSample() {
+    const confirmed = window.confirm("确认当前真实样张已经人工复核通过，并进入全量视觉生成预检？此操作不会调用图片 API。");
+    if (!confirmed) return;
+    setProductVisualSampleApprovalBusy(true);
+    setProductVisualSampleApprovalMessage("");
+    try {
+      const result = await api.approveProductVisualSample({
+        maxPages: productVisualFullDeckTargetPages,
+        confirmedBy: "frontend-operator",
+        note: "前端复核通过产品级 v1 真实样张"
+      });
+      setProductVisualSampleApprovalMessage(result.summary || "样张关卡已确认。");
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) setV1AcceptanceReport(latest);
+      if (result.fullDeckPreflight?.ok) {
+        setProductVisualFullDeckPreflight(result.fullDeckPreflight);
+        setProductVisualFullDeckPreflightMessage(result.fullDeckPreflight.readyIfConfirmed
+          ? `视觉生成条件已满足：确认后将使用 ${result.fullDeckPreflight.externalImageCalls || productVisualFullDeckTargetPages} 次图片 API。`
+          : uiZh(result.fullDeckPreflight.summary || "全量生成条件未满足。"));
+      }
+      const approvalPreflight = await api.preflightProductVisualSampleApproval({}).catch(() => null);
+      if (approvalPreflight) setProductVisualSampleApprovalPreflight(approvalPreflight);
+    } catch (error) {
+      setProductVisualSampleApprovalMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualSampleApprovalBusy(false);
+    }
+  }
+
+  async function preflightProductVisualFullDeckApproval() {
+    setProductVisualFullDeckApprovalBusy(true);
+    setProductVisualFullDeckApprovalMessage("");
+    try {
+      const result = await api.preflightProductVisualFullDeckApproval({ maxPages: productVisualFullDeckTargetPages });
+      setProductVisualFullDeckApprovalPreflight(result);
+      setProductVisualFullDeckApprovalMessage(result.ready
+        ? "全量关卡已可确认；该步骤不会调用图片 API。"
+        : uiZh(result.summary || "全量确认条件未满足。"));
+    } catch (error) {
+      if (error.data?.preflight) {
+        setProductVisualFullDeckApprovalPreflight(error.data.preflight);
+      }
+      setProductVisualFullDeckApprovalMessage(uiZh(error.data?.preflight?.summary || getErrorMessage(error)));
+    } finally {
+      setProductVisualFullDeckApprovalBusy(false);
+    }
+  }
+
+  async function approveProductVisualFullDeck() {
+    const confirmed = window.confirm("确认当前样张效果可以进入全量视觉生成关卡？此操作不会调用图片 API。");
+    if (!confirmed) return;
+    setProductVisualFullDeckApprovalBusy(true);
+    setProductVisualFullDeckApprovalMessage("");
+    try {
+      const result = await api.approveProductVisualFullDeck({
+        maxPages: productVisualFullDeckTargetPages,
+        confirmedBy: "frontend-operator",
+        note: "前端确认产品级 v1 全量视觉生成关卡"
+      });
+      setProductVisualFullDeckApprovalMessage(result.summary || "全量生成关卡已确认。");
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) setV1AcceptanceReport(latest);
+      const approvalPreflight = await api.preflightProductVisualFullDeckApproval({ maxPages: productVisualFullDeckTargetPages }).catch(() => null);
+      if (approvalPreflight) setProductVisualFullDeckApprovalPreflight(approvalPreflight);
+      if (result.fullDeckPreflight?.ok) {
+        setProductVisualFullDeckPreflight(result.fullDeckPreflight);
+        setProductVisualFullDeckPreflightMessage(result.fullDeckPreflight.readyIfConfirmed
+          ? `视觉生成条件已满足：确认后将使用 ${result.fullDeckPreflight.externalImageCalls || productVisualFullDeckTargetPages} 次图片 API。`
+          : uiZh(result.fullDeckPreflight.summary || "全量生成条件未满足。"));
+      }
+    } catch (error) {
+      setProductVisualFullDeckApprovalMessage(uiZh(getErrorMessage(error)));
+    } finally {
+      setProductVisualFullDeckApprovalBusy(false);
+    }
+  }
+
+  async function runProductVisualFullDeck() {
+    if (!productVisualFullDeckPreflight?.readyIfConfirmed) {
+      setProductVisualFullDeckRunMessage("请先检查全量生成条件。");
+      return;
+    }
+    const imageCalls = productVisualFullDeckPreflight.externalImageCalls || 15;
+    const targetLabel = productVisualFullDeckMode === "test" ? `${productVisualFullDeckTargetPages} 页测试` : `${productVisualFullDeckTargetPages} 页全量`;
+    const confirmed = window.confirm(`将使用 ${imageCalls} 次外部图片 API 生成${targetLabel} codex-ppt 图片页并组装图片型 PPT。确认继续？`);
+    if (!confirmed) return;
+    setProductVisualFullDeckRunBusy(true);
+    setProductVisualFullDeckRunMessage("");
+    try {
+      const result = await api.runProductVisualFullDeck({
+        maxPages: productVisualFullDeckTargetPages,
+        confirmExternalImageSpend: true,
+        confirmProductVisualFullDeck: true,
+        confirmedBy: "frontend-operator",
+        reason: "前端确认产品级 v1 全量视觉生成"
+      });
+      setProductVisualFullDeckRunResult(result);
+      setProductVisualFullDeckRunMessage(result.summary || `${targetLabel}图片型 PPT 已生成。`);
+      const latest = await api.latestV1Acceptance().catch(() => null);
+      if (latest) setV1AcceptanceReport(latest);
+      const nextPreflight = await api.preflightProductVisualFullDeck({ maxPages: productVisualFullDeckTargetPages }).catch(() => null);
+      if (nextPreflight) setProductVisualFullDeckPreflight(nextPreflight);
+    } catch (error) {
+      if (error.data?.preflight) {
+        setProductVisualFullDeckPreflight(error.data.preflight);
+      }
+      setProductVisualFullDeckRunResult(null);
+      setProductVisualFullDeckRunMessage(uiZh(error.data?.preflight?.summary || getErrorMessage(error)));
+    } finally {
+      setProductVisualFullDeckRunBusy(false);
+    }
+  }
+
+  async function previewWorkflowCleanup() {
+    setCleanupBusy("preview");
+    setCleanupMessage("");
+    try {
+      const result = await api.previewWorkflowCleanup({ categories: "internal,regression,probe", limit: 200 });
+      setCleanupBundle(result);
+      setCleanupMessage(result.candidateCount ? `发现 ${result.candidateCount} 个清理候选。` : "没有发现清理候选。");
+    } catch (error) {
+      setCleanupMessage(getErrorMessage(error));
+    } finally {
+      setCleanupBusy("");
+    }
+  }
+
+  async function archiveWorkflowCleanup() {
+    setCleanupBusy("archive");
+    setCleanupMessage("");
+    try {
+      const result = await api.archiveWorkflowCleanup({
+        categories: "internal,regression,probe",
+        limit: 200,
+        archivedBy: "frontend-cleanup",
+        reason: "从清理面板归档内部回归/探测工作流"
+      });
+      setCleanupBundle(result);
+      setCleanupMessage(`已归档 ${result.archivedCount || 0} 个清理候选，产物仍保留在磁盘。`);
+      await onRefreshList?.();
+    } catch (error) {
+      setCleanupMessage(getErrorMessage(error));
+    } finally {
+      setCleanupBusy("");
+    }
+  }
+
+  return (
+    <div className="workflow-rebuild-panel">
+      <div className="workflow-rebuild-head">
+        <div>
+          <b>双技能 PPT 工作流</b>
+          <span>先把源页面重绘为 codex-ppt 图片型 PPT，再通过 image-to-editable-ppt/editppt 重建可编辑 PPTX。</span>
+        </div>
+        <div className="workflow-rebuild-actions">
+          <select value={job?.id || ""} onChange={(event) => onSelectJob?.(event.target.value)} disabled={busy || !jobs.length}>
+            {jobs.length ? jobs.map((item) => (
+              <option key={item.id} value={item.id}>{workflowJobLabel(item)}</option>
+            )) : <option value="">暂无工作流</option>}
+          </select>
+          <button className="btn ghost" type="button" onClick={() => onToggleArchivedVisibility?.(!showArchived)} disabled={busy}>
+            {showArchived ? "隐藏已归档" : "显示已归档"}
+          </button>
+          {job?.archived ? (
+            <button className="btn ghost" type="button" onClick={() => onToggleArchive?.(job.id, false)} disabled={busy || !job?.id}>恢复工作流</button>
+          ) : (
+            <button className="btn ghost" type="button" onClick={() => onToggleArchive?.(job?.id, true)} disabled={busy || !job?.id}>归档当前</button>
+          )}
+          <button className="btn ghost" type="button" onClick={onRefreshList} disabled={busy}>刷新列表</button>
+          <button className="btn primary" type="button" onClick={onRunPipeline} disabled={busy || !hasWorkflowInput}>{busy ? "运行中..." : "创建工作流"}</button>
+          <button className="btn ghost" type="button" onClick={onRefresh} disabled={busy || !job?.id}>刷新当前</button>
+        </div>
+      </div>
+      <div className="workflow-rebuild-meta">
+        <Metric label="源文件" value={sourceName} />
+        <Metric label="工作流" value={job?.id ? job.id.replace(/^workflow_/, "") : "未创建"} />
+        <Metric label="下一步" value={uiZh(nextStage || job?.currentStage || "待处理")} />
+        <Metric label="页面提示" value={promptCount} />
+      </div>
+      <WorkflowAgentDashboard
+        artifacts={artifacts}
+        busy={busy}
+        codexSlideTasks={codexSlideTasks}
+        delivery={guidedDelivery}
+        finalPath={finalPath}
+        guidedAction={guidedAction}
+        hasWorkflowInput={hasWorkflowInput}
+        job={job}
+        onCreateWorkflow={onRunPipeline}
+        onRunGuidedAction={runGuidedAction}
+        readinessBundle={v1ReadinessBundle}
+        sourceName={sourceName}
+        stages={stages}
+        workerTasks={workerTasks}
+      />
+      <div className="workflow-guided-action">
+        <div>
+          <b>{uiZh(guidedAction?.title || "推荐下一步")}</b>
+          <span>{uiZh(guidedAction?.description || complianceBundle?.runbook?.summary || "创建或选择工作流后继续。")}</span>
+        </div>
+        <div className={`workflow-guided-delivery ${guidedDelivery.level}`}>
+          <strong>{guidedDelivery.title}</strong>
+          <span>{guidedDelivery.label}</span>
+        </div>
+        <button type="button" onClick={runGuidedAction} disabled={busy || !guidedAction || guidedAction.disabled}>
+          {uiZh(guidedAction?.label || "待处理")}
+        </button>
+      </div>
+      <div className="workflow-guided-confirmations">
+        <label className="workflow-confirm external-spend">
+          <input type="checkbox" checked={confirmVisualSampleSpend} onChange={(event) => setConfirmVisualSampleSpend(event.target.checked)} />
+          <span>确认 codex-ppt 样张生成需要 1 次外部图片 API 调用。</span>
+        </label>
+        <label className="workflow-confirm external-spend">
+          <input type="checkbox" checked={confirmCodexImageSpend} onChange={(event) => setConfirmCodexImageSpend(event.target.checked)} />
+          <span>确认完整 codex-ppt 图片生成会使用外部图片 API。</span>
+        </label>
+      </div>
+      {productStyleAction ? (
+        <ProductStyleRefreshCard
+          action={productStyleAction}
+          busy={styleRefreshBusy}
+          message={styleRefreshMessage}
+          onRefresh={refreshCodexPptStyleEvidence}
+        />
+      ) : null}
+      {productSampleAction ? (
+        <ProductSamplePreflightCard
+          action={productSampleAction}
+          confirmed={confirmVisualSampleSpend}
+          blocked={!confirmVisualSampleSpend}
+          provider={productSampleProvider}
+          onFocus={() => focusDeliveryNextStep({ id: productSampleAction.targetStepId || "generate-sample" })}
+        />
+      ) : null}
+      <GuidedNextActionPreflightCard bundle={guidedPreflightBundle} guidedAction={guidedAction} />
+      {guidedActionNote ? <p className="workflow-guided-note">{guidedActionNote}</p> : null}
+      {pageRetryError ? <p className="workflow-error">{pageRetryError}</p> : null}
+      <details className="workflow-advanced-panel workflow-product-advanced">
+        <summary>高级详情</summary>
+        <p>这里保留给开发和排障：工作流地图、验收门禁、费用、页面任务队列、日志和手动恢复操作。正常使用优先看上面的智能体摘要和下一步按钮。</p>
+        <ProductWorkflowMapPanel
+          complianceBundle={complianceBundle}
+          deliveryGate={deliveryGate}
+          job={job}
+          tasks={{
+            codexSlideTasks,
+            editableTasks: workerTasks
+          }}
+        />
+        <ProductV1AcceptancePanel
+          authorizationBusy={authorizationBusy}
+          acceptanceReport={v1AcceptanceReport}
+          acceptanceRun={v1AcceptanceRun}
+          acceptanceRunBusy={v1AcceptanceRunBusy}
+          acceptanceRunMessage={v1AcceptanceRunMessage}
+          acceptancePreflight={v1AcceptancePreflight}
+          acceptancePreflightBusy={v1AcceptancePreflightBusy}
+          acceptanceSourcePath={v1AcceptanceSourcePath}
+          canUseWorkflowAcceptanceSource={canUseWorkflowAcceptanceSource}
+          bundle={v1ReadinessBundle}
+          onAcceptanceSourcePathChange={setV1AcceptanceSourcePath}
+          onAuthorize={recordExternalImageAuthorization}
+          onFocusDeliveryStep={focusDeliveryNextStep}
+          onPreflightAcceptanceFromWorkflow={() => preflightRealPptAcceptanceRun(true)}
+          onPreflightAcceptanceRun={preflightRealPptAcceptanceRun}
+          onPreflightProductVisualFullDeck={preflightProductVisualFullDeck}
+          onPreflightProductVisualFullDeckApproval={preflightProductVisualFullDeckApproval}
+          onPreflightProductVisualSample={preflightProductVisualSample}
+          onPreflightProductVisualSampleApproval={preflightProductVisualSampleApproval}
+          onPreviewProductVisualSamplePrompt={previewProductVisualSamplePrompt}
+          onApproveProductVisualFullDeck={approveProductVisualFullDeck}
+          onApproveProductVisualSample={approveProductVisualSample}
+          onRunProductVisualReadiness={runProductVisualReadiness}
+          onRunProductVisualFullDeck={runProductVisualFullDeck}
+          onRunProductVisualSample={runProductVisualSample}
+          onProductVisualFullDeckModeChange={changeProductVisualFullDeckMode}
+          onStartAcceptanceFromWorkflow={() => startRealPptAcceptanceRun(true)}
+          onStartAcceptanceRun={startRealPptAcceptanceRun}
+          productVisualReadiness={productVisualReadiness}
+          productVisualReadinessBusy={productVisualReadinessBusy}
+          productVisualReadinessMessage={productVisualReadinessMessage}
+          productVisualFullDeckPreflight={productVisualFullDeckPreflight}
+          productVisualFullDeckPreflightBusy={productVisualFullDeckPreflightBusy}
+          productVisualFullDeckPreflightMessage={productVisualFullDeckPreflightMessage}
+          productVisualFullDeckApprovalPreflight={productVisualFullDeckApprovalPreflight}
+          productVisualFullDeckApprovalBusy={productVisualFullDeckApprovalBusy}
+          productVisualFullDeckApprovalMessage={productVisualFullDeckApprovalMessage}
+          productVisualFullDeckRunBusy={productVisualFullDeckRunBusy}
+          productVisualFullDeckRunMessage={productVisualFullDeckRunMessage}
+          productVisualSamplePreflight={productVisualSamplePreflight}
+          productVisualSamplePreflightBusy={productVisualSamplePreflightBusy}
+          productVisualSamplePreflightMessage={productVisualSamplePreflightMessage}
+          productVisualSamplePromptPreview={productVisualSamplePromptPreview}
+          productVisualSamplePromptPreviewBusy={productVisualSamplePromptPreviewBusy}
+          productVisualSamplePromptPreviewMessage={productVisualSamplePromptPreviewMessage}
+          productVisualSampleApprovalPreflight={productVisualSampleApprovalPreflight}
+          productVisualSampleApprovalBusy={productVisualSampleApprovalBusy}
+          productVisualSampleApprovalMessage={productVisualSampleApprovalMessage}
+          productVisualSampleRunResult={productVisualSampleRunResult}
+          productVisualSampleRunBusy={productVisualSampleRunBusy}
+          productVisualSampleRunMessage={productVisualSampleRunMessage}
+          productVisualFullDeckRunResult={productVisualFullDeckRunResult}
+          onRefreshStyleEvidence={refreshCodexPptStyleEvidence}
+          styleRefreshBusy={styleRefreshBusy}
+          styleRefreshMessage={styleRefreshMessage}
+          workflowAcceptanceSourceName={workflowAcceptanceSourceName}
+        />
+        <WorkflowCostEstimatePanel bundle={costBundle} />
+        <WorkflowCodexDeckStatus
+          artifacts={artifacts}
+          busy={busy}
+          canAssembleImageDeck={canAssembleImageDeck}
+          canSync={canGenerateVisualDeck}
+          complianceBundle={complianceBundle}
+          loading={codexSlideLoading}
+          onAssemble={() => onRunStep("image-deck/assemble", {}, "正在组装图片型 PPT...")}
+          onFocusWorker={focusCodexSlideWorker}
+          onSync={syncCodexSlideTasks}
+          tasks={codexSlideTasks}
+        />
+        <details className="workflow-advanced-panel workflow-manual-controls">
+          <summary>手动 workflow 控制</summary>
+        <p>这些控制用于恢复或运营测试。正常产品流程应优先使用上方推荐步骤。</p>
+        <div className="workflow-step-actions">
+        <button type="button" onClick={() => onRunStep("source/render", {}, "正在渲染源页面...")} disabled={busy || !job?.id}>渲染源文件</button>
+        <button type="button" onClick={() => onRunStep("visual/sample", { confirmExternalImageSpend: confirmVisualSampleSpend }, "正在生成 codex-ppt 视觉样张...")} disabled={busy || !job?.id || !canRunProductVisualSample}>生成样张</button>
+        <button type="button" onClick={() => syncCodexSlideTasks()} disabled={busy || !job?.id || !canGenerateVisualDeck}>同步图片页队列</button>
+        <button type="button" onClick={() => onRunStep("visual/generate", { confirmExternalImageSpend: confirmCodexImageSpend }, "正在生成 codex-ppt 图片页...")} disabled={busy || !job?.id || !canGenerateVisualDeck || !confirmCodexImageSpend}>生成图片页</button>
+        <button type="button" onClick={() => onRunStep("image-deck/assemble", {}, "正在组装图片型 PPT...")} disabled={busy || !canAssembleImageDeck}>组装图片 PPT</button>
+        <button type="button" onClick={() => onRunStep("editable/prepare", { force: true, maxConcurrentPages: 6 }, "正在准备 editppt 运行...")} disabled={busy || !job?.artifacts?.imageDeck}>准备 editppt</button>
+        <button type="button" onClick={() => onRunStep("editable/hints", {}, "正在重新生成 editppt 文字提示...")} disabled={busy || !job?.artifacts?.editableRun}>重建文字提示</button>
+        <button type="button" onClick={() => onRunStep("editable/local-rebuild", { agentId: "main", allowTextDominantLocal: true, acceptOfflineTextHints, offlineTextHintsReason: "frontend limited local rebuild confirmation" }, "正在运行单页本地重建...")} disabled={busy || nextStage !== "rebuild_page_locally"}>单页本地重建</button>
+        <button type="button" onClick={() => onRunStep("editable/prompts", {}, "正在构建页面提示...")} disabled={busy || !job?.artifacts?.editableRun}>构建提示</button>
+        <button type="button" onClick={() => loadPrompts()} disabled={busy || promptLoading || !job?.id || !promptCount}>{promptLoading ? "加载中..." : "加载提示"}</button>
+        <button type="button" onClick={() => onRunStep("editable/finalize", {}, "正在构建最终可编辑 PPTX...")} disabled={busy || nextStage !== "finalize"}>生成最终 PPTX</button>
+        </div>
+        <WorkflowExternalSpendAuthorizationPanel
+          bundle={authorizationBundle}
+          busy={authorizationBusy}
+          canAuthorizeFullDeck={confirmCodexImageSpend}
+          canAuthorizeSample={confirmVisualSampleSpend}
+          fullDeckImageCalls={codexFullDeckImageCalls}
+          message={authorizationMessage}
+          onAuthorize={recordExternalImageAuthorization}
+          provider={productSampleProvider}
+        />
+        </details>
+        <details className="workflow-cleanup-panel">
+        <summary>工作流清理</summary>
+        <p>预览并软归档内部回归、冒烟和探测工作流；用户工作流和文件不会被删除。</p>
+        <div className="workflow-cleanup-actions">
+          <button type="button" onClick={previewWorkflowCleanup} disabled={busy || Boolean(cleanupBusy)}>
+            {cleanupBusy === "preview" ? "预览中..." : "预览清理项"}
+          </button>
+          <button type="button" onClick={archiveWorkflowCleanup} disabled={busy || Boolean(cleanupBusy) || !cleanupBundle?.candidateCount}>
+            {cleanupBusy === "archive" ? "归档中..." : "归档清理候选"}
+          </button>
+          <span>{cleanupMessage || "软清理只归档工作流，产物仍可通过已归档工作流恢复。"}</span>
+        </div>
+        {cleanupBundle ? (
+          <div className="workflow-cleanup-summary">
+            <WorkflowArtifact label="候选项" value={cleanupBundle.candidateCount || 0} />
+            <WorkflowArtifact label="已归档" value={cleanupBundle.archivedCount || 0} />
+            <WorkflowArtifact label="内部项" value={cleanupBundle.reasonCounts?.internal || 0} />
+            <WorkflowArtifact label="探测项" value={cleanupBundle.reasonCounts?.probe || 0} />
+          </div>
+        ) : null}
+        </details>
+        <div className="workflow-overview-grid">
+        <div className="workflow-overview-card">
+          <div className="workflow-overview-card-head">
+            <b>工作流阶段</b>
+            <span>{stages.filter((stage) => stage.status === "done").length}/{stages.length} 已完成</span>
+          </div>
+          <div className="workflow-stage-list">
+            {stages.map((stage) => (
+              <div className={`workflow-stage-row ${stage.status}`} key={stage.id}>
+                <span>{stage.label}</span>
+                <b>{workflowStatusLabel(stage.status)}</b>
+                <small>{stage.message || "等待执行"}</small>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="workflow-overview-card">
+          <div className="workflow-overview-card-head">
+            <b>产物</b>
+            <span>这里只展示真实文件</span>
+          </div>
+          <div className="workflow-artifact-grid">
+            <WorkflowArtifact label="已渲染页面" value={artifactCount(artifacts.renderedPages)} />
+            <WorkflowArtifact label="视觉图片" value={artifactCount(artifacts.visualImages)} />
+            <WorkflowArtifact label="图片型 PPT" value={shortPath(artifacts.imageDeck?.relativePath || artifacts.imageDeck?.path)} />
+            <WorkflowArtifact label="editppt 运行目录" value={shortPath(artifacts.editableRun?.path)} />
+            <WorkflowArtifact label="editppt 提示" value={artifacts.editableHints?.summary ? `${artifacts.editableHints.summary.readyPages || 0}/${artifacts.editableHints.summary.pageCount || 0} 页 / ${artifacts.editableHints.summary.textLineCount || 0} 行` : "待处理"} />
+            <WorkflowArtifact label="页面简报" value={artifacts.workerBriefs ? `${artifacts.workerBriefs.pageCount || 0} 页` : "待处理"} />
+            <WorkflowArtifact label="最终 PPTX" value={shortPath(finalPath) || "等待页面任务"} />
+          </div>
+          <WorkflowTextHintEvidencePanel artifacts={artifacts} artifactBundle={artifactBundle} job={job} onRefresh={onRefresh} />
+        </div>
+        </div>
+        <div className="workflow-status-grid">
+        <WorkflowCompliancePanel artifactBundle={artifactBundle} bundle={complianceBundle} job={job} onRefresh={onRefresh} />
+        <WorkflowDeliverySummary artifactBundle={artifactBundle} bundle={deliveryBundle} status={deliveryStatus} />
+        </div>
+        <details className="workflow-operator-panel">
+        <summary>操作队列</summary>
+        <WorkflowEventLogPanel bundle={eventsBundle} job={job} />
+        <WorkflowUnifiedSkillTaskBoard
+          codexSlideTasks={codexSlideTasks}
+          codexSummary={codexSlideBundle?.summary}
+          editablePromptCount={promptCount}
+          editableSummary={workerTaskBundle?.summary}
+          editableTasks={workerTasks}
+          finalPath={finalPath}
+          nextStage={nextStage}
+          onFocusTask={focusUnifiedTask}
+          onRetryFailedTasks={retryAllFailedUnifiedTasks}
+          onRetryTask={retryUnifiedTask}
+          retryBusyKey={pageRetryBusy}
+        />
+        <WorkflowCodexSlideTaskPanel
+          batchPreflight={codexSlideBatchPreflightBundle}
+          bundle={codexSlideBundle}
+          confirmImageSpend={confirmCodexImageSpend}
+          error={codexSlideError}
+          focusTask={focusedUnifiedTask?.skillId === "codex-ppt" ? focusedUnifiedTask : null}
+          jobId={job?.id || ""}
+          loading={codexSlideLoading}
+          onBatchPreflightChange={setCodexSlideBatchPreflightBundle}
+          onBundleChange={setCodexSlideBundle}
+          onRefreshJob={onRefresh}
+          onRefresh={() => loadCodexSlideTasks()}
+          onRunBatch={startCodexSlideBatch}
+          onSetConfirmImageSpend={setConfirmCodexImageSpend}
+          onSync={syncCodexSlideTasks}
+          tasks={codexSlideTasks}
+        />
+        <WorkflowArtifactReviewPanel artifactBundle={artifactBundle} job={job} onRefresh={onRefresh} />
+        </details>
+        <WorkflowEditablePreparePreflightPanel
+          bundle={editablePreparePreflight}
+          busy={busy || editablePreparePreflightBusy}
+          message={editablePreparePreflightMessage}
+          onPrepare={() => onRunStep("editable/prepare", { force: true, maxConcurrentPages: 6 }, "正在准备 editppt 运行...")}
+          onRefresh={refreshEditablePreparePreflight}
+        />
+        <div className="workflow-worker-console" id="editable-page-worker-panel">
+          <div className="workflow-worker-console-head">
+            <div>
+              <b>可编辑页面任务</b>
+              <span>image-to-editable-ppt 页面重建任务只有在真实页面重建结果存在后才允许记录。</span>
+            </div>
+            <small>{workerTaskBundle?.summary?.recorded || 0}/{workerTaskBundle?.summary?.total ?? workerTasks.length} 已记录</small>
+          </div>
+          <div className={`workflow-worker-current-task ${selectedEditableStatus}`}>
+            <div>
+              <span>当前页面</span>
+              <b>{selectedPrompt?.pageId || selectedPageId || "未选择页面"}</b>
+              <small>{selectedEditableMode}</small>
+            </div>
+            <div>
+              <span>状态</span>
+              <b>{workerTaskStatusLabel(selectedEditableStatus)}</b>
+              <small>{selectedEditableNext}</small>
+            </div>
+            <div>
+              <span>提示/结果</span>
+              <b>{selectedEditablePath || "待处理"}</b>
+              <small>{selectedTask?.agentId || agentId || "未分配"}</small>
+            </div>
+          </div>
+          <div className="workflow-worker-controls">
+            <label>
+              <span>页面</span>
+              <select value={selectedPrompt?.pageId || selectedPageId} onChange={(event) => setSelectedPageId(event.target.value)} disabled={!prompts.length}>
+                {prompts.length ? prompts.map((prompt) => <option value={prompt.pageId} key={prompt.pageId}>{prompt.pageId}</option>) : <option value="">等待提示</option>}
+              </select>
+            </label>
+            <label>
+              <span>智能体 ID</span>
+              <input value={agentId} onChange={(event) => setAgentId(event.target.value)} placeholder="真实页面重建任务的智能体 ID" />
+            </label>
+            <label className="workflow-confirm">
+              <input type="checkbox" checked={confirmSpawned} onChange={(event) => setConfirmSpawned(event.target.checked)} />
+              <span>真实页面任务已启动</span>
+            </label>
+          </div>
+          <div className="workflow-offline-hints-confirm">
+            <label className="workflow-confirm">
+              <input type="checkbox" checked={acceptOfflineTextHints || Boolean(job?.artifacts?.editableTextHintsAcknowledgement?.accepted)} onChange={(event) => setAcceptOfflineTextHints(event.target.checked)} disabled={Boolean(job?.artifacts?.editableTextHintsAcknowledgement?.accepted)} />
+              <span>PaddleOCR 令牌未设置；允许此工作流使用离线内置文字提示。</span>
+            </label>
+            <small>配置免费 PaddleOCR 令牌后，editppt 文字提示会更接近真实内容。没有令牌时，需要先确认此工作流可接受离线提示。</small>
+          </div>
+          <div className="workflow-offline-hints-confirm">
+            <label className="workflow-confirm external-spend">
+              <input type="checkbox" checked={editableImageSpendConfirmed} onChange={(event) => setConfirmEditableImageSpend(event.target.checked)} disabled={editableWorkerAuthorizationPersisted} />
+              <span>允许 image-to-editable-ppt 模型页面任务使用外部图片 API 额度。</span>
+            </label>
+            <small>已选择 {editableBatchSelectedCount} 个页面任务。服务商：{editableImageModel}。没有这个确认，后端会拒绝模型批处理。</small>
+            <div className={`workflow-editable-spend-ledger ${editableWorkerAuthorizationPersisted ? "ready" : "missing"}`}>
+              <div>
+                <b>{editableWorkerAuthorizationPersisted ? "页面任务额度已记录" : "页面任务额度未记录"}</b>
+                <span>{editableWorkerImageCalls || 0} 次 image-to-editable-ppt 页面重建调用，模型：{editableImageModel}</span>
+              </div>
+              <button type="button" onClick={() => recordExternalImageAuthorization("editable-workers", editableWorkerImageCalls)} disabled={authorizationBusy === "editable-workers" || !editableWorkerImageCalls}>
+                {authorizationBusy === "editable-workers" ? "正在记录..." : "记录页面任务额度授权"}
+              </button>
+            </div>
+          </div>
+          <WorkflowWorkerBatchPreflightPanel bundle={editableBatchPreflight} />
+          <div className="workflow-worker-primary-actions">
+            <button type="button" onClick={claimWorkerTask} disabled={busy || promptLoading || !selectedPrompt || selectedTask?.status === "recorded"}>1. 认领任务</button>
+            <button type="button" onClick={() => runWorkerAction("dispatch")} disabled={busy || promptLoading || !selectedPrompt || selectedTask?.status === "recorded"}>2. 派发任务</button>
+            <button type="button" onClick={() => runWorkerAction("record")} disabled={busy || promptLoading || !selectedPrompt || selectedTask?.status === "recorded"}>3. 记录结果</button>
+            <button type="button" onClick={resetSelectedWorkerTask} disabled={busy || promptLoading || !selectedPrompt || selectedTask?.status === "recorded"}>重置</button>
+          </div>
+          <div className="workflow-worker-secondary-actions">
+            <button type="button" onClick={syncWorkerTasks} disabled={busy || promptLoading || !job?.id || !promptCount}>同步队列</button>
+            <button type="button" onClick={() => loadWorkerTasks()} disabled={busy || promptLoading || !job?.id || !promptCount}>刷新队列</button>
+            <button type="button" onClick={startEditableWorkerBatch} disabled={busy || promptLoading || !job?.id || !promptCount || (workerTaskBundle?.summary?.total > 0 && workerTaskBundle?.summary?.recorded === workerTaskBundle?.summary?.total)}>启动后台批处理</button>
+            <button type="button" onClick={() => loadWorkerRuns()} disabled={busy || promptLoading || !job?.id}>刷新运行器</button>
+            <button type="button" onClick={buildWorkerBriefs} disabled={busy || promptLoading || !job?.id || !promptCount}>生成简报</button>
+          </div>
+          {promptError ? <p className="workflow-error">{promptError}</p> : null}
+          {latestWorkerRun ? (
+            <div className={`workflow-worker-runner ${latestWorkerRun.status || "unknown"}`}>
+              <div>
+                <b>后台页面批处理</b>
+                <span>{uiZh(latestWorkerRun.status || "未知")} / {latestWorkerRun.mode || "model"} / pid {latestWorkerRun.pid || "-"}</span>
+              </div>
+              <code>{latestWorkerRun.relativeLogPath || latestWorkerRun.logPath || "日志待生成"}</code>
+              <small>{formatWorkerRunSummary(latestWorkerRun)}</small>
+              <div className="workflow-worker-runner-links">
+                {latestWorkerRun.logHref ? <a href={latestWorkerRun.logHref} target="_blank" rel="noreferrer">打开日志</a> : null}
+                {latestWorkerRun.logDownloadHref ? <a href={latestWorkerRun.logDownloadHref}>下载日志</a> : null}
+              </div>
+            </div>
+          ) : null}
+          <div className="workflow-task-summary">
+            <WorkflowArtifact label="任务总数" value={workerTaskBundle?.summary?.total ?? workerTasks.length} />
+            <WorkflowArtifact label="就绪" value={workerTaskBundle?.summary?.ready ?? 0} />
+            <WorkflowArtifact label="运行中" value={workerTaskBundle?.summary?.running ?? 0} />
+            <WorkflowArtifact label="已记录" value={workerTaskBundle?.summary?.recorded ?? 0} />
+            <WorkflowArtifact label="失败" value={workerTaskBundle?.summary?.failed ?? 0} />
+          </div>
+          <div className="workflow-task-list">
+            {workerTasks.length ? workerTasks.map((task) => (
+              <div className={`workflow-task-row ${task.status}`} key={task.pageId}>
+                <b>{task.pageId}</b>
+                <span>{task.statusLabel || workerTaskStatusLabel(task.status)}</span>
+              <small>{task.evidence?.validationError || task.agentId || task.error || task.relativePath || "等待真实页面任务"}</small>
+              </div>
+            )) : <div>等待同步页面任务。</div>}
+          </div>
+          {selectedPrompt ? (
+            <div className="workflow-handoff-card">
+              <div>
+                <b>页面任务已准备</b>
+                <span>{selectedPrompt.pageId} / 通过后台批处理继续，不需要手动复制命令</span>
+              </div>
+              <code>{selectedPrompt.relativePath || selectedPrompt.pageId}</code>
+            </div>
+          ) : null}
+          <div className="workflow-prompt-view">
+            <div>
+              <b>{selectedPrompt?.pageId || "未选择页面"}</b>
+              <span>{selectedEditablePath || "等待后台任务"}</span>
+            </div>
+            <div>页面重建提示已由后台任务管理；产品界面不再展示或复制原始 prompt。</div>
+          </div>
+        </div>
+      </details>
+      <div className="workflow-note">默认流程会在 codex-ppt 确认后进入视觉生成。image-to-editable-ppt v0.3 单页由主流程本地重建，多页通过真实页面任务重建。</div>
+    </div>
+  );
+}
+
+function WorkflowAgentMainGuidePanel({ busy = false, hasInput = false, job = null, onCreateWorkflow, onGoMaterials, onGoNext }) {
+  const finalGenerated = Boolean(job?.artifacts?.editableFinal?.path);
+  const finalReady = Boolean(finalGenerated && job?.artifacts?.manualReview?.status === "approved");
+  const imageDeckReady = Boolean(job?.artifacts?.imageDeck?.path);
+  const finalHref = finalGenerated && job?.id ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1` : "";
+  const imageDeckHref = imageDeckReady && job?.id ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1` : "";
+  const steps = [
+    {
+      id: "source",
+      title: "准备源文件",
+      desc: hasInput ? "源 PPT、PDF、图片或需求说明已准备。" : "先上传 PPT/PDF/图片，或写一段生成需求。",
+      state: hasInput ? "ready" : "active",
+      action: <button type="button" onClick={onGoMaterials}>{hasInput ? "查看资料" : "去上传"}</button>
+    },
+    {
+      id: "workflow",
+      title: "创建工作流",
+      desc: job?.id ? "当前工作流已创建，后续只会继续它。" : "创建后按 codex-ppt 到 image-to-editable-ppt 的主线推进。",
+      state: job?.id ? "ready" : hasInput ? "active" : "pending",
+      action: job?.id
+        ? <button type="button" onClick={onGoNext}>继续任务</button>
+        : <button type="button" onClick={onCreateWorkflow} disabled={busy || !hasInput}>{busy ? "创建中..." : "创建工作流"}</button>
+    },
+    {
+      id: "visual",
+      title: "生成图片型 PPT",
+      desc: "先确认样张，再用 gpt-image-2 生成视觉统一的图片页。",
+      state: imageDeckReady ? "ready" : job?.id ? "active" : "pending",
+      action: <button type="button" onClick={onGoNext} disabled={!job?.id}>查看下一步</button>
+    },
+    {
+      id: "editable",
+      title: "重建可编辑 PPT",
+      desc: finalReady ? "最终可编辑 PPTX 已复核。" : finalGenerated ? "可编辑 PPTX 已生成，等待复核。" : "image-to-editable-ppt 会把图片页重建为对象级可编辑 PPT。",
+      state: finalReady ? "ready" : finalGenerated || imageDeckReady ? "active" : "pending",
+      action: finalHref
+        ? <a href={finalHref}>下载可编辑 PPT</a>
+        : imageDeckHref
+          ? <a href={imageDeckHref}>下载图片型 PPT</a>
+          : <span>等待结果</span>
+    }
+  ];
+  return (
+    <div className="workflow-user-guide agent-main-guide" aria-label="PPT 智能体主流程">
+      <div className="workflow-user-guide-head">
+        <div>
+          <b>PPT 智能体主流程</b>
+          <span>普通使用只看这 4 步。页面任务、验收门禁和日志已经收进下方高级详情。</span>
+        </div>
+        <small>{job?.id ? `当前任务：${job.id.replace(/^workflow_/, "")}` : "还没创建任务"}</small>
+      </div>
+      <div className="workflow-user-guide-steps">
+        {steps.map((step, index) => (
+          <div className={`workflow-user-guide-step ${step.state}`} key={step.id}>
+            <strong>{String(index + 1).padStart(2, "0")}</strong>
+            <b>{step.title}</b>
+            <span>{step.desc}</span>
+            {step.action}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowUserGuidePanel({ busy = false, hasInput = false, job = null, onCreateWorkflow, onGoMaterials, onGoNext }) {
+  const finalGenerated = Boolean(job?.artifacts?.editableFinal?.path);
+  const finalReady = Boolean(finalGenerated && job?.artifacts?.manualReview?.status === "approved");
+  const imageDeckReady = Boolean(job?.artifacts?.imageDeck?.path);
+  const finalHref = finalGenerated && job?.id ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1` : "";
+  const imageDeckHref = imageDeckReady && job?.id ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1` : "";
+  const steps = [
+    {
+      id: "source",
+      title: "准备资料",
+      desc: hasInput ? "资料或需求已准备。" : "先上传 PPT/PDF/图片，或写一句需求。",
+      state: hasInput ? "ready" : "active",
+      action: <button type="button" onClick={onGoMaterials}>{hasInput ? "查看资料" : "去上传"}</button>
+    },
+    {
+      id: "workflow",
+      title: "创建任务",
+      desc: job?.id ? "工作流已创建，后续不会重复创建。" : "创建后会按两套 Skill 主线推进。",
+      state: job?.id ? "ready" : hasInput ? "active" : "pending",
+      action: job?.id
+        ? <button type="button" onClick={onGoNext}>继续任务</button>
+        : <button type="button" onClick={onCreateWorkflow} disabled={busy || !hasInput}>{busy ? "创建中" : "创建工作流"}</button>
+    },
+    {
+      id: "next",
+      title: "按下一步",
+      desc: "智能体会提示样张确认、全量生成、可编辑重建。",
+      state: job?.id && !finalReady ? "active" : finalReady ? "ready" : "pending",
+      action: <button type="button" onClick={onGoNext} disabled={!job?.id}>看下一步</button>
+    },
+    {
+      id: "download",
+      title: "下载结果",
+      desc: finalReady ? "最终可编辑 PPTX 已复核。" : finalGenerated ? "可编辑 PPTX 已生成，等待人工复核。" : imageDeckReady ? "图片型 PPT 已生成，可先下载草稿。" : "完成后这里会出现下载入口。",
+      state: finalReady ? "ready" : finalGenerated || imageDeckReady ? "active" : "pending",
+      action: finalHref
+        ? <a href={finalHref}>下载可编辑 PPT</a>
+        : imageDeckHref
+          ? <a href={imageDeckHref}>下载图片型 PPT</a>
+          : <span>等待结果</span>
+    }
+  ];
+  return (
+    <div className="workflow-user-guide" aria-label="四步测试向导">
+      <div className="workflow-user-guide-head">
+        <div>
+          <b>按这 4 步测试</b>
+          <span>不需要理解内部任务、页面清单或日志；先按这里走，出问题再打开高级详情。</span>
+        </div>
+        <small>{job?.id ? "当前任务：" + job.id.replace(/^workflow_/, "") : "还没创建任务"}</small>
+      </div>
+      <div className="workflow-user-guide-steps">
+        {steps.map((step, index) => (
+          <div className={`workflow-user-guide-step ${step.state}`} key={step.id}>
+            <strong>{String(index + 1).padStart(2, "0")}</strong>
+            <b>{step.title}</b>
+            <span>{step.desc}</span>
+            {step.action}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowAgentDashboard({ artifacts = {}, busy = false, codexSlideTasks = [], delivery = {}, finalPath = "", guidedAction = null, hasWorkflowInput = false, job = null, onCreateWorkflow, onRunGuidedAction, readinessBundle = null, sourceName = "", stages = [], workerTasks = [] }) {
+  const currentStage = stages.find((stage) => stage.status === "running" || stage.status === "blocked" || stage.status === "pending") || stages[stages.length - 1] || null;
+  const doneCount = stages.filter((stage) => stage.status === "done").length;
+  const totalCount = stages.length || 1;
+  const progress = Math.round((doneCount / totalCount) * 100);
+  const visualRecorded = codexSlideTasks.filter((task) => task.status === "recorded").length;
+  const visualTotal = codexSlideTasks.length || artifactCountNumber(artifacts.visualImages);
+  const editableRecorded = workerTasks.filter((task) => task.status === "recorded").length;
+  const editableTotal = workerTasks.length || artifactCountNumber(artifacts.editableWorkerPrompts);
+  const imageDeckPath = artifacts.imageDeck?.relativePath || artifacts.imageDeck?.path || "";
+  const finalLabel = finalPath ? "可编辑 PPT 已生成" : imageDeckPath ? "图片型 PPT 已生成" : "等待生成";
+  const actionLabel = job?.id ? uiZh(guidedAction?.label || "查看下一步") : "创建工作流";
+  const actionDisabled = busy || (job?.id ? (!guidedAction || guidedAction.disabled) : !hasWorkflowInput);
+  const runAction = job?.id ? onRunGuidedAction : onCreateWorkflow;
+  const deliveryNextStep = readinessBundle?.deliveryNextStep || readinessBundle?.delivery?.nextStep || null;
+  const pageEvidenceAction = (readinessBundle?.actionGroups?.pageEvidence || []).find((action) => action?.id === "retry-stale-page-evidence") || null;
+  const showRecoveryBanner = Boolean(job?.id && (deliveryNextStep?.id === "retry-stale-page-evidence" || deliveryNextStep?.actionId === "retry-stale-page-evidence" || pageEvidenceAction));
+  const recoveryPages = Array.isArray(pageEvidenceAction?.pages) ? pageEvidenceAction.pages : [];
+  return (
+    <div className="workflow-agent-simple agent-dashboard" id="workflow-agent-simple" aria-label="PPT 智能体当前任务">
+      <div className="workflow-agent-simple-head">
+        <div>
+          <span>PPT 智能体</span>
+          <b>{job?.id ? "继续当前任务" : "从这里开始"}</b>
+          <small>{job?.id ? uiZh(guidedAction?.description || "我会按 codex-ppt 到 image-to-editable-ppt 的顺序推进。") : "上传文件或输入需求后，我会先创建双技能工作流。"}</small>
+        </div>
+        <div className={`workflow-agent-delivery ${delivery.level || "pending"}`}>
+          <strong>{delivery.title || "交付状态"}</strong>
+          <small>{delivery.label || "未开始"}</small>
+        </div>
+      </div>
+      <div className="workflow-agent-progress">
+        <div>
+          <span>当前阶段</span>
+          <b>{uiZh(currentStage?.label || "等待创建工作流")}</b>
+          <small>{uiZh(currentStage?.message || sourceName || "先选择资料或输入需求")}</small>
+        </div>
+        <div>
+          <span>整体进度</span>
+          <b>{doneCount}/{totalCount}</b>
+          <small>{progress}%</small>
+        </div>
+        <div>
+          <span>当前结果</span>
+          <b>{finalLabel}</b>
+          <small>{finalPath ? "最终可编辑 PPTX 已出现。" : "完成后会显示下载入口。"}</small>
+        </div>
+      </div>
+      {showRecoveryBanner ? (
+        <div className="workflow-agent-recovery-banner">
+          <div>
+            <span>交付阻断</span>
+            <b>{uiZh(deliveryNextStep?.label || pageEvidenceAction?.label || "重置过期页面证据")}</b>
+            <small>{uiZh(deliveryNextStep?.reason || pageEvidenceAction?.detail || "页面任务证据已过期，需要先重置这些页面，再重跑可编辑重建。")}</small>
+          </div>
+          <div className="workflow-agent-recovery-meta">
+            <span>{recoveryPages.length ? `${recoveryPages.length} 页需要恢复` : "需要恢复页面"}</span>
+            {recoveryPages.slice(0, 4).map((pageId) => <em key={pageId}>{pageId}</em>)}
+            <button type="button" onClick={onRunGuidedAction} disabled={busy || guidedAction?.action !== "retry-stale-page-evidence"}>
+              {busy ? "处理中..." : "先重置证据"}
+            </button>
+          </div>
+          <small>重跑页面任务前仍会要求确认外部图片 API 额度，不会静默消耗。</small>
+        </div>
+      ) : null}
+      <div className="workflow-agent-steps">
+        <WorkflowAgentFact label="源稿" value={sourceName || "待选择"} state={job?.artifacts?.source || sourceName !== "未选择来源" ? "ready" : "pending"} />
+        <WorkflowAgentFact label="图片型 PPT" value={visualTotal ? `${visualRecorded}/${visualTotal} 页` : "待生成"} state={visualTotal && visualRecorded >= visualTotal ? "ready" : visualRecorded ? "working" : "pending"} />
+        <WorkflowAgentFact label="可编辑重建" value={editableTotal ? `${editableRecorded}/${editableTotal} 页` : "待重建"} state={editableTotal && editableRecorded >= editableTotal ? "ready" : editableRecorded ? "working" : "pending"} />
+        <WorkflowAgentFact label="交付" value={finalPath ? "可下载" : "未完成"} state={finalPath ? "ready" : delivery.level || "pending"} />
+      </div>
+      <div className="workflow-agent-next">
+        <button type="button" onClick={runAction} disabled={actionDisabled}>
+          {busy ? "处理中..." : actionLabel}
+        </button>
+        <span>{job?.id ? uiZh(guidedAction?.note || "按下一步推进即可。") : "创建工作流不会直接消耗图片 API；真正生成图片前会再次让你确认。"}</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowAgentSimplePanel({ artifacts = {}, busy = false, codexSlideTasks = [], delivery = {}, finalPath = "", guidedAction = null, hasWorkflowInput = false, job = null, onCreateWorkflow, onRunGuidedAction, readinessBundle = null, sourceName = "", stages = [], workerTasks = [] }) {
+  const currentStage = stages.find((stage) => stage.status === "running" || stage.status === "blocked" || stage.status === "pending") || stages[stages.length - 1] || null;
+  const doneCount = stages.filter((stage) => stage.status === "done").length;
+  const totalCount = stages.length || 1;
+  const progress = Math.round((doneCount / totalCount) * 100);
+  const visualRecorded = codexSlideTasks.filter((task) => task.status === "recorded").length;
+  const visualTotal = codexSlideTasks.length || artifactCountNumber(artifacts.visualImages);
+  const editableRecorded = workerTasks.filter((task) => task.status === "recorded").length;
+  const editableTotal = workerTasks.length || artifactCountNumber(artifacts.editableWorkerPrompts);
+  const imageDeckPath = artifacts.imageDeck?.relativePath || artifacts.imageDeck?.path || "";
+  const finalLabel = finalPath ? shortPath(finalPath) : imageDeckPath ? "图片型 PPT 已生成，等待可编辑重建" : "等待生成";
+  const actionLabel = job?.id ? uiZh(guidedAction?.label || "查看下一步") : "创建工作流";
+  const actionDisabled = busy || (job?.id ? (!guidedAction || guidedAction.disabled) : !hasWorkflowInput);
+  const runAction = job?.id ? onRunGuidedAction : onCreateWorkflow;
+  const deliveryNextStep = readinessBundle?.deliveryNextStep || readinessBundle?.delivery?.nextStep || null;
+  const pageEvidenceAction = (readinessBundle?.actionGroups?.pageEvidence || []).find((action) => action?.id === "retry-stale-page-evidence") || null;
+  const showRecoveryBanner = Boolean(job?.id && (deliveryNextStep?.id === "retry-stale-page-evidence" || deliveryNextStep?.actionId === "retry-stale-page-evidence" || pageEvidenceAction));
+  const recoveryPages = Array.isArray(pageEvidenceAction?.pages) ? pageEvidenceAction.pages : [];
+  return (
+    <div className="workflow-agent-simple" id="workflow-agent-simple" aria-label="PPT 智能体简版进度">
+      <div className="workflow-agent-simple-head">
+        <div>
+          <span>PPT 智能体</span>
+          <b>{job?.id ? "继续当前任务" : "从这里开始"}</b>
+          <small>{job?.id ? uiZh(guidedAction?.description || "我会按 codex-ppt 到 image-to-editable-ppt 的顺序推进。") : "上传文件或输入需求后，我会先创建双技能工作流。"}</small>
+        </div>
+        <div className={`workflow-agent-delivery ${delivery.level || "pending"}`}>
+          <strong>{delivery.title || "交付状态"}</strong>
+          <small>{delivery.label || "未开始"}</small>
+        </div>
+      </div>
+      <div className="workflow-agent-progress">
+        <div>
+          <span>当前</span>
+          <b>{uiZh(currentStage?.label || "等待创建工作流")}</b>
+          <small>{uiZh(currentStage?.message || sourceName || "先选择资料或输入需求")}</small>
+        </div>
+        <div>
+          <span>进度</span>
+          <b>{doneCount}/{totalCount}</b>
+          <small>{progress}%</small>
+        </div>
+        <div>
+          <span>结果</span>
+          <b>{finalLabel}</b>
+          <small>{finalPath ? "最终可编辑 PPTX 已出现" : "完成后会在这里显示下载结果"}</small>
+        </div>
+      </div>
+      {showRecoveryBanner ? (
+        <div className="workflow-agent-recovery-banner">
+          <div>
+            <span>交付阻断</span>
+            <b>{uiZh(deliveryNextStep?.label || pageEvidenceAction?.label || "重置过期页面证据")}</b>
+            <small>{uiZh(deliveryNextStep?.reason || pageEvidenceAction?.detail || "页面任务证据已过期，需要先重置这些页面，再重跑 image-to-editable-ppt 页面任务。")}</small>
+          </div>
+          <div className="workflow-agent-recovery-meta">
+            <span>{recoveryPages.length ? `${recoveryPages.length} 页需恢复` : "需恢复页面"}</span>
+            {recoveryPages.slice(0, 4).map((pageId) => <em key={pageId}>{pageId}</em>)}
+            <button type="button" onClick={onRunGuidedAction} disabled={busy || guidedAction?.action !== "retry-stale-page-evidence"}>
+              {busy ? "处理中..." : "先重置证据"}
+            </button>
+          </div>
+          <small>重跑 editable 页面任务前仍会要求确认外部图片 API 额度，不会静默消耗。</small>
+        </div>
+      ) : null}
+      <div className="workflow-agent-steps">
+        <WorkflowAgentFact label="源稿" value={sourceName || "待选择"} state={job?.artifacts?.source || sourceName !== "未选择来源" ? "ready" : "pending"} />
+        <WorkflowAgentFact label="视觉重绘" value={visualTotal ? `${visualRecorded}/${visualTotal} 页` : "待生成"} state={visualTotal && visualRecorded >= visualTotal ? "ready" : visualRecorded ? "working" : "pending"} />
+        <WorkflowAgentFact label="可编辑重建" value={editableTotal ? `${editableRecorded}/${editableTotal} 页` : "待重建"} state={editableTotal && editableRecorded >= editableTotal ? "ready" : editableRecorded ? "working" : "pending"} />
+        <WorkflowAgentFact label="交付" value={finalPath ? "可下载" : "未完成"} state={finalPath ? "ready" : delivery.level || "pending"} />
+      </div>
+      <div className="workflow-agent-next">
+        <button type="button" onClick={runAction} disabled={actionDisabled}>
+          {busy ? "处理中..." : actionLabel}
+        </button>
+        <span>{job?.id ? uiZh(guidedAction?.note || "按下一步推进即可。") : "不会直接消耗图片 API；真正生成图片前会再让你确认。"}</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowAgentFact({ label, state = "pending", value }) {
+  return (
+    <div className={`workflow-agent-fact ${state}`}>
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
+  );
+}
+
+function ProductWorkflowMapPanel({ complianceBundle = null, deliveryGate = null, job = null, tasks = {} }) {
+  const steps = buildProductWorkflowMap({ complianceBundle, deliveryGate, job, tasks });
+  const current = steps.find((step) => step.state === "working" || step.state === "blocked" || step.state === "pending") || steps[steps.length - 1];
+  const readyCount = steps.filter((step) => step.state === "ready").length;
+  return (
+    <div className="product-workflow-map" aria-label="产品工作流地图">
+      <div className="product-workflow-map-head">
+        <div>
+          <b>产品工作流地图</b>
+          <span>源文件渲染到 codex-ppt 图片型 PPT，再到 image-to-editable-ppt 最终可编辑 PPTX。</span>
+        </div>
+        <div>
+          <strong>{current?.label || "就绪"}</strong>
+          <small>{readyCount}/{steps.length} 个检查点就绪</small>
+        </div>
+      </div>
+      <div className="product-workflow-steps">
+        {steps.map((step, index) => (
+          <div className={`product-workflow-step ${step.state}`} key={step.id}>
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <b>{step.label}</b>
+            <small>{step.detail}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProductV1AcceptancePanel({ acceptanceReport = null, acceptanceRun = null, acceptanceRunBusy = false, acceptanceRunMessage = "", acceptancePreflight = null, acceptancePreflightBusy = false, acceptanceSourcePath = "", authorizationBusy = "", bundle = null, canUseWorkflowAcceptanceSource = false, onAcceptanceSourcePathChange, onApproveProductVisualFullDeck, onApproveProductVisualSample, onAuthorize, onFocusDeliveryStep, onPreflightAcceptanceFromWorkflow, onPreflightAcceptanceRun, onPreflightProductVisualFullDeck, onPreflightProductVisualFullDeckApproval, onPreflightProductVisualSample, onPreflightProductVisualSampleApproval, onPreviewProductVisualSamplePrompt, onProductVisualFullDeckModeChange, onRefreshStyleEvidence, onRunProductVisualReadiness, onRunProductVisualFullDeck, onRunProductVisualSample, onStartAcceptanceFromWorkflow, onStartAcceptanceRun, productVisualFullDeckApprovalBusy = false, productVisualFullDeckApprovalMessage = "", productVisualFullDeckApprovalPreflight = null, productVisualFullDeckMode = "test", productVisualFullDeckPreflight = null, productVisualFullDeckPreflightBusy = false, productVisualFullDeckPreflightMessage = "", productVisualFullDeckRunBusy = false, productVisualFullDeckRunMessage = "", productVisualFullDeckRunResult = null, productVisualFullDeckTargetPages = 2, productVisualReadiness = null, productVisualReadinessBusy = false, productVisualReadinessMessage = "", productVisualSampleApprovalBusy = false, productVisualSampleApprovalMessage = "", productVisualSampleApprovalPreflight = null, productVisualSamplePreflight = null, productVisualSamplePreflightBusy = false, productVisualSamplePreflightMessage = "", productVisualSamplePromptPreview = null, productVisualSamplePromptPreviewBusy = false, productVisualSamplePromptPreviewMessage = "", productVisualSampleRunBusy = false, productVisualSampleRunMessage = "", productVisualSampleRunResult = null, productVisualTargetPages = 15, styleRefreshBusy = false, styleRefreshMessage = "", workflowAcceptanceSourceName = "" }) {
+  if (!bundle?.checks?.length) {
+    return (
+      <div className="product-v1-acceptance pending">
+        <div className="product-v1-acceptance-head">
+          <div>
+            <b>产品级 v1 验收</b>
+            <span>创建或选择工作流后，这里会显示交付证据。</span>
+          </div>
+          <strong>等待中</strong>
+        </div>
+      </div>
+    );
+  }
+  const visibleChecks = bundle.checks.slice(0, 12);
+  const deliveryNextStep = bundle.deliveryNextStep || bundle.delivery?.nextStep || null;
+  const workerEvidence = bundle.workerEvidence || {};
+  const codexSlidePreflight = bundle.codexSlideBatchPreflight || null;
+  const batchPreflight = bundle.workerBatchPreflight || workerEvidence.batchPreflight || null;
+  const providerCheck = bundle.checks.find((check) => check.id === "provider-runtime") || null;
+  const styleCheck = bundle.checks.find((check) => check.id === "codex-ppt-approval-chain") || null;
+  const realDeckCheck = bundle.checks.find((check) => check.id === "real-deck-acceptance-target") || null;
+  const textHintCheck = bundle.checks.find((check) => check.id === "ocr-text-hint-coverage") || null;
+  const qualityCheck = bundle.checks.find((check) => check.id === "page-final-evidence-quality") || null;
+  const finalCheck = bundle.checks.find((check) => check.id === "final-editable-pptx") || null;
+  const downloadCheck = bundle.checks.find((check) => check.id === "validation-and-downloads") || null;
+  const providerActions = bundle.actionGroups?.provider || [];
+  const authorizationActions = bundle.actionGroups?.authorization || [];
+  return (
+    <div className={`product-v1-acceptance ${bundle.level || "pending"}`}>
+      <div className="product-v1-acceptance-head">
+        <div>
+          <b>产品级 v1 验收</b>
+          <span>{uiZh(bundle.summary || "当前工作流的验收证据。")}</span>
+        </div>
+        <div>
+          <strong>{uiZh(bundle.title || "v1 验收")}</strong>
+          <small>{bundle.counts?.pass || 0}/{bundle.counts?.total || visibleChecks.length} 通过</small>
+        </div>
+      </div>
+      <div className="product-v1-acceptance-grid">
+        {visibleChecks.map((check) => (
+          <div className={`product-v1-check ${check.status}`} key={check.id}>
+            <span>{uiZh(check.label)}</span>
+            <b>{v1AcceptanceStatusLabel(check.status)}</b>
+            <small title={uiZh(check.detail)}>{uiZh(check.detail)}</small>
+          </div>
+        ))}
+      </div>
+      <ProductV1RealDeckAcceptanceCard
+        acceptanceReport={acceptanceReport}
+        acceptanceRun={acceptanceRun}
+        acceptanceRunBusy={acceptanceRunBusy}
+        acceptanceRunMessage={acceptanceRunMessage}
+        acceptancePreflight={acceptancePreflight}
+        acceptancePreflightBusy={acceptancePreflightBusy}
+        acceptanceSourcePath={acceptanceSourcePath}
+        canUseWorkflowAcceptanceSource={canUseWorkflowAcceptanceSource}
+        check={realDeckCheck}
+        finalCheck={finalCheck}
+        onAcceptanceSourcePathChange={onAcceptanceSourcePathChange}
+        onPreflightAcceptanceFromWorkflow={onPreflightAcceptanceFromWorkflow}
+        onPreflightAcceptanceRun={onPreflightAcceptanceRun}
+        onPreflightProductVisualFullDeck={onPreflightProductVisualFullDeck}
+        onPreflightProductVisualFullDeckApproval={onPreflightProductVisualFullDeckApproval}
+        onPreflightProductVisualSample={onPreflightProductVisualSample}
+        onPreflightProductVisualSampleApproval={onPreflightProductVisualSampleApproval}
+        onPreviewProductVisualSamplePrompt={onPreviewProductVisualSamplePrompt}
+        onApproveProductVisualFullDeck={onApproveProductVisualFullDeck}
+        onApproveProductVisualSample={onApproveProductVisualSample}
+        onRunProductVisualReadiness={onRunProductVisualReadiness}
+        onRunProductVisualFullDeck={onRunProductVisualFullDeck}
+        onRunProductVisualSample={onRunProductVisualSample}
+        onProductVisualFullDeckModeChange={onProductVisualFullDeckModeChange}
+        onStartAcceptanceFromWorkflow={onStartAcceptanceFromWorkflow}
+        onStartAcceptanceRun={onStartAcceptanceRun}
+        productVisualReadiness={productVisualReadiness}
+        productVisualReadinessBusy={productVisualReadinessBusy}
+        productVisualReadinessMessage={productVisualReadinessMessage}
+        productVisualFullDeckPreflight={productVisualFullDeckPreflight}
+        productVisualFullDeckPreflightBusy={productVisualFullDeckPreflightBusy}
+        productVisualFullDeckPreflightMessage={productVisualFullDeckPreflightMessage}
+        productVisualFullDeckApprovalPreflight={productVisualFullDeckApprovalPreflight}
+        productVisualFullDeckApprovalBusy={productVisualFullDeckApprovalBusy}
+        productVisualFullDeckApprovalMessage={productVisualFullDeckApprovalMessage}
+        productVisualFullDeckRunBusy={productVisualFullDeckRunBusy}
+        productVisualFullDeckRunMessage={productVisualFullDeckRunMessage}
+        productVisualFullDeckRunResult={productVisualFullDeckRunResult}
+        productVisualFullDeckMode={productVisualFullDeckMode}
+        productVisualFullDeckTargetPages={productVisualFullDeckTargetPages}
+        productVisualTargetPages={productVisualTargetPages}
+        productVisualSamplePreflight={productVisualSamplePreflight}
+        productVisualSamplePreflightBusy={productVisualSamplePreflightBusy}
+        productVisualSamplePreflightMessage={productVisualSamplePreflightMessage}
+        productVisualSamplePromptPreview={productVisualSamplePromptPreview}
+        productVisualSamplePromptPreviewBusy={productVisualSamplePromptPreviewBusy}
+        productVisualSamplePromptPreviewMessage={productVisualSamplePromptPreviewMessage}
+        productVisualSampleApprovalBusy={productVisualSampleApprovalBusy}
+        productVisualSampleApprovalMessage={productVisualSampleApprovalMessage}
+        productVisualSampleApprovalPreflight={productVisualSampleApprovalPreflight}
+        productVisualSampleRunBusy={productVisualSampleRunBusy}
+        productVisualSampleRunMessage={productVisualSampleRunMessage}
+        productVisualSampleRunResult={productVisualSampleRunResult}
+        workerEvidence={workerEvidence}
+        workflowAcceptanceSourceName={workflowAcceptanceSourceName}
+      />
+      <ProductV1TextHintCoverageCard check={textHintCheck} />
+      <ProductV1QualityEvidenceCard check={qualityCheck} />
+      <ProductV1DownloadGateCard check={downloadCheck} />
+      <ProductV1StyleEvidenceSummary
+        actions={bundle.actionGroups?.style || []}
+        busy={styleRefreshBusy}
+        check={styleCheck}
+        message={styleRefreshMessage}
+        onRefreshStyleEvidence={onRefreshStyleEvidence}
+      />
+      {deliveryNextStep ? (
+        <div className="product-v1-delivery-next">
+          <div>
+            <span>当前交付步骤</span>
+            <b>{uiZh(deliveryNextStep.label)}</b>
+            <small>{uiZh(deliveryNextStep.reason)}</small>
+            <button type="button" onClick={() => onFocusDeliveryStep?.(deliveryNextStep)}>打开步骤面板</button>
+          </div>
+          <div className="product-v1-worker-facts">
+            <span><b>{workerEvidence.ready || 0}</b>就绪</span>
+            <span><b>{workerEvidence.running || 0}</b>运行中</span>
+            <span><b>{workerEvidence.recorded || 0}</b>已记录</span>
+            <span><b>{workerEvidence.failed || 0}</b>失败</span>
+          </div>
+        </div>
+      ) : null}
+      <ProductV1AuthorizationSummary
+        authorizationBusy={authorizationBusy}
+        actions={authorizationActions}
+        bundle={bundle.authorization || null}
+        onAuthorize={onAuthorize}
+        onFocusDeliveryStep={onFocusDeliveryStep}
+      />
+      {codexSlidePreflight ? (
+        <ProductV1CodexSlidePreflightSummary
+          actions={bundle.actionGroups?.codexSlide || []}
+          bundle={codexSlidePreflight}
+          resetPreview={bundle.codexSlideResetPreview || null}
+          onFocusDeliveryStep={onFocusDeliveryStep}
+        />
+      ) : null}
+      {providerCheck ? (
+        <ProductV1ProviderRuntimeSummary
+          actions={providerActions}
+          check={providerCheck}
+          onFocusDeliveryStep={onFocusDeliveryStep}
+        />
+      ) : null}
+      {batchPreflight ? <ProductV1WorkerPreflightSummary actions={bundle.actionGroups?.preflight || []} bundle={batchPreflight} /> : null}
+      {bundle.nextActions?.length ? (
+        <div className="product-v1-next">
+          <span>下一条证据</span>
+          <b>{uiZh(bundle.nextActions[0])}</b>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductV1TextHintCoverageCard({ check = null }) {
+  if (!check) return null;
+  const evidence = check.evidence || {};
+  const state = check.status === "pass" ? "pass" : check.status === "warning" ? "warning" : "pending";
+  const coverage = Number(evidence.coverageRatio || 0);
+  const percent = Math.round(Math.max(0, Math.min(1, coverage)) * 100);
+  return (
+    <div className={`product-v1-text-hints ${state}`}>
+      <div className="product-v1-text-hints-head">
+        <div>
+          <span>OCR 文字提示</span>
+          <b>{check.status === "pass" ? "文字提示已满足 v1 验收" : evidence.hasAnyTextHints ? "文字提示仍需复核" : "等待文字提示证据"}</b>
+          <small>{uiZh(check.detail || "等待 OCR 或 editppt 文字提示。")}</small>
+        </div>
+        <strong>{v1AcceptanceStatusLabel(check.status)}</strong>
+      </div>
+      <div className="product-v1-text-hints-facts">
+        <span>覆盖页数<b>{evidence.coveredPages || 0}/{evidence.expectedPages || 0}</b></span>
+        <span>覆盖率<b>{percent}%</b></span>
+        <span>OCR 文字<b>{evidence.ocrTextCount || 0}</b></span>
+        <span>低置信<b>{evidence.lowConfidenceCount || 0}</b></span>
+        <span>已修正<b>{evidence.correctedCount || 0}</b></span>
+        <span>editppt 提示<b>{evidence.editableReadyPages || 0}/{evidence.editableHintPageCount || 0}</b></span>
+      </div>
+    </div>
+  );
+}
+
+function ProductV1QualityEvidenceCard({ check = null }) {
+  if (!check) return null;
+  const evidence = check.evidence || {};
+  const state = check.status === "pass" ? "pass" : check.status === "warning" ? "warning" : "pending";
+  const riskCount = Number(evidence.manifestIssueCount || 0)
+    + Number(evidence.finalIssueCount || 0)
+    + Number(evidence.fullSlidePictures || 0);
+  return (
+    <div className={`product-v1-quality-evidence ${state}`}>
+      <div className="product-v1-quality-evidence-head">
+        <div>
+          <span>页面证据质量</span>
+          <b>{check.status === "pass" ? "页面与最终证据已满足 v1 验收" : evidence.hasAnyEvidence ? "页面与最终证据仍需复核" : "等待页面与最终证据"}</b>
+          <small>{uiZh(check.detail || "等待 editppt 页面证据、manifest、validation 和最终文件 hash。")}</small>
+        </div>
+        <strong>{v1AcceptanceStatusLabel(check.status)}</strong>
+      </div>
+      <div className="product-v1-quality-evidence-facts">
+        <span>完整页面<b>{evidence.completePages || 0}/{evidence.totalPages || 0}</b></span>
+        <span>manifest 合同<b>{evidence.manifestContractPages || 0}</b></span>
+        <span>页面校验<b>{evidence.validationPassedPages || 0}</b></span>
+        <span>页面 hash<b>{evidence.hashMatchedPages || 0}</b></span>
+        <span>最终校验<b>{evidence.finalValidationPassed ? "通过" : "待通过"}</b></span>
+        <span>最终 hash<b>{evidence.finalHashMatched ? "一致" : "待确认"}</b></span>
+        <span>整页大图<b>{evidence.fullSlidePictures || 0}</b></span>
+        <span>风险项<b>{riskCount}</b></span>
+      </div>
+    </div>
+  );
+}
+
+function ProductV1DownloadGateCard({ check = null }) {
+  if (!check) return null;
+  const evidence = check.evidence || {};
+  const missingLinks = Array.isArray(evidence.missingLinks) ? evidence.missingLinks : [];
+  const requiredLinks = Array.isArray(evidence.requiredLinks) ? evidence.requiredLinks : [];
+  const state = check.status === "pass" ? "pass" : check.status === "warning" ? "warning" : "pending";
+  return (
+    <div className={`product-v1-download-gate ${state}`}>
+      <div className="product-v1-download-gate-head">
+        <div>
+          <b>{check.status === "pass" ? "下载验收已通过" : evidence.finalDownloadable ? "下载材料未齐" : "最终 PPTX 暂不可交付下载"}</b>
+          <small>{uiZh(check.detail || "等待最终产物和 validation 证据。")}</small>
+        </div>
+        <strong>{v1AcceptanceStatusLabel(check.status)}</strong>
+      </div>
+      <div className="product-v1-download-gate-facts">
+        <span>最终 PPTX<b>{evidence.finalDownloadable ? "可下载" : "被阻断"}</b></span>
+        <span>门禁状态<b>{uiZh(evidence.finalGateLevel || "待处理")}</b></span>
+        <span>必需下载<b>{requiredLinks.length || 4} 项</b></span>
+        <span>缺少项<b>{missingLinks.length ? missingLinks.join(", ") : "无"}</b></span>
+      </div>
+    </div>
+  );
+}
+
+function ProductV1StyleEvidenceSummary({ actions = [], busy = false, check = null, message = "", onRefreshStyleEvidence }) {
+  const style = check?.evidence?.style || {};
+  if (!check && !actions.length && !style.exists) return null;
+  const legacy = Boolean(style.legacy || actions.length);
+  const state = legacy ? "warning" : style.exists ? "ready" : "pending";
+  return (
+    <div className={`product-v1-style-evidence ${state}`}>
+      <div>
+        <span>codex-ppt 风格证据</span>
+        <b>{legacy ? "需要刷新风格证据" : style.exists ? "风格证据可用" : "等待风格证据"}</b>
+        <small>{legacy ? `检测到历史风格痕迹${style.legacyToken ? `，${style.legacyToken}` : ""}` : uiZh(check?.detail || "记录双技能工作流的视觉风格说明。")}</small>
+      </div>
+      <div className="product-v1-style-facts">
+        <span>证据<b>{style.exists ? "存在" : "缺少"}</b></span>
+        <span>来源<b>{style.source || "未记录"}</b></span>
+        <span>历史风格<b>{legacy ? "需刷新" : "未发现"}</b></span>
+      </div>
+      {actions.length ? (
+        <div className="product-v1-style-actions">
+          <span>风格操作</span>
+          {actions.slice(0, 2).map((action) => (
+            <button key={action.id || action.detail} type="button" onClick={onRefreshStyleEvidence} disabled={busy || !onRefreshStyleEvidence}>
+              {busy ? "正在刷新..." : uiZh(action.detail)}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {message ? <small>{message}</small> : null}
+    </div>
+  );
+}
+
+function ProductV1RealDeckAcceptanceCard({ acceptanceReport = null, acceptanceRun = null, acceptanceRunBusy = false, acceptanceRunMessage = "", acceptancePreflight = null, acceptancePreflightBusy = false, acceptanceSourcePath = "", canUseWorkflowAcceptanceSource = false, check = null, finalCheck = null, onAcceptanceSourcePathChange, onApproveProductVisualFullDeck, onApproveProductVisualSample, onPreflightAcceptanceFromWorkflow, onPreflightAcceptanceRun, onPreflightProductVisualFullDeck, onPreflightProductVisualFullDeckApproval, onPreflightProductVisualSample, onPreflightProductVisualSampleApproval, onPreviewProductVisualSamplePrompt, onProductVisualFullDeckModeChange, onRunProductVisualReadiness, onRunProductVisualFullDeck, onRunProductVisualSample, onStartAcceptanceFromWorkflow, onStartAcceptanceRun, productVisualFullDeckApprovalBusy = false, productVisualFullDeckApprovalMessage = "", productVisualFullDeckApprovalPreflight = null, productVisualFullDeckMode = "test", productVisualFullDeckPreflight = null, productVisualFullDeckPreflightBusy = false, productVisualFullDeckPreflightMessage = "", productVisualFullDeckRunBusy = false, productVisualFullDeckRunMessage = "", productVisualFullDeckRunResult = null, productVisualFullDeckTargetPages = 2, productVisualReadiness = null, productVisualReadinessBusy = false, productVisualReadinessMessage = "", productVisualSampleApprovalBusy = false, productVisualSampleApprovalMessage = "", productVisualSampleApprovalPreflight = null, productVisualSamplePreflight = null, productVisualSamplePreflightBusy = false, productVisualSamplePreflightMessage = "", productVisualSamplePromptPreview = null, productVisualSamplePromptPreviewBusy = false, productVisualSamplePromptPreviewMessage = "", productVisualSampleRunBusy = false, productVisualSampleRunMessage = "", productVisualSampleRunResult = null, productVisualTargetPages = 15, workerEvidence = {}, workflowAcceptanceSourceName = "" }) {
+  const [confirmLatestProductVisualSample, setConfirmLatestProductVisualSample] = useState(false);
+  const [confirmLatestProductVisualFullDeck, setConfirmLatestProductVisualFullDeck] = useState(false);
+  if (!check && !finalCheck) return null;
+  const evidence = check?.evidence || {};
+  const finalEvidence = finalCheck?.evidence || {};
+  const latestReport = acceptanceReport?.latest || null;
+  const acceptance = latestReport?.acceptance || acceptanceReport?.acceptance || null;
+  const phaseProgress = acceptance?.phaseProgress || latestReport?.phaseProgress || acceptanceReport?.phaseProgress || null;
+  const sourcePages = Number(evidence.sourcePages || 0);
+  const finalPages = Number(finalEvidence.finalPages || 0);
+  const recordedPages = Number(workerEvidence.recorded || 0);
+  const totalPages = Number(workerEvidence.total || sourcePages || 0);
+  const reportPages = Number(latestReport?.sourceRender?.renderedPages || 0);
+  const reportVisualImages = Number(latestReport?.visual?.visualImages || 0);
+  const reportEditableFinal = latestReport?.editable?.final?.path || latestReport?.artifacts?.editableFinal || "";
+  const reportReady = Boolean(acceptance?.ready) || (!acceptance && Boolean(latestReport?.ok && reportPages >= 15 && latestReport?.visual?.imageDeck && reportEditableFinal));
+  const isRealDeckTarget = check?.status === "pass";
+  const isProductReady = finalCheck?.status === "pass" && Boolean(finalEvidence.productReady);
+  const state = (isRealDeckTarget && isProductReady) || reportReady ? "pass" : acceptance?.level === "fail" ? "fail" : isRealDeckTarget ? "warning" : "pending";
+  const acceptanceMissing = Array.isArray(acceptance?.missing) ? acceptance.missing : [];
+  const acceptanceCounts = acceptance?.counts || {};
+  const productVisualNext = latestReport?.productVisualNext || acceptance?.productVisualNext || acceptanceReport?.productVisualNext || null;
+  const productActions = Array.isArray(productVisualNext?.productActions) ? productVisualNext.productActions : [];
+  const productVisualCalls = productVisualNext?.externalImageCalls || {};
+  const productVisualSpendPlan = productVisualNext?.spendPlan || null;
+  const productVisualSpendSteps = Array.isArray(productVisualSpendPlan?.steps) ? productVisualSpendPlan.steps : [];
+  const productVisualRangeOptions = [
+    {
+      id: "test",
+      title: "先试 2 页",
+      detail: "适合先看跨页风格、信息密度和画面质量。",
+      action: productActions.find((action) => action.id === "product-visual-test-deck-run")
+    },
+    {
+      id: "custom",
+      title: "只跑指定页",
+      detail: "适合重跑问题页或先挑关键页验证。",
+      action: productActions.find((action) => action.id === "product-visual-custom-pages-run")
+    },
+    {
+      id: "full",
+      title: "生成全部",
+      detail: "样张和测试页确认后，再生成完整图片型 PPT。",
+      action: productActions.find((action) => action.id === "product-visual-full-deck-run")
+    }
+  ].filter((item) => item.action);
+  const productVisualAgentNextAction = buildProductVisualAgentNextAction({
+    productVisualNext,
+    productVisualSamplePreflight,
+    productVisualSampleRunResult,
+    productVisualSampleApprovalPreflight,
+    productVisualFullDeckApprovalPreflight,
+    productVisualFullDeckPreflight,
+    productVisualFullDeckRunResult,
+    fullDeckTargetPages: Number(productVisualFullDeckTargetPages || 2)
+  });
+  const productVisualReadinessLatest = productVisualReadiness?.latest || productVisualReadiness || null;
+  const productVisualResult = productVisualReadinessLatest?.result || productVisualReadiness?.result || null;
+  const productVisualReadinessStale = Boolean(productVisualReadiness?.stale);
+  const productVisualReadinessReason = uiZh(productVisualReadiness?.reason || "产品级视觉预检来自旧验收任务，请重新运行无费用产品视觉预检。");
+  const samplePreflightChecks = Array.isArray(productVisualSamplePreflight?.checks) ? productVisualSamplePreflight.checks : [];
+  const samplePreflightState = productVisualSamplePreflight?.readyIfConfirmed ? "pass" : productVisualSamplePreflight ? "warning" : "idle";
+  const sampleExecutionSnapshot = productVisualSamplePreflight?.executionSnapshot || null;
+  const fullDeckPreflightChecks = Array.isArray(productVisualFullDeckPreflight?.checks) ? productVisualFullDeckPreflight.checks : [];
+  const fullDeckPreflightState = productVisualFullDeckPreflight?.readyIfConfirmed ? "pass" : productVisualFullDeckPreflight ? "warning" : "idle";
+  const fullDeckExecutionSnapshot = productVisualFullDeckPreflight?.executionSnapshot || null;
+  const samplePromptMatchesPreflight = promptPreviewMatchesSamplePreflight(productVisualSamplePreflight, productVisualSamplePromptPreview?.promptPreview);
+  const canRunLatestProductVisualSample = Boolean(productVisualSamplePreflight?.readyIfConfirmed && samplePromptMatchesPreflight && confirmLatestProductVisualSample && !productVisualSampleRunBusy && onRunProductVisualSample);
+  const canApproveLatestProductVisualSample = Boolean(productVisualSampleApprovalPreflight?.ready && !productVisualSampleApprovalBusy && onApproveProductVisualSample);
+  const canApproveLatestProductVisualFullDeck = Boolean(productVisualFullDeckApprovalPreflight?.ready && !productVisualFullDeckApprovalBusy && onApproveProductVisualFullDeck);
+  const canRunLatestProductVisualFullDeck = Boolean(productVisualFullDeckPreflight?.readyIfConfirmed && confirmLatestProductVisualFullDeck && !productVisualFullDeckRunBusy && onRunProductVisualFullDeck);
+  const fullDeckTargetPages = clamp(Number(productVisualFullDeckTargetPages || (productVisualFullDeckMode === "test" ? 2 : productVisualTargetPages)), 1, productVisualTargetPages || 50);
+  const fullDeckTargetLabel = productVisualFullDeckMode === "test" ? `${fullDeckTargetPages} 页测试` : `${fullDeckTargetPages} 页全量`;
+  const run = acceptanceRun?.run || null;
+  const runIsActive = Boolean(acceptanceRun?.active || run?.status === "running");
+  const preflightChecks = Array.isArray(acceptancePreflight?.checks) ? acceptancePreflight.checks : [];
+  const failedPreflightChecks = preflightChecks.filter((item) => !item.ok);
+  const runStatusLabel = run?.status === "complete" ? "已完成" : run?.status === "failed" ? "失败" : runIsActive ? "运行中" : "未运行";
+  return (
+    <div className={`product-v1-real-deck ${state}`}>
+      <div className="product-v1-real-deck-head">
+        <div>
+          <span>真实 15 页 PPT 验收</span>
+          <b>{isProductReady ? "已满足 v1 真实交付目标" : isRealDeckTarget ? "已进入真实 15 页验收，等待最终可编辑结果" : "还不能声明 v1 完成"}</b>
+          <small>{uiZh(check?.detail || "声明 v1 前，需要用真实 15 页 PPTX 跑完整流程。")}</small>
+        </div>
+        <strong>{isProductReady ? "通过" : isRealDeckTarget ? "进行中" : "缺证据"}</strong>
+      </div>
+      <div className="product-v1-real-deck-facts">
+        <span>源文件<b>{evidence.sourceName || "待选择"}</b></span>
+        <span>源页数<b>{sourcePages || "待渲染"}</b></span>
+        <span>页面记录<b>{recordedPages}/{totalPages || sourcePages || 0}</b></span>
+        <span>最终页数<b>{finalPages || "待生成"}</b></span>
+      </div>
+      <div className="product-v1-real-deck-report">
+        <span>最近真实验收</span>
+        {latestReport ? (
+          <div>
+            <b>{latestReport.ok ? "已有报告" : "报告失败"} / {latestReport.jobId || "未知任务"}</b>
+            <small>{latestReport.sourcePath || "未记录源文件"}</small>
+            <div className="product-v1-real-deck-report-facts">
+              <em>源页 {reportPages || 0}</em>
+              <em>图片页 {reportVisualImages || 0}</em>
+              <em>{latestReport.visual?.imageDeck ? "图片型 PPT 已记录" : "图片型 PPT 缺失"}</em>
+              <em>{reportEditableFinal ? "可编辑结果已记录" : "可编辑结果未完成"}</em>
+            </div>
+            {acceptance ? (
+              <div className="product-v1-real-deck-acceptance">
+                <b>{acceptance.ready ? "真实验收通过" : "真实验收未通过"}</b>
+                <small>{uiZh(acceptance.summary || "")}</small>
+                <div>
+                  <em>通过 {acceptanceCounts.pass || 0}</em>
+                  <em>失败 {acceptanceCounts.fail || 0}</em>
+                  <em>待处理 {acceptanceCounts.pending || 0}</em>
+                  <em>警告 {acceptanceCounts.warning || 0}</em>
+                </div>
+                {acceptanceMissing.length ? <small>缺失：{acceptanceMissing.slice(0, 3).map((item) => uiZh(item.label || item.id)).join("、")}</small> : null}
+              </div>
+            ) : null}
+            <ProductV1PhaseProgress progress={phaseProgress} />
+            {productVisualNext && productVisualNext.status !== "pass" ? (
+              <div className="product-v1-product-visual-next">
+                <div>
+                  <span>产品级视觉下一步</span>
+                  <b>{uiZh(productVisualNext.title || "等待产品级视觉重绘")}</b>
+                  <small>{uiZh(productVisualNext.summary || "需要先确认样张，再生成全量图片型 PPT。")}</small>
+                </div>
+                {productVisualAgentNextAction ? (
+                  <div className={`product-v1-agent-next-action ${productVisualAgentNextAction.level}`}>
+                    <div>
+                      <span>Agent 推荐下一步</span>
+                      <b>{productVisualAgentNextAction.title}</b>
+                      <small>{productVisualAgentNextAction.detail}</small>
+                    </div>
+                    <strong>{productVisualAgentNextAction.badge}</strong>
+                  </div>
+                ) : null}
+                <div className="product-v1-product-visual-next-facts">
+                  <em>当前模式 {productVisualNext.currentMode || "未生成"}</em>
+                  <em>目标页数 {productVisualNext.targetPages || 15}</em>
+                  <em>样张调用 {productVisualCalls.sample || 0}</em>
+                  <em>全量调用 {productVisualCalls.fullDeck || 0}</em>
+                </div>
+                {productVisualSpendPlan ? (
+                  <div className="product-v1-product-visual-spend-plan">
+                    <div>
+                      <span>外部图片 API 计划</span>
+                      <b>共 {productVisualSpendPlan.totalExternalImageCalls ?? productVisualCalls.total ?? 0} 次</b>
+                      <small>{productVisualSpendPlan.requiresExplicitSpendConfirmation ? "分阶段确认后才会调用，不会自动消耗额度。" : "当前阶段不会调用图片 API。"}</small>
+                    </div>
+                    {productVisualSpendSteps.length ? (
+                      <div>
+                        {productVisualSpendSteps.map((step) => (
+                          <em className={step.paidImageGeneration ? "paid" : "safe"} key={step.id}>
+                            {step.order || ""}. {uiZh(step.label || step.id)}：{step.externalImageCalls || 0} 次
+                          </em>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {productVisualRangeOptions.length ? (
+                  <div className="product-v1-product-visual-range-options">
+                    {productVisualRangeOptions.map((option) => (
+                      <div className={option.id === productVisualFullDeckMode ? "active" : ""} key={option.id}>
+                        <b>{option.title}</b>
+                        <span>{option.action.externalImageCalls || 0} 次图片 API</span>
+                        <small>{option.detail}</small>
+                        <em>{option.action.body?.pages ? `页码 ${option.action.body.pages}` : `最多 ${option.action.body?.maxPages || productVisualTargetPages || 15} 页`}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {productActions.length ? (
+                  <div className="product-v1-product-visual-actions-contract">
+                    {productActions.map((action) => (
+                      <div className={action.paidImageGeneration ? "paid" : "safe"} key={action.id}>
+                        <b>{uiZh(action.label || action.id)}</b>
+                        <span>{action.method && action.path ? `${action.method} ${action.path}` : uiZh(action.kind || "本地动作")}</span>
+                        <small>{uiZh(action.description || "")}</small>
+                        <em>{action.paidImageGeneration ? `会消耗 ${action.externalImageCalls || 0} 次图片 API` : "不生成图片"}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <small>工具不会自动消耗外部图片额度；只有明确授权后才会调用图片 API。</small>
+                <div className="product-v1-product-visual-target-mode">
+                  <div>
+                    <span>图片页生成目标</span>
+                    <b>{fullDeckTargetLabel}</b>
+                    <small>建议先跑 2 页测试，确认跨页风格一致后再跑全量。</small>
+                  </div>
+                  <div>
+                    <button type="button" className={productVisualFullDeckMode === "test" ? "active" : ""} onClick={() => onProductVisualFullDeckModeChange?.("test")}>
+                      2 页测试
+                    </button>
+                    <button type="button" className={productVisualFullDeckMode === "full" ? "active" : ""} onClick={() => onProductVisualFullDeckModeChange?.("full")}>
+                      全量 {productVisualTargetPages || 15} 页
+                    </button>
+                  </div>
+                </div>
+                <div className="product-v1-product-visual-next-actions">
+                  <button type="button" onClick={onRunProductVisualReadiness} disabled={productVisualReadinessBusy || !onRunProductVisualReadiness}>
+                    {productVisualReadinessBusy ? "预检中..." : "运行无费用预检"}
+                  </button>
+                  <button type="button" onClick={onPreflightProductVisualSample} disabled={productVisualSamplePreflightBusy || !onPreflightProductVisualSample || !productVisualResult || productVisualReadinessStale}>
+                    {productVisualSamplePreflightBusy ? "检查中..." : "检查真实样张条件"}
+                  </button>
+                  <button type="button" onClick={onPreflightProductVisualFullDeck} disabled={productVisualFullDeckPreflightBusy || !onPreflightProductVisualFullDeck || !productVisualResult || productVisualReadinessStale}>
+                    {productVisualFullDeckPreflightBusy ? "检查中..." : `检查 ${fullDeckTargetLabel} 条件`}
+                  </button>
+                  <small>{productVisualReadinessMessage || "只检查 provider、源文件渲染、codex-ppt 大纲/风格/后端关卡，不生成图片。"}</small>
+                </div>
+                {productVisualReadinessStale ? (
+                  <div className="product-v1-product-visual-stale">
+                    <b>产品视觉预检已过期</b>
+                    <small>{productVisualReadinessReason}</small>
+                    <em>最新验收 {productVisualReadiness.latestReportJobId || "-"}</em>
+                    <em>当前预检 {productVisualReadiness.latestReadinessJobId || "-"}</em>
+                  </div>
+                ) : null}
+                {productVisualResult ? (
+                  <div className="product-v1-product-visual-readiness-result">
+                    <em>预检任务 {productVisualResult.jobId || "-"}</em>
+                    <em>源页 {productVisualResult.sourceRender?.renderedPages || 0}</em>
+                    <em>模型 {productVisualResult.provider?.model || "-"}</em>
+                    <em>下一步 {productVisualResult.runbook?.currentTitle || productVisualResult.runbook?.currentStep || "-"}</em>
+                  </div>
+                ) : null}
+                {productVisualSamplePreflight ? (
+                  <div className={`product-v1-product-visual-sample-preflight ${samplePreflightState}`}>
+                    <div>
+                      <span>真实样张预检</span>
+                      <b>{productVisualSamplePreflight.readyIfConfirmed ? "可授权生成样张" : "条件未满足"}</b>
+                      <small>{productVisualSamplePreflightMessage || uiZh(productVisualSamplePreflight.summary || "")}</small>
+                    </div>
+                    <div>
+                      <em>任务 {productVisualSamplePreflight.jobId || "-"}</em>
+                      <em>动作 {productVisualSamplePreflight.nextAction || "visual/sample"}</em>
+                      <em>图片调用 {productVisualSamplePreflight.externalImageCalls || 1}</em>
+                      <em>确认 {productVisualSamplePreflight.requiredConfirmation || "externalImageSpend"}</em>
+                    </div>
+                    {sampleExecutionSnapshot ? (
+                      <ProductVisualExecutionSnapshot snapshot={sampleExecutionSnapshot} />
+                    ) : null}
+                    <div className="product-v1-product-visual-prompt-preview-actions">
+                      <button type="button" onClick={onPreviewProductVisualSamplePrompt} disabled={productVisualSamplePromptPreviewBusy || !productVisualSamplePreflight.readyIfConfirmed || !onPreviewProductVisualSamplePrompt}>
+                        {productVisualSamplePromptPreviewBusy ? "预览中..." : "预览样张 prompt"}
+                      </button>
+                      <small>{productVisualSamplePromptPreviewMessage || "预览不会生成图片，也不会调用外部图片 API。"}</small>
+                    </div>
+                    {productVisualSamplePromptPreview?.promptPreview ? (
+                      <ProductVisualPromptPreview expectedJobId={productVisualSamplePreflight.jobId} preview={productVisualSamplePromptPreview.promptPreview} />
+                    ) : null}
+                    {samplePreflightChecks.length ? (
+                      <div>
+                        {samplePreflightChecks.slice(0, 6).map((item) => <em className={item.ok ? "pass" : "warn"} key={item.id}>{uiZh(item.label || item.id)}</em>)}
+                      </div>
+                    ) : null}
+                    <label className="product-v1-product-visual-sample-confirm">
+                      <input type="checkbox" checked={confirmLatestProductVisualSample} onChange={(event) => setConfirmLatestProductVisualSample(event.target.checked)} disabled={!productVisualSamplePreflight.readyIfConfirmed || !samplePromptMatchesPreflight || productVisualSampleRunBusy} />
+                      <span>{samplePromptMatchesPreflight ? "我确认使用 1 次外部图片 API 生成真实 codex-ppt 样张。" : "请先预览当前预检任务的样张 prompt，再确认生成真实样张。"}</span>
+                    </label>
+                    <button type="button" onClick={onRunProductVisualSample} disabled={!canRunLatestProductVisualSample}>
+                      {productVisualSampleRunBusy ? "生成中..." : "生成真实样张"}
+                    </button>
+                    {productVisualSampleRunMessage ? <small>{uiZh(productVisualSampleRunMessage)}</small> : null}
+                    {productVisualSampleRunResult ? (
+                      <div className="product-v1-product-visual-run-result">
+                        <span>样张证据</span>
+                        <em>任务 {productVisualSampleRunResult.jobId || "-"}</em>
+                        <em>模型 {productVisualSampleRunResult.provider?.model || "-"}</em>
+                        <em>图片调用 {productVisualSampleRunResult.externalImageCalls || 1}</em>
+                        <em>hash {shortHash(productVisualSampleRunResult.sample?.sha256 || "")}</em>
+                        {productVisualSampleRunResult.sampleLink?.href ? <a href={productVisualSampleRunResult.sampleLink.href} target="_blank" rel="noreferrer">打开样张</a> : null}
+                      </div>
+                    ) : null}
+                    <div className={`product-v1-product-visual-sample-approval ${productVisualSampleApprovalPreflight?.ready ? "pass" : productVisualSampleApprovalPreflight ? "warning" : "idle"}`}>
+                      <div>
+                        <span>样张确认关卡</span>
+                        <b>{productVisualSampleApprovalPreflight?.ready ? "可确认样张" : productVisualSampleApprovalPreflight ? "等待合格样张" : "尚未检查"}</b>
+                        <small>{productVisualSampleApprovalMessage || uiZh(productVisualSampleApprovalPreflight?.summary || "生成真实样张后，在这里检查并确认样张关卡。")}</small>
+                      </div>
+                      {productVisualSampleApprovalPreflight ? (
+                        <div>
+                          <em>任务 {productVisualSampleApprovalPreflight.jobId || "-"}</em>
+                          <em>动作 {productVisualSampleApprovalPreflight.nextAction || "codex-ppt/approvals/sample/approve"}</em>
+                          <em>图片调用 {productVisualSampleApprovalPreflight.externalImageCalls || 0}</em>
+                          <em>{productVisualSampleApprovalPreflight.paidImageGeneration ? "会生成图片" : "不生成图片"}</em>
+                          {productVisualSampleApprovalPreflight.sampleLink?.href ? <a href={productVisualSampleApprovalPreflight.sampleLink.href} target="_blank" rel="noreferrer">打开样张</a> : null}
+                        </div>
+                      ) : null}
+                      {productVisualSampleApprovalPreflight?.sampleReviewChecklist ? (
+                        <ProductVisualSampleReviewChecklist checklist={productVisualSampleApprovalPreflight.sampleReviewChecklist} />
+                      ) : null}
+                      {productVisualSampleApprovalPreflight?.nextStagePlan ? (
+                        <ProductVisualNextStagePlan plan={productVisualSampleApprovalPreflight.nextStagePlan} />
+                      ) : null}
+                      {Array.isArray(productVisualSampleApprovalPreflight?.blockingIssues) && productVisualSampleApprovalPreflight.blockingIssues.length ? (
+                        <div>
+                          {productVisualSampleApprovalPreflight.blockingIssues.slice(0, 4).map((item) => {
+                            const message = typeof item === "string" ? item : item?.message || item?.code || "样张未通过";
+                            return <em className="warn" key={message}>{uiZh(message)}</em>;
+                          })}
+                        </div>
+                      ) : null}
+                      <div className="product-v1-product-visual-sample-approval-actions">
+                        <button type="button" onClick={onPreflightProductVisualSampleApproval} disabled={productVisualSampleApprovalBusy || !onPreflightProductVisualSampleApproval}>
+                          {productVisualSampleApprovalBusy ? "检查中..." : "检查样张确认"}
+                        </button>
+                        <button type="button" onClick={onApproveProductVisualSample} disabled={!canApproveLatestProductVisualSample}>
+                          {productVisualSampleApprovalBusy ? "确认中..." : "确认样张关卡"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : productVisualSamplePreflightMessage ? <small>{productVisualSamplePreflightMessage}</small> : null}
+                <div className={`product-v1-product-visual-sample-approval ${productVisualFullDeckApprovalPreflight?.ready ? "pass" : productVisualFullDeckApprovalPreflight ? "warning" : "idle"}`}>
+                  <div>
+                    <span>全量生成关卡</span>
+                    <b>{productVisualFullDeckApprovalPreflight?.ready ? "可确认全量" : productVisualFullDeckApprovalPreflight ? "等待样张确认" : "尚未检查"}</b>
+                    <small>{productVisualFullDeckApprovalMessage || uiZh(productVisualFullDeckApprovalPreflight?.summary || "样张确认后，在这里检查并确认全量生成关卡；该步骤不调用图片 API。")}</small>
+                  </div>
+                  {productVisualFullDeckApprovalPreflight ? (
+                    <div>
+                      <em>任务 {productVisualFullDeckApprovalPreflight.jobId || "-"}</em>
+                      <em>动作 {productVisualFullDeckApprovalPreflight.nextAction || "codex-ppt/approvals/fullDeck/approve"}</em>
+                      <em>图片调用 {productVisualFullDeckApprovalPreflight.externalImageCalls || 0}</em>
+                      <em>{productVisualFullDeckApprovalPreflight.paidImageGeneration ? "会生成图片" : "不生成图片"}</em>
+                      {productVisualFullDeckApprovalPreflight.sampleLink?.href ? <a href={productVisualFullDeckApprovalPreflight.sampleLink.href} target="_blank" rel="noreferrer">打开样张</a> : null}
+                    </div>
+                  ) : null}
+                  {productVisualFullDeckApprovalPreflight?.sampleReviewChecklist ? (
+                    <ProductVisualSampleReviewChecklist checklist={productVisualFullDeckApprovalPreflight.sampleReviewChecklist} />
+                  ) : null}
+                  {productVisualFullDeckApprovalPreflight?.nextStagePlan ? (
+                    <ProductVisualNextStagePlan plan={productVisualFullDeckApprovalPreflight.nextStagePlan} />
+                  ) : null}
+                  {Array.isArray(productVisualFullDeckApprovalPreflight?.blockingIssues) && productVisualFullDeckApprovalPreflight.blockingIssues.length ? (
+                    <div>
+                      {productVisualFullDeckApprovalPreflight.blockingIssues.slice(0, 4).map((item) => {
+                        const message = typeof item === "string" ? item : item?.message || item?.code || "全量关卡未通过";
+                        return <em className="warn" key={message}>{uiZh(message)}</em>;
+                      })}
+                    </div>
+                  ) : null}
+                  <div className="product-v1-product-visual-sample-approval-actions">
+                    <button type="button" onClick={onPreflightProductVisualFullDeckApproval} disabled={productVisualFullDeckApprovalBusy || !onPreflightProductVisualFullDeckApproval}>
+                      {productVisualFullDeckApprovalBusy ? "检查中..." : "检查全量确认"}
+                    </button>
+                    <button type="button" onClick={onApproveProductVisualFullDeck} disabled={!canApproveLatestProductVisualFullDeck}>
+                      {productVisualFullDeckApprovalBusy ? "确认中..." : "确认全量关卡"}
+                    </button>
+                  </div>
+                </div>
+                {productVisualFullDeckPreflight ? (
+                  <div className={`product-v1-product-visual-sample-preflight ${fullDeckPreflightState}`}>
+                    <div>
+                      <span>{fullDeckTargetLabel}生成预检</span>
+                      <b>{productVisualFullDeckPreflight.readyIfConfirmed ? `可授权生成 ${fullDeckTargetLabel}` : `${fullDeckTargetLabel} 条件未满足`}</b>
+                      <small>{productVisualFullDeckPreflightMessage || uiZh(productVisualFullDeckPreflight.summary || "")}</small>
+                    </div>
+                    <div>
+                      <em>任务 {productVisualFullDeckPreflight.jobId || "-"}</em>
+                      <em>动作 {productVisualFullDeckPreflight.nextAction || "visual/generate"}</em>
+                      <em>图片调用 {productVisualFullDeckPreflight.externalImageCalls || productVisualCalls.fullDeck || 15}</em>
+                      <em>确认 {productVisualFullDeckPreflight.requiredConfirmation || "externalImageSpend"}</em>
+                    </div>
+                    {fullDeckExecutionSnapshot ? (
+                      <ProductVisualExecutionSnapshot snapshot={fullDeckExecutionSnapshot} />
+                    ) : null}
+                    {fullDeckPreflightChecks.length ? (
+                      <div>
+                        {fullDeckPreflightChecks.slice(0, 8).map((item) => <em className={item.ok ? "pass" : "warn"} key={item.id}>{uiZh(item.label || item.id)}</em>)}
+                      </div>
+                    ) : null}
+                    <label className="product-v1-product-visual-sample-confirm">
+                      <input type="checkbox" checked={confirmLatestProductVisualFullDeck} onChange={(event) => setConfirmLatestProductVisualFullDeck(event.target.checked)} disabled={!productVisualFullDeckPreflight.readyIfConfirmed || productVisualFullDeckRunBusy} />
+                      <span>我确认使用 {productVisualFullDeckPreflight.externalImageCalls || productVisualCalls.fullDeck || fullDeckTargetPages} 次外部图片 API 生成 {fullDeckTargetLabel} codex-ppt 图片页。</span>
+                    </label>
+                    <button type="button" onClick={onRunProductVisualFullDeck} disabled={!canRunLatestProductVisualFullDeck}>
+                      {productVisualFullDeckRunBusy ? "生成中..." : `生成${fullDeckTargetLabel}图片型 PPT`}
+                    </button>
+                    {productVisualFullDeckRunMessage ? <small>{uiZh(productVisualFullDeckRunMessage)}</small> : null}
+                    {productVisualFullDeckRunResult ? (
+                      <div className="product-v1-product-visual-run-result">
+                        <span>{fullDeckTargetLabel}视觉证据</span>
+                        <em>任务 {productVisualFullDeckRunResult.jobId || "-"}</em>
+                        <em>模型 {productVisualFullDeckRunResult.provider?.model || "-"}</em>
+                        <em>图片调用 {productVisualFullDeckRunResult.externalImageCalls || productVisualCalls.fullDeck || 15}</em>
+                        <em>图片页 {(productVisualFullDeckRunResult.visualImageLinks || []).length}</em>
+                        {productVisualFullDeckRunResult.imageDeckLink?.href ? <a href={productVisualFullDeckRunResult.imageDeckLink.href}>下载图片型 PPT</a> : null}
+                        <ProductVisualQualityReport result={productVisualFullDeckRunResult} />
+                      </div>
+                    ) : null}
+                    {productVisualFullDeckPreflight.blockingIssues?.length ? <small>阻断：{productVisualFullDeckPreflight.blockingIssues.slice(0, 3).map((item) => uiZh(item)).join("；")}</small> : null}
+                  </div>
+                ) : productVisualFullDeckPreflightMessage ? <small>{productVisualFullDeckPreflightMessage}</small> : null}
+                {productVisualNext.commands?.noCostReadiness ? <code>{productVisualNext.commands.noCostReadiness}</code> : null}
+              </div>
+            ) : null}
+            {latestReport.reportPath ? <code>{latestReport.reportPath}</code> : null}
+          </div>
+        ) : (
+          <div>
+            <b>还没有真实验收报告</b>
+            <small>运行推荐命令后会写入 workspace/v1-acceptance/latest-real-ppt-regression.json。</small>
+          </div>
+        )}
+      </div>
+      <div className="product-v1-real-deck-command">
+        <span>推荐验收命令</span>
+        <code>{acceptanceReport?.recommendedCommand || "npm.cmd run regression:real-ppt -- --source \"C:\\path\\to\\deck.pptx\" --max-pages 15"}</code>
+      </div>
+      <div className={`product-v1-real-deck-runner ${run?.status || "idle"}`}>
+        <div>
+          <span>页面内真实验收</span>
+          <b>{runStatusLabel}</b>
+          <small>{run?.message || "填写本地 PPTX 路径后，可直接从工具内启动 dry-run 真实验收。"}</small>
+        </div>
+        <div className="product-v1-real-deck-runner-current">
+          <button type="button" onClick={onStartAcceptanceFromWorkflow} disabled={acceptanceRunBusy || runIsActive || !canUseWorkflowAcceptanceSource}>
+            使用当前工作流源 PPT 验收
+          </button>
+          <small>{workflowAcceptanceSourceName || "当前工作流没有可用 PPTX 源文件。"}</small>
+        </div>
+        <div className={`product-v1-real-deck-preflight ${acceptancePreflight?.ready ? "pass" : failedPreflightChecks.length ? "fail" : "idle"}`}>
+          <div>
+            <span>真实验收预检</span>
+            <b>{acceptancePreflightBusy ? "正在检查..." : acceptancePreflight ? (acceptancePreflight.ready ? "预检通过" : "预检未通过") : "未检查"}</b>
+            <small>{acceptancePreflight?.summary || "先检查 PPTX 页数、PowerPoint、OCR、editppt 和 API 配置，再启动长任务。"}</small>
+          </div>
+          <div className="product-v1-real-deck-preflight-actions">
+            <button type="button" onClick={() => onPreflightAcceptanceRun?.(false)} disabled={acceptancePreflightBusy || runIsActive || !acceptanceSourcePath.trim()}>
+              {acceptancePreflightBusy ? "检查中..." : "检查本地路径"}
+            </button>
+            <button type="button" onClick={onPreflightAcceptanceFromWorkflow} disabled={acceptancePreflightBusy || runIsActive || !canUseWorkflowAcceptanceSource}>
+              检查当前工作流源
+            </button>
+          </div>
+          {acceptancePreflight ? (
+            <div className="product-v1-real-deck-preflight-facts">
+              <em>页数 {acceptancePreflight.slideCount || 0}/{acceptancePreflight.targetPages || 15}</em>
+              <em>通过 {preflightChecks.length - failedPreflightChecks.length}</em>
+              <em>失败 {failedPreflightChecks.length}</em>
+            </div>
+          ) : null}
+          {failedPreflightChecks.length ? (
+            <div className="product-v1-real-deck-preflight-errors">
+              {failedPreflightChecks.slice(0, 4).map((item) => <small key={item.id}>{uiZh(item.message || item.id)}</small>)}
+            </div>
+          ) : null}
+        </div>
+        <div className="product-v1-real-deck-runner-form">
+          <input
+            value={acceptanceSourcePath}
+            onChange={(event) => onAcceptanceSourcePathChange?.(event.target.value)}
+            placeholder="C:\\path\\to\\deck.pptx"
+            disabled={acceptanceRunBusy || runIsActive}
+          />
+          <button type="button" onClick={() => onStartAcceptanceRun?.(false)} disabled={acceptanceRunBusy || runIsActive || !acceptanceSourcePath.trim()}>
+            {acceptanceRunBusy ? "启动中..." : runIsActive ? "运行中" : "启动真实验收"}
+          </button>
+        </div>
+        {run?.logRelativePath ? <code>{run.logRelativePath}</code> : null}
+        {acceptanceRunMessage ? <small>{acceptanceRunMessage}</small> : null}
+      </div>
+      <p>只有真实 15 页 PPTX、图片型 PPT、可编辑 PPTX、validation 和日志包都具备证据后，才能把产品级 v1 视为完成。</p>
+    </div>
+  );
+}
+
+function ProductVisualExecutionSnapshot({ snapshot = null }) {
+  if (!snapshot) return null;
+  const blockingIssues = Array.isArray(snapshot.blockingIssues) ? snapshot.blockingIssues : [];
+  return (
+    <div className={`product-v1-product-visual-execution-snapshot ${snapshot.status === "ready-after-confirmation" ? "ready" : "blocked"}`}>
+      <div>
+        <span>执行快照</span>
+        <b>{uiZh(snapshot.label || "产品级视觉生成")}</b>
+        <small>{uiZh(snapshot.confirmationText || "该步骤必须确认后才会调用外部图片 API。")}</small>
+      </div>
+      <div>
+        <em>任务 {snapshot.workflowJob?.id || "-"}</em>
+        <em>模型 {snapshot.provider?.model || "-"}</em>
+        <em>目标页 {snapshot.targetPages || 0}</em>
+        <em>图片 API {snapshot.externalImageCalls || 0} 次</em>
+        <em>确认 {snapshot.requiredConfirmation || "externalImageSpend"}</em>
+      </div>
+      <small>{snapshot.source?.path || "未记录源文件"}</small>
+      {blockingIssues.length ? (
+        <div>
+          {blockingIssues.slice(0, 4).map((item) => {
+            const message = typeof item === "string" ? item : item?.message || item?.code || "条件未满足";
+            return <em className="warn" key={message}>{uiZh(message)}</em>;
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductVisualPromptPreview({ expectedJobId = "", preview = null }) {
+  if (!preview) return null;
+  const sourceHref = preview.sourcePageLink?.href || "";
+  const matchesPreflightJob = promptPreviewMatchesSamplePreflight({ jobId: expectedJobId }, preview);
+  return (
+    <div className="product-v1-product-visual-prompt-preview">
+      <div>
+        <span>样张 prompt 预览</span>
+        <b>{preview.pageId || `第 ${preview.pageNumber || 1} 页`}</b>
+        <small>{uiZh(preview.instruction || "本预览不生成图片，不调用外部 API。")}</small>
+      </div>
+      <div>
+        <em>模型 {preview.provider?.model || "-"}</em>
+        <em>图片 API {preview.externalImageCalls || 1} 次</em>
+        <em>输入 {preview.imageInputMode === "source-page-edit" ? "源页参考图重绘" : "文本生图"}</em>
+        <em>prompt {preview.promptLength || 0} 字符</em>
+        <em className={matchesPreflightJob ? "pass" : "warn"}>{matchesPreflightJob ? "预检一致" : "需重新预览"}</em>
+        {preview.sourcePageLink?.href ? <a href={preview.sourcePageLink.href} target="_blank" rel="noreferrer">打开源页</a> : null}
+      </div>
+      <small>{matchesPreflightJob ? "该 prompt 使用当前最新样张预检的源页；这里只预览，不生成图片。" : "该 prompt 可能来自旧预检任务，请重新点击预览样张 prompt。"}</small>
+      <small>{uiZh(preview.styleBrief || "")}</small>
+      <p>{uiZh(preview.promptExcerpt || preview.prompt || "")}</p>
+    </div>
+  );
+}
+
+function promptPreviewMatchesSamplePreflight(preflight = null, preview = null) {
+  const jobId = preflight?.jobId || "";
+  if (!jobId || !preview) return false;
+  const sourceHref = preview.sourcePageLink?.href || "";
+  return Boolean(sourceHref && sourceHref.includes(jobId));
+}
+
+function ProductVisualQualityReport({ result = null }) {
+  const quality = result?.visualQuality || null;
+  const summary = quality?.summary || {};
+  const [retryPreflight, setRetryPreflight] = useState(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewMessage, setReviewMessage] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    if (!result?.jobId || (!quality && !result?.visualQualityLink?.href)) {
+      setRetryPreflight(null);
+      return;
+    }
+    api.visualQualityRetryPreflight(result.jobId, {})
+      .then((data) => { if (!cancelled) setRetryPreflight(data); })
+      .catch((error) => { if (!cancelled) setRetryPreflight({ ok: false, error: getErrorMessage(error) }); });
+    return () => { cancelled = true; };
+  }, [result?.jobId, quality?.path, result?.visualQualityLink?.href]);
+  if (!quality && !result?.visualQualityLink?.href) return null;
+  const status = summary.failedCount ? "fail" : summary.reviewCount ? "review" : "pass";
+  const retryCandidates = Array.isArray(retryPreflight?.candidates) ? retryPreflight.candidates : [];
+  const canApproveReview = Boolean(result?.jobId && status === "review" && !summary.failedCount);
+  async function approveVisualReview() {
+    if (!canApproveReview || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewMessage("");
+    try {
+      await api.approveWorkflowVisualQualityReview(result.jobId, {
+        reviewer: "frontend-operator",
+        note: "visual quality report reviewed before editable rebuild"
+      });
+      setReviewMessage("视觉复核已确认，可继续进入可编辑重建。");
+    } catch (error) {
+      setReviewMessage(getErrorMessage(error));
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+  return (
+    <div className={`product-v1-product-visual-quality ${status}`}>
+      <div>
+        <span>视觉质量证据</span>
+        <b>{status === "pass" ? "本地 QA 通过" : status === "fail" ? "存在失败页" : "需要人工复核"}</b>
+        <small>{summary.manualReviewRequired ? "源页含可读标题或正文，请对照源页确认标题、Logo 和主视觉没有丢失。" : "已完成本地像素检查。"}</small>
+      </div>
+      <div>
+        <em>页数 {summary.pageCount || 0}</em>
+        <em>通过 {summary.passCount || 0}</em>
+        <em>复核 {summary.reviewCount || 0}</em>
+        <em>失败 {summary.failedCount || 0}</em>
+        {summary.primaryReason ? <em>{uiZh(summary.primaryReason)}</em> : null}
+        {result.visualQualityLink?.href ? <a href={result.visualQualityLink.href} target="_blank" rel="noreferrer">打开质量报告</a> : null}
+        {canApproveReview ? <button type="button" onClick={approveVisualReview} disabled={reviewBusy}>{reviewBusy ? "确认中" : "确认视觉复核"}</button> : null}
+        {reviewMessage ? <em>{reviewMessage}</em> : null}
+      </div>
+      {retryPreflight ? (
+        <div className="product-v1-product-visual-retry-preflight">
+          <b>{retryPreflight.resetReady ? "可重生风险页" : retryCandidates.length ? "风险页需要处理" : "未发现必须重生页"}</b>
+          <small>{retryPreflight.resetReady ? `建议先重置 ${retryPreflight.resettableCount || 0} 页 codex-ppt 图片任务，再确认 ${retryPreflight.requiredConfirmations?.externalImageSpend?.imageCalls || 0} 次图片 API 后重跑。` : retryPreflight.error || (retryPreflight.warnings || retryPreflight.blockingIssues || []).join(" / ") || "当前质量报告没有必须重生的标题/文字弱化页。"}</small>
+          {retryCandidates.length ? (
+            <div>
+              {retryCandidates.slice(0, 6).map((page) => (
+                <em className={page.codexTask?.resettable ? "warn" : "fail"} key={page.pageId}>{page.pageId}：{(page.reasons || []).map(uiZh).join(" / ") || "需要复核"}</em>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductVisualSampleReviewChecklist({ checklist = null }) {
+  if (!checklist) return null;
+  const items = Array.isArray(checklist.items) ? checklist.items : [];
+  return (
+    <div className={`product-v1-product-visual-review-checklist ${checklist.status || "blocked"}`}>
+      <div>
+        <span>样张复核清单</span>
+        <b>{checklist.passed ? "样张关卡已确认" : checklist.ready ? "可人工复核" : "等待真实样张"}</b>
+        <small>{uiZh(checklist.instruction || "请先打开样张复核，再确认样张关卡。")}</small>
+      </div>
+      <div className="product-v1-product-visual-review-actions">
+        {checklist.sampleLink?.href ? <a href={checklist.sampleLink.href} target="_blank" rel="noreferrer">打开样张复核</a> : null}
+        {checklist.sourcePageLink?.href ? <a href={checklist.sourcePageLink.href} target="_blank" rel="noreferrer">打开源页对照</a> : null}
+      </div>
+      {items.length ? (
+        <div>
+          {items.map((item) => (
+            <em className={item.ok ? "pass" : "warn"} key={item.id}>
+              {uiZh(item.label || item.id)}：{uiZh(item.detail || (item.ok ? "通过" : "待处理"))}
+            </em>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductV1PhaseProgress({ progress = null }) {
+  if (!progress || !Array.isArray(progress.phases)) return null;
+  const phases = progress.phases;
+  const current = phases.find((phase) => phase.id === progress.currentPhaseId) || phases.find((phase) => phase.status !== "done") || null;
+  return (
+    <div className={`product-v1-phase-progress ${progress.blocked ? "blocked" : progress.done >= progress.total ? "done" : "working"}`}>
+      <div className="product-v1-phase-progress-head">
+        <div>
+          <span>整体阶段进度</span>
+          <b>{progress.done || 0}/{progress.total || phases.length} 阶段完成</b>
+          <small>{uiZh(progress.summary || "根据真实验收证据自动判断当前完成度。")}</small>
+        </div>
+        <strong>{progress.percent || 0}%</strong>
+      </div>
+      {current ? (
+        <div className={`product-v1-phase-current ${current.status}`}>
+          <span>当前重点</span>
+          <b>{uiZh(current.label)}</b>
+          <small>{uiZh(current.detail || "继续补齐该阶段证据。")}</small>
+        </div>
+      ) : null}
+      <div className="product-v1-phase-grid">
+        {phases.map((phase) => (
+          <div className={`product-v1-phase-item ${phase.status}`} key={phase.id}>
+            <span>{uiZh(phase.status === "done" ? "完成" : phase.status === "blocked" ? "阻断" : phase.status === "working" ? "进行中" : "待处理")}</span>
+            <b>{uiZh(phase.label)}</b>
+            <small>{uiZh(phase.detail || "")}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function buildProductVisualAgentNextAction({
+  productVisualNext = null,
+  productVisualSamplePreflight = null,
+  productVisualSampleRunResult = null,
+  productVisualSampleApprovalPreflight = null,
+  productVisualFullDeckApprovalPreflight = null,
+  productVisualFullDeckPreflight = null,
+  productVisualFullDeckRunResult = null,
+  fullDeckTargetPages = 2
+} = {}) {
+  if (!productVisualNext || productVisualNext.status === "pass") return null;
+  if (productVisualFullDeckRunResult?.imageDeckLink?.href || productVisualFullDeckRunResult?.imageDeck?.path) {
+    return {
+      level: "safe",
+      title: "检查 15 页真实验收",
+      detail: "全量图片型 PPT 已有结果，下一步运行真实验收报告，确认可编辑重建和交付门禁。",
+      badge: "不生成图片"
+    };
+  }
+  if (productVisualFullDeckPreflight?.readyIfConfirmed) {
+    const calls = Math.max(1, Number(fullDeckTargetPages || productVisualNext?.targetPages || 15));
+    return {
+      level: "paid",
+      title: `生成 ${calls} 页图片型 PPT`,
+      detail: `需要先勾选确认，会调用外部图片 API ${calls} 次；建议先用 2 页测试确认跨页风格。`,
+      badge: `${calls} 次图片 API`
+    };
+  }
+  if (productVisualFullDeckApprovalPreflight?.ready) {
+    return {
+      level: "safe",
+      title: "确认全量生成关卡",
+      detail: "样张已经具备继续全量的条件；确认关卡本身不会生成图片。",
+      badge: "不生成图片"
+    };
+  }
+  if (productVisualSampleApprovalPreflight?.ready) {
+    return {
+      level: "safe",
+      title: "人工确认样张关卡",
+      detail: "先打开样张和源页对照，确认视觉方向可用后再进入全量预检。",
+      badge: "人工复核"
+    };
+  }
+  if (productVisualSampleRunResult?.sampleLink?.href || productVisualSampleRunResult?.visualSample?.imagePath) {
+    return {
+      level: "safe",
+      title: "检查样张确认条件",
+      detail: "真实样张已经生成，下一步检查是否能进入人工确认关卡。",
+      badge: "不生成图片"
+    };
+  }
+  if (productVisualSamplePreflight?.readyIfConfirmed) {
+    return {
+      level: "paid",
+      title: "生成 1 页真实样张",
+      detail: "需要先勾选确认，会调用外部图片 API 1 次；样张通过后才允许全量生成。",
+      badge: "1 次图片 API"
+    };
+  }
+  return {
+    level: "safe",
+    title: "检查真实样张条件",
+    detail: "先运行无费用预检或样张预检，确认源页、模型、关卡都已就绪。",
+    badge: "不生成图片"
+  };
+}
+
+function ProductVisualNextStagePlan({ plan = null }) {
+  if (!plan) return null;
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const blockers = Array.isArray(plan.blockers) ? plan.blockers : [];
+  return (
+    <div className={`product-v1-product-visual-next-stage-plan ${plan.status || "blocked"}`}>
+      <div>
+        <span>下一阶段计划</span>
+        <b>{uiZh(plan.nextRecommendedAction || "等待样张确认")}</b>
+        <small>
+          2 页测试预计 {plan.estimatedTwoPageImageCalls || plan.recommendedTestPages || 0} 次图片调用；
+          全量预计 {plan.estimatedFullDeckImageCalls || plan.targetPages || 0} 次图片调用。
+        </small>
+      </div>
+      {steps.length ? (
+        <div className="product-v1-product-visual-next-stage-steps">
+          {steps.map((step) => (
+            <em className={step.status === "done" || step.status === "ready" ? "pass" : "warn"} key={step.id}>
+              {uiZh(step.label || step.id)}：{uiZh(step.detail || step.status || "")}
+            </em>
+          ))}
+        </div>
+      ) : null}
+      {blockers.length ? (
+        <div className="product-v1-product-visual-next-stage-blockers">
+          {blockers.slice(0, 4).map((item) => <em className="warn" key={item}>{uiZh(item)}</em>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductV1AuthorizationSummary({ actions = [], authorizationBusy = "", bundle = null, onAuthorize, onFocusDeliveryStep }) {
+  const sample = bundle?.sample || null;
+  const fullDeck = bundle?.fullDeck || null;
+  const pendingActions = Array.isArray(actions) ? actions : [];
+  if (!sample && !fullDeck && !pendingActions.length) return null;
+  const sampleState = sample?.required ? (sample.persisted ? "已记录" : "缺少") : "不需要";
+  const fullDeckState = fullDeck?.required ? (fullDeck.persisted ? "已记录" : "缺少") : "不需要";
+  const state = pendingActions.length ? "warning" : "ready";
+  return (
+    <div className={`product-v1-authorization ${state}`}>
+      <div>
+        <span>额度授权</span>
+        <b>{pendingActions.length ? "需要记录授权" : "授权账本已匹配"}</b>
+        <small>授权记录会保存当前图片模型和服务商；记录授权不会生成图片。</small>
+      </div>
+      <div className="product-v1-authorization-facts">
+        <span>样张<b>{sampleState}</b></span>
+        <span>全量<b>{fullDeckState}</b></span>
+        <span>模型<b>{sample?.provider?.model || fullDeck?.provider?.model || "已配置运行环境"}</b></span>
+      </div>
+      {pendingActions.length ? (
+        <div className="product-v1-authorization-actions">
+          {pendingActions.slice(0, 2).map((action) => (
+            <button
+              className={action.severity || "warning"}
+              key={action.id || action.detail}
+              type="button"
+              onClick={() => onAuthorize ? onAuthorize(action.scope || "visual-sample") : onFocusDeliveryStep?.({ id: action.targetStepId || "record-sample-authorization" })}
+              disabled={authorizationBusy === action.scope}
+            >
+              {authorizationBusy === action.scope ? "正在记录授权..." : uiZh(action.detail)}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductSamplePreflightCard({ action = null, blocked = false, confirmed = false, provider = "", onFocus }) {
+  if (!action) return null;
+  const imageCalls = action.imageCalls || 1;
+  const confirmation = action.requiresConfirmation || "externalImageSpend";
+  return (
+    <div className={`product-sample-preflight ${confirmed ? "ready" : "blocked"}`}>
+      <div>
+        <span>产品样张预检</span>
+        <b>{confirmed ? "已可生成 1 页产品样张" : "等待图片 API 确认"}</b>
+        <small>{uiZh(action.detail || "确认样张前，需要先生成 1 页产品级 codex-ppt 样张。")}</small>
+      </div>
+      <div className="product-sample-preflight-facts">
+        <span>图片调用<b>{imageCalls}</b></span>
+        <span>模型<b>{provider || "已配置运行环境"}</b></span>
+        <span>确认状态<b>{confirmed ? "已确认" : uiZh(confirmation)}</b></span>
+        <span>状态<b>{blocked ? "阻断" : "就绪"}</b></span>
+      </div>
+      <button type="button" onClick={onFocus}>
+        打开样张步骤
+      </button>
+    </div>
+  );
+}
+
+function WorkflowExternalSpendAuthorizationPanel({ bundle = null, busy = "", canAuthorizeFullDeck = false, canAuthorizeSample = false, fullDeckImageCalls = 0, message = "", onAuthorize, provider = "" }) {
+  const records = Array.isArray(bundle?.externalImageSpend) ? bundle.externalImageSpend : [];
+  const summary = bundle?.summary || {};
+  const latest = summary.latest || records.at(-1) || null;
+  return (
+    <div className="workflow-spend-authorization" id="workflow-authorization-panel">
+      <div>
+        <span>额度授权账本</span>
+        <b>{records.length ? `${records.length} 条授权记录` : "还没有持久化授权"}</b>
+        <small>{provider || latest?.model || "已配置图片运行环境"} / 已授权图片调用：{summary.totalImageCalls || 0}</small>
+      </div>
+      <div className="workflow-spend-authorization-actions">
+        <button type="button" onClick={() => onAuthorize?.("visual-sample")} disabled={!canAuthorizeSample || busy === "visual-sample"}>
+          {busy === "visual-sample" ? "正在记录..." : "记录样张授权"}
+        </button>
+        <button type="button" onClick={() => onAuthorize?.("full-deck")} disabled={!canAuthorizeFullDeck || !fullDeckImageCalls || busy === "full-deck"}>
+          {busy === "full-deck" ? "正在记录..." : `记录全量授权：${fullDeckImageCalls || 0}`}
+        </button>
+      </div>
+      {latest ? (
+        <div className="workflow-spend-authorization-latest">
+          <span>{latest.scope === "visual-sample" ? "样张" : latest.scope === "full-deck" ? "全量" : latest.scope}</span>
+          <b>{latest.imageCalls} 次调用</b>
+          <small>{latest.model || "模型待确认"} / {latest.confirmedAt ? new Date(latest.confirmedAt).toLocaleTimeString() : ""}</small>
+        </div>
+      ) : null}
+      {message ? <p>{message}</p> : null}
+    </div>
+  );
+}
+
+function GuidedNextActionPreflightCard({ bundle = null, guidedAction = null }) {
+  if (!bundle && !guidedAction) return null;
+  const requiredConfirmation = bundle?.requiredConfirmation || "";
+  const blocked = Boolean(bundle?.blockingIssues?.length || bundle?.error);
+  const level = bundle?.startReady ? "ready" : requiredConfirmation ? "warning" : bundle?.manualRequired ? "manual" : blocked ? "blocked" : "pending";
+  const title = bundle?.startReady
+    ? "运行前已就绪"
+    : requiredConfirmation
+      ? "需要确认"
+      : bundle?.manualRequired
+        ? "需要手动处理"
+        : blocked
+          ? "运行前被阻断"
+          : "正在检查下一步";
+  const actionLabel = uiZh(bundle?.action || guidedAction?.action || guidedAction?.kind || "无");
+  const message = uiZh(bundle?.reason || bundle?.summary || guidedAction?.description || "预检会判断推荐动作是否可以开始。");
+  const issues = [...(bundle?.blockingIssues || []), ...(bundle?.warnings || [])].filter(Boolean);
+  const authorization = bundle?.authorization || null;
+  const recovery = bundle?.recovery || null;
+  const recoveryPages = Array.isArray(recovery?.pages) ? recovery.pages : [];
+  return (
+    <div className={`guided-next-preflight ${level}`}>
+      <div>
+        <span>引导预检</span>
+        <b>{title}</b>
+        <small>{message}</small>
+      </div>
+      <div className="guided-next-preflight-facts">
+        <span>动作<b>{actionLabel}</b></span>
+        <span>图片调用<b>{bundle?.externalImageCalls || 0}</b></span>
+        <span>确认项<b>{requiredConfirmation ? uiZh(requiredConfirmation) : "无"}</b></span>
+        <span>模式<b>{bundle?.manualRequired ? "手动" : bundle?.mutatesWorkflow ? "会改动" : "只读"}</b></span>
+        {authorization?.required ? <span>账本<b>{authorization.persisted ? "已记录" : "缺少"}</b></span> : null}
+      </div>
+      {recovery ? (
+        <div className="guided-next-recovery-plan">
+          <span>恢复计划</span>
+          <b>{uiZh(recovery.nextAction || "等待下一步")}</b>
+          <small>{uiZh(recovery.message || "")}</small>
+          {recoveryPages.length ? (
+            <div className="guided-next-recovery-pages">
+              {recoveryPages.slice(0, 8).map((pageId) => <em key={pageId}>{pageId}</em>)}
+            </div>
+          ) : null}
+          {recovery.externalImageConfirmationRequired ? <small>重跑 editable 页面任务前需要确认外部图片 API 额度。</small> : null}
+        </div>
+      ) : null}
+      {authorization?.warning ? <small className="guided-next-preflight-issue">{uiZh(authorization.warning)}</small> : null}
+      {issues.length ? <small className="guided-next-preflight-issue">{uiZh(issues.slice(0, 2).join(" "))}</small> : null}
+    </div>
+  );
+}
+
+function ProductV1CodexSlidePreflightSummary({ actions = [], bundle = null, onFocusDeliveryStep, resetPreview = null }) {
+  if (!bundle) return null;
+  const state = bundle.startReady ? "ready" : bundle.ready ? "warning" : "blocked";
+  const external = bundle.confirmations?.externalImageSpend || {};
+  const backendRuntime = bundle.backendRuntime || {};
+  const backendCurrent = Boolean(backendRuntime.backendMatchesRuntime && !backendRuntime.approvedBackendLooksDryRun);
+  const issues = bundle.blockingIssues?.length ? bundle.blockingIssues : bundle.warnings || [];
+  return (
+    <div className={`product-v1-codex-preflight ${state}`}>
+      <div>
+        <span>codex-ppt 视觉预检</span>
+        <b>{bundle.startReady ? "已可生成视觉页" : bundle.ready ? "需要确认额度" : "被阻断或已记录"}</b>
+        <small>{bundle.selectedCount || 0} 已选择 / {bundle.counts?.total || 0} 个图片页任务 / {bundle.provider?.model || "服务商待确认"}</small>
+      </div>
+      <div className="product-v1-codex-facts">
+        <span>确认关卡<b>{bundle.approvals?.ready ? "就绪" : `${bundle.approvals?.approved?.length || 0}/${bundle.approvals?.required?.length || 5}`}</b></span>
+        <span>图片调用<b>{bundle.cost?.imageCalls || 0}</b></span>
+        <span>可重置项<b>{resetPreview?.candidateCount || 0}</b></span>
+        <span>外部 API<b>{external.required ? (external.confirmed ? "已确认" : "必需") : "不需要"}</b></span>
+        <span>后端确认<b>{backendCurrent ? "当前" : "需刷新"}</b></span>
+      </div>
+      {actions.length ? (
+        <div className="product-v1-codex-actions">
+          <span>视觉生成动作</span>
+          {actions.slice(0, 3).map((action) => (
+            <button
+              className={action.severity || "warning"}
+              key={action.id || action.detail}
+              type="button"
+              onClick={() => onFocusDeliveryStep?.({ id: action.targetStepId || "generate-image-deck" })}
+            >
+              {uiZh(action.detail)}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {issues.length ? <small>{uiZh(issues.slice(0, 2).join(" "))}</small> : null}
+    </div>
+  );
+}
+
+function ProductV1ProviderRuntimeSummary({ actions = [], check = null, onFocusDeliveryStep }) {
+  if (!check) return null;
+  const evidence = check.evidence || {};
+  const runtime = evidence.runtime || {};
+  const approvedBackend = evidence.approvedBackend || {};
+  const state = check.status === "pass" ? "ready" : check.status === "fail" ? "blocked" : "warning";
+  const runtimeLabel = evidence.runtimeKey || [runtime.model, runtime.baseUrl].filter(Boolean).join(" @ ") || "运行环境待确认";
+  const backendLabel = evidence.approvedBackendKey || [approvedBackend.provider, approvedBackend.model, approvedBackend.baseUrl].filter(Boolean).join(" @ ") || "后端证据待确认";
+  return (
+    <div className={`product-v1-provider-runtime ${state}`}>
+      <div>
+        <span>运行环境证据</span>
+        <b>{evidence.backendMatchesRuntime ? "运行环境与确认一致" : "运行环境证据需要刷新"}</b>
+        <small>{runtimeLabel}</small>
+      </div>
+      <div className="product-v1-provider-facts">
+        <span>已确认后端<b>{backendLabel}</b></span>
+        <span>验证链路证据<b>{evidence.approvedBackendLooksDryRun ? "已发现" : "未发现"}</b></span>
+      </div>
+      {actions.length ? (
+        <div className="product-v1-provider-actions">
+          <span>服务商操作</span>
+          {actions.slice(0, 2).map((action) => (
+            <button
+              key={action.id || action.detail}
+              type="button"
+              onClick={() => onFocusDeliveryStep?.({ id: action.targetStepId || "generate-image-deck" })}
+            >
+              {uiZh(action.detail)}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProductStyleRefreshCard({ action = null, busy = false, message = "", onRefresh }) {
+  if (!action) return null;
+  return (
+    <div className="product-style-refresh-card">
+      <div>
+        <span>下一步</span>
+        <b>刷新视觉风格证据</b>
+        <small>{uiZh(action.detail || "当前风格证据需要重新记录后再继续。")}</small>
+      </div>
+      <button type="button" onClick={onRefresh} disabled={busy || !onRefresh}>
+        {busy ? "正在刷新..." : "刷新风格证据（不生成图片）"}
+      </button>
+      {message ? <small>{message}</small> : null}
+    </div>
+  );
+}
+
+function ProductV1WorkerPreflightSummary({ actions = [], bundle = null }) {
+  if (!bundle) return null;
+  const state = bundle.startReady ? "ready" : bundle.ready ? "warning" : "blocked";
+  const external = bundle.confirmations?.externalImageSpend || {};
+  const offline = bundle.confirmations?.offlineTextHints || {};
+  const issues = bundle.blockingIssues?.length ? bundle.blockingIssues : bundle.warnings || [];
+  return (
+    <div className={`product-v1-worker-preflight ${state}`}>
+      <div>
+        <span>页面批处理预检</span>
+        <b>{bundle.startReady ? "可以开始" : bundle.ready ? "需要确认" : "被阻断"}</b>
+        <small>{bundle.selectedCount || 0} 已选择 / {bundle.counts?.total || 0} 总计 / {bundle.provider?.model || "服务商待确认"}</small>
+      </div>
+      <div className="product-v1-worker-preflight-checks">
+        <span className={external.required && !external.confirmed ? "warn" : "ok"}>外部 API {external.required ? (external.confirmed ? "已确认" : "必需") : "不需要"}</span>
+        <span className={offline.confirmed ? "ok" : "warn"}>文字提示 {offline.confirmed ? "已接受" : "需要确认"}</span>
+      </div>
+      {actions.length ? (
+        <div className="product-v1-preflight-actions">
+          <span>启动前需要</span>
+          {actions.slice(0, 3).map((action) => <b className={action.severity || "warning"} key={action.id || action.detail}>{uiZh(action.detail)}</b>)}
+        </div>
+      ) : null}
+      {issues.length ? <small>{uiZh(issues.slice(0, 2).join(" "))}</small> : null}
+    </div>
+  );
+}
+
+function SampleApprovalGuard({ gate = null, sampleArtifact = null, sampleHref = "", sampleLooksNonProduct = false }) {
+  if (!gate) return null;
+  const ui = gate.ui || {};
+  const hasSample = Boolean(sampleArtifact?.path);
+  const state = gate.passed ? "ready" : sampleLooksNonProduct ? "blocked" : ui.canApprove ? "ready" : "pending";
+  const statusLabel = gate.passed
+    ? "样张关卡已确认"
+    : sampleLooksNonProduct
+      ? "需要产品级样张"
+      : ui.canApprove
+        ? "等待人工复核"
+        : "等待样张证据";
+  const reviewChecklist = sampleLooksNonProduct
+    ? ["拒绝验证链路/透传证据", "使用已确认的图片运行环境重新生成 1 页产品样张", "复核新图片后再确认样张"]
+    : hasSample
+      ? ["打开视觉样张", "检查风格一致性和文字可读性", "只有确认是产品级生成证据后再通过"]
+      : ["生成 1 页产品级视觉样张", "确认图片运行环境和额度", "回到这里确认样张关卡"];
+  return (
+    <div className={`sample-approval-guard ${state}`}>
+      <div>
+        <span>样张确认保护</span>
+        <b>{statusLabel}</b>
+        <small>{uiZh(ui.reason || "样张确认用于防止用非产品证据启动全量生成。")}</small>
+      </div>
+      <div className="sample-approval-guard-facts">
+        <span>产物<b>{hasSample ? "存在" : "缺少"}</b></span>
+        <span>证据<b>{sampleLooksNonProduct ? "非产品" : hasSample ? "产品候选" : "待处理"}</b></span>
+        <span>确认按钮<b>{ui.canApprove ? "可用" : "阻断"}</b></span>
+      </div>
+      <div className="sample-approval-guard-checklist">
+        {reviewChecklist.map((item) => <span key={item}>{item}</span>)}
+      </div>
+      {sampleHref ? <a href={sampleHref} target="_blank" rel="noreferrer">打开样张证据</a> : null}
+    </div>
+  );
+}
+
+function WorkflowCodexDeckStatus({ artifacts = {}, busy = false, canAssembleImageDeck = false, canSync = false, complianceBundle = null, loading = false, onAssemble, onFocusWorker, onSync, tasks = [] }) {
+  const gateMap = new Map((complianceBundle?.codexPpt?.approvals?.gates || []).map((gate) => [gate.id, Boolean(gate.passed)]));
+  const sampleReady = Boolean(artifacts.visualSample?.path && gateMap.get("sample"));
+  const fullDeckApproved = Boolean(gateMap.get("fullDeck"));
+  const summary = artifacts.codexPptSlideWorkerTasks?.length && !tasks.length
+    ? summarizeCodexTasks(artifacts.codexPptSlideWorkerTasks)
+    : summarizeCodexTasks(tasks, complianceBundle?.codexPpt?.slideState);
+  const total = summary.total || 0;
+  const recorded = summary.recorded || 0;
+  const failed = summary.failed || 0;
+  const queueReady = total > 0;
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages.length : 0;
+  const imageDeckPath = shortPath(artifacts.imageDeck?.relativePath || artifacts.imageDeck?.path || "");
+  const deckSpecPath = shortPath(artifacts.codexPptDeckSpec?.relativePath || artifacts.codexPptDeckSpec?.path || "");
+  const imageProvider = complianceBundle?.providers?.image || {};
+  const providerReady = Boolean(imageProvider.enabled && imageProvider.configured);
+  const providerLabel = providerReady
+    ? `${imageProvider.model || "图片模型"} / ${imageProvider.baseUrl || "已配置服务商"}`
+    : imageProvider.enabled === false
+      ? "图片 API 已停用"
+      : "图片 API 未配置";
+  const progress = imageDeckPath ? 100 : total ? Math.round((recorded / total) * 100) : 0;
+  const stageItems = [
+    { key: "sample", label: "样张", value: sampleReady ? "已确认" : artifacts.visualSample?.path ? "待复核" : "待处理", state: sampleReady ? "done" : artifacts.visualSample?.path ? "active" : "pending" },
+    { key: "fullDeck", label: "全量", value: fullDeckApproved ? "已授权" : "待确认", state: fullDeckApproved ? "done" : sampleReady ? "active" : "pending" },
+    { key: "queue", label: "图片页队列", value: queueReady ? `${recorded}/${total}` : "未同步", state: failed ? "blocked" : recorded && recorded >= total ? "done" : queueReady ? "active" : fullDeckApproved ? "active" : "pending" },
+    { key: "deck", label: "图片型 PPT", value: imageDeckPath || (visualImages ? `${visualImages} 张图片` : "待处理"), state: imageDeckPath ? "done" : canAssembleImageDeck ? "active" : "pending" }
+  ];
+
+  return (
+    <section className="workflow-codex-deck-status">
+      <div className="workflow-codex-deck-head">
+        <div>
+          <b>codex-ppt 全量图片阶段</b>
+          <span>样张确认后，同步图片页任务，记录生成图片，再组装图片型 PPT。</span>
+        </div>
+        <div className={`workflow-codex-deck-progress ${failed ? "blocked" : imageDeckPath ? "done" : queueReady ? "active" : "pending"}`}>
+          <strong>{imageDeckPath ? "图片型 PPT 已就绪" : queueReady ? `${recorded}/${total} 已记录` : "等待队列"}</strong>
+          <span>{deckSpecPath || "同步队列后会创建 deck_spec"}</span>
+        </div>
+        <div className={`workflow-codex-provider-pill ${providerReady ? "ready" : "warning"}`}>
+          <strong>{providerReady ? "外部图片 API" : "需要图片 API"}</strong>
+          <span>{providerLabel}</span>
+        </div>
+      </div>
+      <div className="workflow-codex-stage-list">
+        {stageItems.map((item) => (
+          <div className={`workflow-codex-stage ${item.state}`} key={item.key}>
+            <span>{item.label}</span>
+            <b>{item.value}</b>
+          </div>
+        ))}
+      </div>
+      <div className="workflow-codex-progress-bar" aria-label="codex-ppt slide progress">
+        <i style={{ width: `${progress}%` }} />
+      </div>
+      <div className="workflow-codex-deck-actions">
+        <button type="button" onClick={onSync} disabled={busy || loading || !canSync}>{loading ? "同步中..." : queueReady ? "刷新队列" : "同步图片页队列"}</button>
+        <button type="button" onClick={onFocusWorker} disabled={busy || !queueReady}>打开图片页任务</button>
+        <button type="button" onClick={onAssemble} disabled={busy || !canAssembleImageDeck}>组装图片 PPT</button>
+      </div>
+    </section>
+  );
+}
+
+function summarizeCodexTasks(tasks = [], slideState = {}) {
+  const normalized = Array.isArray(tasks) ? tasks : [];
+  const total = Number(slideState?.total || normalized.length || 0);
+  const recorded = Number(slideState?.recorded || normalized.filter((task) => task.status === "recorded").length || 0);
+  const failed = Number(slideState?.failed || normalized.filter((task) => task.status === "failed").length || 0);
+  const ready = Number(normalized.filter((task) => task.status === "ready").length || 0);
+  const running = Number(normalized.filter((task) => task.status === "claimed" || task.status === "running").length || 0);
+  return { total, recorded, failed, ready, running };
+}
+
+function WorkflowCostEstimatePanel({ bundle = null }) {
+  if (!bundle) return null;
+  const imageOps = bundle.operations?.imageGenerations || {};
+  const editableOps = bundle.operations?.editablePages || {};
+  const unknown = Array.isArray(bundle.unknownCostItems) ? bundle.unknownCostItems.length : 0;
+  const level = bundle.pricingConfigured ? "ready" : unknown ? "warning" : "pending";
+  return (
+    <div className={`workflow-cost-panel ${level}`}>
+      <div className="workflow-cost-head">
+        <div>
+          <b>费用预估</b>
+          <span>{uiZh(bundle.duration?.label || "等待工作流范围")} / {bundle.pageCount || 0} 页</span>
+        </div>
+        <strong>{formatUsd(bundle.knownTotalUsd)}{unknown ? "+" : ""}</strong>
+      </div>
+      <div className="workflow-cost-grid">
+        <WorkflowArtifact label="图片 API" value={`${(imageOps.sampleRemaining || 0) + (imageOps.deckRemaining || 0)} 次调用`} />
+        <WorkflowArtifact label="可编辑页面" value={`${editableOps.remaining || 0}/${editableOps.totalExpected || 0}`} />
+        <WorkflowArtifact label="已知费用" value={formatUsd(bundle.knownTotalUsd)} />
+        <WorkflowArtifact label="定价" value={bundle.pricingConfigured ? "已配置" : `${unknown} 项未知`} />
+      </div>
+      {bundle.warnings?.length ? <p>{uiZh(bundle.warnings[0])}</p> : <p>这是规划估算，不是服务商账单。</p>}
+    </div>
+  );
+}
+
+function WorkflowWorkerBatchPreflightPanel({ bundle = null }) {
+  if (!bundle) return null;
+  const state = bundle.startReady ? "ready" : bundle.ready ? "warning" : "blocked";
+  const external = bundle.requiredConfirmations?.externalImageSpend || {};
+  const offline = bundle.requiredConfirmations?.offlineTextHints || {};
+  const editablePages = bundle.cost?.editablePages || {};
+  const activeRunner = bundle.activeRunner || null;
+  const textHints = bundle.textHints || {};
+  const issues = bundle.blockingIssues?.length ? bundle.blockingIssues : bundle.warnings || [];
+  return (
+    <div className={`workflow-worker-preflight ${state}`}>
+      <div className="workflow-worker-preflight-head">
+        <div>
+          <b>{bundle.startReady ? "批处理预检就绪" : bundle.ready ? "批处理需要确认" : "批处理预检被阻断"}</b>
+          <span>{bundle.selectedCount || 0} 个页面任务已选择 / {bundle.mode || "模型"} 模式</span>
+        </div>
+        <strong>{bundle.startReady ? "就绪" : bundle.ready ? "需确认" : "阻断"}</strong>
+      </div>
+      <div className="workflow-worker-preflight-grid">
+        <WorkflowArtifact label="已选择" value={`${bundle.selectedCount || 0}/${bundle.counts?.total || 0}`} />
+        <WorkflowArtifact label="模型" value={bundle.provider?.model || "未配置"} />
+        <WorkflowArtifact label="文字提示" value={textHints.source ? `${textHints.source} / ${textHints.readyPages || 0} 页 / ${textHints.textLineCount || 0} 行` : "未就绪"} />
+        <WorkflowArtifact label="剩余可编辑页" value={`${editablePages.remaining ?? 0}/${editablePages.totalExpected ?? 0}`} />
+        <WorkflowArtifact label="估算" value={bundle.cost?.knownTotalUsd ? formatUsd(bundle.cost.knownTotalUsd) : (bundle.cost?.unknownCostItems?.length ? "未知" : "无费用")} />
+      </div>
+      <div className="workflow-worker-preflight-checks">
+        <span className={external.required && !external.confirmed ? "warn" : "ok"}>外部额度 {external.required ? (external.confirmed ? "已确认" : "必需") : "不需要"}</span>
+        <span className={offline.confirmed ? "ok" : "warn"}>文字提示 {offline.required ? (offline.confirmed ? "已接受" : "需要确认") : "已就绪"}</span>
+        {activeRunner ? <span className="warn">运行中的任务 {activeRunner.id}</span> : null}
+      </div>
+      {activeRunner?.logHref ? (
+        <div className="workflow-worker-preflight-links">
+          <a href={activeRunner.logHref} target="_blank" rel="noreferrer">打开运行日志</a>
+          {activeRunner.logDownloadHref ? <a href={activeRunner.logDownloadHref}>下载日志</a> : null}
+        </div>
+      ) : null}
+      {issues.length ? <p>{uiZh(issues.slice(0, 2).join(" "))}</p> : <p>预检确认队列、模型和可编辑运行目录已满足受控批处理启动条件。</p>}
+    </div>
+  );
+}
+
+function WorkflowEditablePreparePreflightPanel({ bundle = null, busy = false, message = "", onPrepare, onRefresh }) {
+  const state = bundle?.ready || bundle?.startReady ? "ready" : bundle ? "blocked" : "pending";
+  const checks = Array.isArray(bundle?.checks) ? bundle.checks : [];
+  const blockingIssues = Array.isArray(bundle?.blockingIssues) ? bundle.blockingIssues : [];
+  const warnings = Array.isArray(bundle?.warnings) ? bundle.warnings : [];
+  const qualitySummary = bundle?.visualQuality?.summary || {};
+  return (
+    <section className={`workflow-editable-prepare-preflight ${state}`}>
+      <div className="workflow-editable-prepare-head">
+        <div>
+          <b>image-to-editable-ppt 准备</b>
+          <span>{bundle?.summary || "检查图片型 PPT 是否已经可以交给 editppt 重建。"}</span>
+        </div>
+        <strong>{state === "ready" ? "可准备 editppt" : state === "blocked" ? "准备条件未满足" : "等待预检"}</strong>
+      </div>
+      <div className="workflow-editable-prepare-grid">
+        <WorkflowArtifact label="输入页数" value={bundle ? `${bundle.inputCount || 0} 页` : "待检查"} />
+        <WorkflowArtifact label="图片型 PPT" value={bundle?.imageDeck?.path ? `${bundle.imageDeck.pageCount || 0} 页` : "未就绪"} />
+        <WorkflowArtifact label="视觉复核" value={bundle?.visualQuality?.path ? `${qualitySummary.reviewCount || 0} 复核 / ${qualitySummary.failedCount || 0} 失败` : "未生成"} />
+        <WorkflowArtifact label="运行环境" value={bundle?.runtime?.python || "待检查"} />
+      </div>
+      {checks.length ? (
+        <div className="workflow-editable-prepare-checks">
+          {checks.map((check) => (
+            <span className={check.ok ? "ok" : "fail"} key={check.id || check.label}>
+              {uiZh(check.label || check.id || "检查项")}：{check.ok ? "通过" : "失败"}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {blockingIssues.length ? (
+        <div className="workflow-editable-prepare-list blocked">
+          <b>阻断项</b>
+          {blockingIssues.slice(0, 4).map((item, index) => <span key={`${index}-${item}`}>{uiZh(item)}</span>)}
+        </div>
+      ) : warnings.length ? (
+        <div className="workflow-editable-prepare-list warning">
+          <b>注意项</b>
+          {warnings.slice(0, 4).map((item, index) => <span key={`${index}-${item}`}>{uiZh(item)}</span>)}
+        </div>
+      ) : null}
+      <div className="workflow-editable-prepare-actions">
+        <button type="button" onClick={onRefresh} disabled={busy}>刷新预检</button>
+        <button type="button" onClick={onPrepare} disabled={busy || !bundle?.startReady}>准备 editppt</button>
+        {message ? <span>{uiZh(message)}</span> : <span>此步骤不消耗外部图片 API，只准备 image-to-editable-ppt 的运行目录。</span>}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowEventLogPanel({ bundle = null, job = null }) {
+  const events = Array.isArray(bundle?.events)
+    ? bundle.events
+    : Array.isArray(job?.events)
+      ? job.events.slice(-80)
+      : [];
+  const latest = events.at(-1);
+  return (
+    <div className="workflow-event-log-panel">
+      <div className="workflow-event-log-head">
+        <div>
+          <b>工作流事件日志</b>
+          <span>最近的状态变化、失败、重试、确认和产物更新。</span>
+        </div>
+        <small>共 {bundle?.total ?? events.length} 条</small>
+      </div>
+      {events.length ? (
+        <div className="workflow-event-list">
+          {events.slice(-12).reverse().map((event, index) => (
+            <div className={eventLevel(event)} key={event.id || `${event.type}-${index}`}>
+              <span>{formatEventTime(event.createdAt)}</span>
+              <b>{event.type || "workflow.event"}</b>
+              <small>{uiZh(event.message || "-")}</small>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="workflow-event-empty">还没有工作流事件。</p>
+      )}
+      {latest ? <p className="workflow-event-latest">最新：{latest.type || "事件"} / {formatEventTime(latest.createdAt)}</p> : null}
+    </div>
+  );
+}
+
+function eventLevel(event = {}) {
+  const text = `${event.type || ""} ${event.message || ""}`.toLowerCase();
+  if (/fail|error|blocked/.test(text)) return "blocked";
+  if (/reset|retry|warning|warn/.test(text)) return "warning";
+  if (/complete|ready|recorded|approved|finalized/.test(text)) return "ready";
+  return "pending";
+}
+
+function formatEventTime(value = "") {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 19);
+  return date.toLocaleTimeString();
+}
+
+function formatUsd(value = 0) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number <= 0) return "$0.00";
+  return `$${number.toFixed(number < 1 ? 4 : 2)}`;
+}
+function WorkflowUnifiedSkillTaskBoard({ codexSlideTasks = [], codexSummary = null, editablePromptCount = 0, editableSummary = null, editableTasks = [], finalPath = "", nextStage = "", onFocusTask, onRetryFailedTasks, onRetryTask, retryBusyKey = "" }) {
+  const codex = buildUnifiedTaskLane({
+    id: "codex-ppt",
+    title: "codex-ppt 图片页",
+    summary: codexSummary,
+    tasks: codexSlideTasks,
+    empty: "样张和全量确认后，同步 codex 图片页任务。",
+    next: codexSlideTasks.length
+      ? "派发真实图片页任务，然后记录生成图片路径。"
+      : "先确认样张和全量生成，再同步图片页任务。"
+  });
+  const editable = buildUnifiedTaskLane({
+    id: "image-to-editable-ppt",
+    title: "image-to-editable-ppt 可编辑页",
+    summary: editableSummary,
+    tasks: editableTasks,
+    empty: editablePromptCount ? "页面提示已存在，请同步可编辑页任务。" : "请先准备 editppt 并生成页面提示。",
+    next: finalPath
+      ? "最终可编辑 PPTX 已组装。"
+      : nextStage === "finalize"
+        ? "所有页面记录后运行 editppt finalize。"
+        : nextStage === "rebuild_page_locally"
+          ? "运行单页本地重建路径。"
+          : "派发页面任务，并记录通过校验的页面结果。"
+  });
+  const total = codex.total + editable.total;
+  const recorded = codex.recorded + editable.recorded;
+  const running = codex.running + editable.running;
+  const failed = codex.failed + editable.failed;
+  const boardLevel = failed ? "blocked" : total && recorded >= total ? "ready" : running ? "running" : "pending";
+  const lanes = [codex, editable];
+  const [selectedTaskKey, setSelectedTaskKey] = useState("");
+  const selectedTask = findUnifiedTask(lanes, selectedTaskKey) || findFirstUnifiedTask(lanes);
+  const failedTasks = collectFailedUnifiedTasks(lanes);
+  return (
+    <div className={`workflow-unified-board ${boardLevel}`}>
+      <div className="workflow-unified-head">
+        <div>
+          <b>统一 Skill 任务板</b>
+          <span>集中查看 codex-ppt 图片页任务和 image-to-editable-ppt 页面任务。</span>
+        </div>
+        <small>{recorded}/{total || 0} 已记录</small>
+      </div>
+      <div className="workflow-unified-metrics">
+        <WorkflowArtifact label="任务总数" value={total || 0} />
+        <WorkflowArtifact label="运行中" value={running || 0} />
+        <WorkflowArtifact label="已记录" value={recorded || 0} />
+        <WorkflowArtifact label="失败" value={failed || 0} />
+      </div>
+      <WorkflowFailedTaskRecoveryPanel
+        failedTasks={failedTasks}
+        onFocusTask={onFocusTask}
+        onRetryFailedTasks={onRetryFailedTasks}
+        onRetryTask={onRetryTask}
+        retryBusyKey={retryBusyKey}
+        onSelectTask={setSelectedTaskKey}
+      />
+      <div className="workflow-unified-lanes">
+        {lanes.map((lane) => (
+          <WorkflowUnifiedTaskLane
+            key={lane.id}
+            lane={lane}
+            onSelectTask={setSelectedTaskKey}
+            selectedTaskKey={selectedTask?.key || selectedTaskKey}
+          />
+        ))}
+      </div>
+      <WorkflowUnifiedTaskDetail detail={selectedTask} onFocusTask={onFocusTask} onRetryTask={onRetryTask} retryBusyKey={retryBusyKey} />
+    </div>
+  );
+}
+
+function WorkflowFailedTaskRecoveryPanel({ failedTasks = [], onFocusTask, onRetryFailedTasks, onRetryTask, retryBusyKey = "", onSelectTask }) {
+  if (!failedTasks.length) return null;
+  const bulkBusy = retryBusyKey === "bulk-failed";
+  return (
+    <div className="workflow-failed-recovery">
+      <div className="workflow-failed-recovery-head">
+        <div>
+          <b>失败页面恢复</b>
+          <span>失败的 codex-ppt 和 image-to-editable-ppt 页面任务会集中在这里重试。</span>
+        </div>
+        <div className="workflow-failed-recovery-actions">
+          <small>{failedTasks.length} 个失败</small>
+          <button type="button" onClick={() => onRetryFailedTasks?.()} disabled={bulkBusy}>
+            {bulkBusy ? "正在重试全部..." : "重试全部失败项"}
+          </button>
+        </div>
+      </div>
+      <div className="workflow-failed-recovery-list">
+        {failedTasks.map((task) => (
+          <div className="workflow-failed-recovery-row" key={task.key}>
+            <div>
+              <b>{task.taskId}</b>
+              <span>{task.skillTitle}</span>
+              <small>{shortPath(task.primaryPath) || task.agentId || task.nextAction}</small>
+            </div>
+            <button type="button" onClick={() => { onSelectTask?.(task.key); onFocusTask?.(task); }}>定位</button>
+            <button type="button" onClick={() => onRetryTask?.(task)} disabled={retryBusyKey === task.key}>
+              {retryBusyKey === task.key ? "正在重试..." : "重试"}
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowUnifiedTaskLane({ lane, onSelectTask, selectedTaskKey }) {
+  return (
+    <div className={`workflow-unified-lane ${lane.level}`} data-skill={lane.id}>
+      <div>
+        <b>{lane.title}</b>
+        <span>{lane.next}</span>
+      </div>
+      <div className="workflow-unified-lane-stats">
+        <span>{lane.ready} 就绪</span>
+        <span>{lane.running} 运行中</span>
+        <span>{lane.recorded} 已记录</span>
+        <span>{lane.failed} 失败</span>
+      </div>
+      <div className="workflow-unified-task-list">
+        {lane.tasks.length ? lane.tasks.slice(0, 8).map((task) => {
+          const key = unifiedTaskKey(lane.id, task);
+          return (
+          <button className={`${task.status || "ready"} ${key === selectedTaskKey ? "active" : ""}`} key={key} type="button" onClick={() => onSelectTask?.(key)}>
+            <b>{unifiedTaskLabel(task)}</b>
+            <em>{task.statusLabel || workerTaskStatusLabel(task.status || "ready")}</em>
+          </button>
+        );
+        }) : <p>{lane.empty}</p>}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowUnifiedTaskDetail({ detail, onFocusTask, onRetryTask, retryBusyKey = "" }) {
+  if (!detail) {
+    return (
+      <div className="workflow-unified-detail empty">
+        <b>Skill 任务详情</b>
+        <span>还没有选择页面任务。</span>
+      </div>
+    );
+  }
+  return (
+    <div className={`workflow-unified-detail ${detail.level || "pending"}`}>
+      <div className="workflow-unified-detail-head">
+        <div>
+          <b>Skill 任务详情</b>
+          <span>{detail.skillTitle} / {detail.taskId}</span>
+        </div>
+        <small>{detail.statusLabel || workerTaskStatusLabel(detail.status || "ready")}</small>
+      </div>
+      <div className="workflow-unified-detail-grid">
+        <WorkflowArtifact label="归属" value={detail.agentId || "未分配"} />
+        <WorkflowArtifact label="提示/结果路径" value={shortPath(detail.primaryPath) || "待处理"} />
+        <WorkflowArtifact label="边界" value={detail.boundary} />
+        <WorkflowArtifact label="校验状态" value={detail.validationLabel || "待校验"} />
+        <WorkflowArtifact label="下一步" value={detail.nextAction} />
+      </div>
+      <div className="workflow-unified-detail-actions">
+        <button type="button" onClick={() => onFocusTask?.(detail)}>定位详情面板</button>
+        <button type="button" onClick={() => onRetryTask?.(detail)} disabled={detail.status === "recorded" || retryBusyKey === detail.key}>
+          {retryBusyKey === detail.key ? "正在重试..." : "重试页面"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function buildUnifiedTaskLane({ id, title, summary = null, tasks = [], empty = "", next = "" }) {
+  const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+  const ready = Number(summary?.ready ?? normalizedTasks.filter((task) => task.status === "ready").length);
+  const running = Number(summary?.running ?? normalizedTasks.filter((task) => task.status === "claimed" || task.status === "running" || task.status === "dispatched").length);
+  const recorded = Number(summary?.recorded ?? normalizedTasks.filter((task) => task.status === "recorded").length);
+  const failed = Number(summary?.failed ?? normalizedTasks.filter((task) => task.status === "failed").length);
+  const total = Number(summary?.total ?? normalizedTasks.length);
+  const level = failed ? "blocked" : total && recorded >= total ? "ready" : running ? "running" : "pending";
+  return { id, title, tasks: normalizedTasks, empty, next, ready, running, recorded, failed, total, level };
+}
+
+function findUnifiedTask(lanes = [], key = "") {
+  if (!key) return null;
+  for (const lane of lanes) {
+    const task = lane.tasks.find((item) => unifiedTaskKey(lane.id, item) === key);
+    if (task) return buildUnifiedTaskDetail(lane, task);
+  }
+  return null;
+}
+
+function findFirstUnifiedTask(lanes = []) {
+  for (const lane of lanes) {
+    if (lane.tasks.length) return buildUnifiedTaskDetail(lane, lane.tasks[0]);
+  }
+  return null;
+}
+
+function collectFailedUnifiedTasks(lanes = []) {
+  return lanes.flatMap((lane) => (lane.tasks || [])
+    .filter((task) => (task.status || "ready") === "failed")
+    .map((task) => buildUnifiedTaskDetail(lane, task)));
+}
+
+function buildUnifiedTaskDetail(lane, task) {
+  const status = task.status || "ready";
+  const isCodex = lane.id === "codex-ppt";
+  const taskId = unifiedTaskLabel(task);
+  const primaryPath = isCodex
+    ? task.imagePath || task.promptFile || task.relativePath || ""
+    : task.pageResult || task.promptFile || task.relativePath || task.pageDir || "";
+  const nextAction = isCodex
+    ? status === "recorded"
+      ? "所有图片页记录后组装图片型 PPT。"
+      : status === "running" || status === "claimed"
+        ? "从图片页任务记录生成图片路径。"
+        : status === "failed"
+          ? "修复图片页任务阻断后重置。"
+          : "启动真实图片页任务，然后认领任务。"
+    : status === "recorded"
+      ? "所有页面 manifest 记录后，生成最终可编辑 PPTX。"
+      : status === "running" || status === "claimed"
+        ? "页面产物通过 editppt 校验后再记录。"
+        : status === "failed"
+          ? "检查校验输出，带智能体证据重置后重新派发。"
+          : "使用生成的页面提示派发真实页面任务。";
+  return {
+    key: unifiedTaskKey(lane.id, task),
+    skillId: lane.id,
+    skillTitle: lane.title,
+    taskId,
+    status,
+    statusLabel: task.statusLabel || workerTaskStatusLabel(status),
+    validationStatus: task.validationStatus || "",
+    validationLabel: task.validationStatus === "passed" ? "校验通过" : task.validationStatus === "failed" ? "校验失败" : task.generated ? "已生成待校验" : "待生成",
+    level: status === "failed" ? "blocked" : status === "recorded" ? "ready" : status === "running" || status === "claimed" ? "running" : "pending",
+    agentId: task.agentId || "",
+    primaryPath,
+    boundary: isCodex ? "仅处理图片页" : "可编辑页面产物",
+    nextAction
+  };
+}
+
+function unifiedTaskKey(laneId, task = {}) {
+  return `${laneId}:${task.pageId || task.slideId || task.pageNumber || "task"}`;
+}
+
+function unifiedTaskLabel(task = {}) {
+  return task.pageId || task.slideId || (task.pageNumber ? `page_${String(task.pageNumber).padStart(3, "0")}` : "task");
+}
+
+function WorkflowCodexSlideBatchPreflightPanel({ bundle = null, confirmImageSpend = false, onSetConfirmImageSpend }) {
+  if (!bundle) return null;
+  const state = bundle.startReady ? "ready" : bundle.ready ? "warning" : "blocked";
+  const external = bundle.requiredConfirmations?.externalImageSpend || {};
+  const backendRuntime = bundle.backendRuntime || {};
+  const backendCurrent = Boolean(backendRuntime.backendMatchesRuntime && !backendRuntime.approvedBackendLooksDryRun);
+  const issues = bundle.blockingIssues?.length ? bundle.blockingIssues : bundle.warnings || [];
+  return (
+    <div className={`workflow-worker-preflight codex-slide-batch-preflight ${state}`}>
+      <div className="workflow-worker-preflight-head">
+        <div>
+          <b>{bundle.startReady ? "Codex 图片页批处理就绪" : bundle.ready ? "需要确认图片 API 用量" : "Codex 图片页批处理被阻断"}</b>
+          <span>{bundle.selectedCount || 0} 个已选图片页任务 / {bundle.mode || "product"} 模式</span>
+        </div>
+        <strong>{bundle.startReady ? "就绪" : bundle.ready ? "需确认" : "阻断"}</strong>
+      </div>
+      <div className="workflow-worker-preflight-grid">
+        <WorkflowArtifact label="已选择" value={`${bundle.selectedCount || 0}/${bundle.counts?.total || 0}`} />
+        <WorkflowArtifact label="就绪" value={bundle.counts?.ready || 0} />
+        <WorkflowArtifact label="服务商" value={bundle.provider?.model || "未配置"} />
+        <WorkflowArtifact label="图片调用" value={bundle.cost?.imageCalls || 0} />
+        <WorkflowArtifact label="后端确认" value={backendCurrent ? "当前一致" : "需刷新"} />
+      </div>
+      <div className="workflow-worker-preflight-checks">
+        <span className={external.required && !external.confirmed ? "warn" : "ok"}>外部额度 {external.required ? (external.confirmed ? "已确认" : "必需") : "不需要"}</span>
+        <span className={bundle.approvals?.ready ? "ok" : "warn"}>审批关卡 {bundle.approvals?.ready ? "就绪" : `${bundle.approvals?.approved?.length || 0}/${bundle.approvals?.required?.length || 5}`}</span>
+        <span className={backendCurrent ? "ok" : "warn"}>后端确认 {backendCurrent ? "当前一致" : "需要刷新"}</span>
+      </div>
+      <label className="workflow-confirm workflow-preflight-confirm">
+        <input type="checkbox" checked={confirmImageSpend} onChange={(event) => onSetConfirmImageSpend?.(event.target.checked)} />
+        <span>确认 codex-ppt 视觉生成会使用外部图片 API</span>
+      </label>
+      {issues.length ? <p>{uiZh(issues.slice(0, 2).join(" "))}</p> : <p>预检确认 codex-ppt 图片页任务已满足受控批处理启动条件。</p>}
+    </div>
+  );
+}
+
+function WorkflowCodexSlideTaskPanel({ batchPreflight = null, bundle, confirmImageSpend = false, error, focusTask = null, jobId, loading, onBatchPreflightChange, onBundleChange, onRefresh, onRefreshJob, onRunBatch, onSetConfirmImageSpend, onSync, tasks = [] }) {
+  const [selectedPageId, setSelectedPageId] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [workerName, setWorkerName] = useState("");
+  const [confirmSpawned, setConfirmSpawned] = useState(false);
+  const [imagePath, setImagePath] = useState("");
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [qaNote, setQaNote] = useState("");
+  const [actionBusy, setActionBusy] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
+  const summary = bundle?.summary || {
+    total: tasks.length,
+    ready: tasks.filter((task) => task.status === "ready").length,
+    running: tasks.filter((task) => task.status === "claimed" || task.status === "running").length,
+    recorded: tasks.filter((task) => task.status === "recorded").length,
+    failed: tasks.filter((task) => task.status === "failed").length
+  };
+  const selectedTask = tasks.find((task) => task.pageId === selectedPageId) || tasks[0] || null;
+  const resolvedPageId = selectedTask?.pageId || selectedPageId;
+  const prompts = Array.isArray(bundle?.prompts) ? bundle.prompts : [];
+  const selectedPrompt = prompts.find((prompt) => prompt.pageId === resolvedPageId) || null;
+  const selectedSlideStatus = selectedTask?.status || (selectedTask ? "ready" : "pending");
+  const selectedSlidePath = shortPath(selectedTask?.imagePath || selectedTask?.relativePath || selectedPrompt?.path || selectedTask?.promptFile);
+  const selectedSlideNext = getCodexSlideWorkerNextAction({ selectedTask, hasImagePath: Boolean(imagePath.trim()) });
+
+  useEffect(() => {
+    if (!selectedPageId && tasks.length) setSelectedPageId(tasks[0].pageId);
+  }, [tasks, selectedPageId]);
+
+  useEffect(() => {
+    if (focusTask?.taskId) setSelectedPageId(focusTask.taskId);
+  }, [focusTask?.taskId]);
+
+  async function runCodexSlideAction(action) {
+    if (!jobId || !resolvedPageId) {
+      setActionError("请先选择一个 codex-ppt 图片页任务。");
+      return;
+    }
+    const trimmedAgentId = agentId.trim();
+    if (!trimmedAgentId) {
+      setActionError("必须填写智能体 ID。");
+      return;
+    }
+    if (action === "claim" && !confirmSpawned) {
+      setActionError("记录派发前，请确认真实图片页任务已启动。");
+      return;
+    }
+    if (action === "complete" && !imagePath.trim()) {
+      setActionError("必须填写结果图片路径。");
+      return;
+    }
+    setActionBusy(action);
+    setActionError("");
+    setActionNotice("");
+    try {
+      const body = action === "claim"
+        ? {
+          agentId: trimmedAgentId,
+          workerName: workerName.trim(),
+          confirmSpawned: true,
+          spawned: true,
+          message: "claimed from frontend codex slide task panel"
+        }
+        : action === "complete"
+          ? {
+            agentId: trimmedAgentId,
+            workerName: workerName.trim(),
+            imagePath: imagePath.trim(),
+            provider: provider.trim(),
+            model: model.trim(),
+            qaNote: qaNote.trim(),
+            source: "external-slide-worker"
+          }
+          : {
+            agentId: selectedTask?.agentId || trimmedAgentId,
+            reason: "manual retry from frontend codex slide task panel"
+          };
+      const nextBundle = await api.codexPptSlideTaskAction(jobId, resolvedPageId, action, body);
+      onBundleChange?.(nextBundle);
+      setActionNotice(action === "reset" ? "图片页任务已重置为就绪。" : action === "claim" ? "图片页任务已认领。" : "图片页结果已记录。");
+      await onRefreshJob?.();
+    } catch (actionError) {
+      setActionError(getErrorMessage(actionError));
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  async function resetNonProductSlideEvidence() {
+    if (!jobId) return;
+    setActionBusy("reset-non-product");
+    setActionError("");
+    setActionNotice("");
+    try {
+      const preview = await api.resetNonProductCodexPptSlides(jobId, {});
+      const count = preview.candidateCount || 0;
+      if (!count) {
+        setActionNotice("没有可重置的验证链路/透传 codex-ppt 图片页结果。");
+        return;
+      }
+      const confirmed = window.confirm(`将 ${count} 个验证链路/透传 codex-ppt 图片页结果重置为就绪，以便用当前图片运行环境重新生成。已有文件不会删除，是否继续？`);
+      if (!confirmed) return;
+      const result = await api.resetNonProductCodexPptSlides(jobId, {
+        confirmNonProductReset: true,
+        reason: "frontend reset dry-run codex-ppt slide evidence for product runtime rerun"
+      });
+      onBundleChange?.(result.taskBundle || result);
+      if (result.postResetPreflight) onBatchPreflightChange?.(result.postResetPreflight);
+      const post = result.postResetPreflight || {};
+      const selected = post.selectedCount || result.reset || count;
+      const confirmation = post.requiredConfirmations?.externalImageSpend?.required ? " 运行服务商批处理前，请确认外部图片 API 用量。" : "";
+      setActionNotice(`已重置 ${result.reset || count} 个验证结果。${selected} 个图片页任务已可用产品运行环境重跑。${confirmation}`);
+      await onRefreshJob?.();
+    } catch (resetError) {
+      setActionError(getErrorMessage(resetError));
+    } finally {
+      setActionBusy("");
+    }
+  }
+
+  return (
+    <div className="workflow-worker-console codex-slide-worker-console" id="codex-slide-worker-panel">
+      <div className="workflow-worker-console-head">
+        <div>
+          <b>Codex 图片页任务</b>
+          <span>codex-ppt 全量图片任务，会在样张/全量确认后派发给真实图片页任务。</span>
+        </div>
+        <small>{loading ? "加载中" : `${summary.recorded || 0}/${summary.total || 0} 已记录`}</small>
+      </div>
+      <div className={`workflow-worker-current-task ${selectedSlideStatus}`}>
+        <div>
+          <span>已选图片页</span>
+          <b>{resolvedPageId || "未选择图片页"}</b>
+          <small>codex-ppt 图片页</small>
+        </div>
+        <div>
+          <span>状态</span>
+          <b>{workerTaskStatusLabel(selectedSlideStatus)}</b>
+          <small>{selectedSlideNext}</small>
+        </div>
+        <div>
+          <span>提示/结果</span>
+          <b>{selectedSlidePath || "待处理"}</b>
+          <small>{selectedTask?.agentId || agentId || "未分配"}</small>
+        </div>
+      </div>
+      {error || actionError ? <p className="workflow-error">{error || actionError}</p> : null}
+      {actionNotice ? <p className="workflow-notice">{actionNotice}</p> : null}
+      <div className="workflow-task-summary">
+        <WorkflowArtifact label="总数" value={summary.total || 0} />
+        <WorkflowArtifact label="就绪" value={summary.ready || 0} />
+        <WorkflowArtifact label="运行中" value={summary.running || 0} />
+        <WorkflowArtifact label="已记录" value={summary.recorded || 0} />
+        <WorkflowArtifact label="失败" value={summary.failed || 0} />
+      </div>
+      <WorkflowCodexSlideBatchPreflightPanel
+        bundle={batchPreflight}
+        confirmImageSpend={confirmImageSpend}
+        onSetConfirmImageSpend={onSetConfirmImageSpend}
+      />
+      <div className="workflow-worker-controls codex-slide-controls">
+        <label>
+          <span>图片页</span>
+          <select value={resolvedPageId || ""} onChange={(event) => setSelectedPageId(event.target.value)} disabled={!tasks.length}>
+            {tasks.length ? tasks.map((task) => <option value={task.pageId} key={task.pageId}>{task.pageId}</option>) : <option value="">无任务</option>}
+          </select>
+        </label>
+        <label>
+          <span>智能体 ID</span>
+          <input value={agentId} onChange={(event) => setAgentId(event.target.value)} placeholder="真实图片页任务的智能体 ID" />
+        </label>
+        <label>
+          <span>任务名称</span>
+          <input value={workerName} onChange={(event) => setWorkerName(event.target.value)} placeholder="可选" />
+        </label>
+        <label className="workflow-confirm">
+          <input type="checkbox" checked={confirmSpawned} onChange={(event) => setConfirmSpawned(event.target.checked)} />
+          <span>真实图片页任务已启动</span>
+        </label>
+      </div>
+      <div className="codex-slide-result-grid">
+        <label>
+          <span>结果图片路径</span>
+          <input value={imagePath} onChange={(event) => setImagePath(event.target.value)} placeholder="图片页任务返回的绝对路径" />
+        </label>
+        <label>
+          <span>服务商</span>
+          <input value={provider} onChange={(event) => setProvider(event.target.value)} placeholder="已确认的图片后端" />
+        </label>
+        <label>
+          <span>模型</span>
+          <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="图片模型" />
+        </label>
+        <label>
+          <span>QA 备注</span>
+          <input value={qaNote} onChange={(event) => setQaNote(event.target.value)} placeholder="简短视觉 QA 备注" />
+        </label>
+      </div>
+      <div className="workflow-worker-primary-actions">
+        <button type="button" onClick={() => runCodexSlideAction("claim")} disabled={loading || actionBusy || !selectedTask || selectedTask.status === "recorded"}>{actionBusy === "claim" ? "正在认领..." : "1. 认领真实图片页任务"}</button>
+        <button type="button" onClick={() => runCodexSlideAction("complete")} disabled={loading || actionBusy || !selectedTask || selectedTask.status === "recorded"}>{actionBusy === "complete" ? "正在记录..." : "2. 记录图片页结果"}</button>
+        <button type="button" onClick={() => runCodexSlideAction("reset")} disabled={loading || actionBusy || !selectedTask || selectedTask.status === "recorded"}>{actionBusy === "reset" ? "正在重置..." : "重置"}</button>
+      </div>
+      <div className="workflow-worker-secondary-actions">
+        <button type="button" onClick={onSync} disabled={loading}>同步任务</button>
+        <button type="button" onClick={onRunBatch} disabled={loading || !tasks.length || summary.recorded >= summary.total || !batchPreflight?.startReady}>运行服务商批处理</button>
+        <button type="button" onClick={resetNonProductSlideEvidence} disabled={loading || actionBusy || !tasks.length}>{actionBusy === "reset-non-product" ? "正在预览..." : "重置验证结果"}</button>
+        <button type="button" onClick={onRefresh} disabled={loading}>刷新任务</button>
+      </div>
+      {selectedTask ? (
+        <div className="workflow-handoff-card codex-slide-handoff-card">
+          <div>
+            <b>codex-ppt 图片页已准备</b>
+            <span>{resolvedPageId || "图片页"} / 优先使用服务商批处理，不需要手动复制命令</span>
+          </div>
+          <code>{selectedPrompt?.path || selectedTask?.promptFile || ""}</code>
+        </div>
+      ) : null}
+      <div className="workflow-task-list">
+        {tasks.length ? tasks.map((task) => (
+          <button className={`workflow-task-row ${task.status} ${task.pageId === resolvedPageId ? "active" : ""}`} key={task.pageId} type="button" onClick={() => setSelectedPageId(task.pageId)}>
+            <b>{task.pageId}</b>
+            <span>{workerTaskStatusLabel(task.status)}</span>
+            <small>{task.agentId || task.imagePath || task.relativePath || task.promptFile || "等待图片页任务"}</small>
+          </button>
+        )) : <p>还没有 codex-ppt 图片页任务。全量确认后同步，会创建提示任务和运行状态。</p>}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowTextHintEvidencePanel({ artifacts = {}, artifactBundle = null, job = null, onRefresh }) {
+  const links = artifactBundle?.links || [];
+  const ocrSummary = artifacts.ocrTextHints || {};
+  const editableSummary = artifacts.editableHints?.summary || {};
+  const ocrLinks = links.filter((link) => link.key === "ocr-text-hints" || link.key === "ocr-page");
+  const editableHintLinks = links.filter((link) => link.key === "editable-text-hint");
+  const ocrTextHintsLink = ocrLinks.find((link) => link.key === "ocr-text-hints") || null;
+  const [ocrHints, setOcrHints] = useState({ loading: false, data: null, error: "" });
+  const [correctionDrafts, setCorrectionDrafts] = useState({});
+  const [correctionBusy, setCorrectionBusy] = useState("");
+  const [correctionMessage, setCorrectionMessage] = useState("");
+  const hasEvidence = Boolean(ocrSummary.path || editableSummary.pageCount || ocrLinks.length || editableHintLinks.length);
+  useEffect(() => {
+    if (!ocrTextHintsLink?.href) {
+      setOcrHints({ loading: false, data: null, error: "" });
+      setCorrectionDrafts({});
+      return undefined;
+    }
+    const controller = new AbortController();
+    setOcrHints({ loading: true, data: null, error: "" });
+    fetch(ocrTextHintsLink.href, { cache: "no-store", signal: controller.signal })
+      .then((response) => response.json().then((data) => {
+        if (!response.ok) throw new Error(data.error || "OCR 文字提示读取失败");
+        return data;
+      }))
+      .then((data) => {
+        setOcrHints({ loading: false, data, error: "" });
+        const drafts = {};
+        getLowConfidenceOcrLines(data).forEach((item) => {
+          drafts[`${item.pageId}:${item.line.id}`] = item.line.text || "";
+        });
+        setCorrectionDrafts(drafts);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setOcrHints({ loading: false, data: null, error: getErrorMessage(error) });
+      });
+    return () => controller.abort();
+  }, [ocrTextHintsLink?.href]);
+  const lowConfidenceLines = getLowConfidenceOcrLines(ocrHints.data).slice(0, 6);
+  async function saveCorrection(item) {
+    const key = `${item.pageId}:${item.line.id}`;
+    const text = String(correctionDrafts[key] || "").trim();
+    if (!job?.id || !text || correctionBusy) return;
+    setCorrectionBusy(key);
+    setCorrectionMessage("");
+    try {
+      await api.correctWorkflowOcrTextHint(job.id, {
+        pageId: item.pageId,
+        lineId: item.line.id,
+        text,
+        markRequired: true,
+        correctedBy: "operator"
+      });
+      setCorrectionMessage("OCR 文本修正已保存，并同步到工作流文字提示证据。");
+      await onRefresh?.();
+    } catch (error) {
+      setCorrectionMessage(getErrorMessage(error));
+    } finally {
+      setCorrectionBusy("");
+    }
+  }
+  if (!hasEvidence) {
+    return (
+      <div className="workflow-text-hint-evidence pending">
+        <div>
+          <b>文字提示证据</b>
+          <span>等待 OCR 或 editppt 文字提示生成；后续可用于检查可编辑重建的文字约束。</span>
+        </div>
+        <div className="workflow-text-hint-facts">
+          <span>OCR<b>待处理</b></span>
+          <span>editppt 提示<b>待处理</b></span>
+          <span>低置信文字<b>待检测</b></span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="workflow-text-hint-evidence ready">
+      <div>
+        <b>文字提示证据</b>
+        <span>用于核对 OCR 覆盖、低置信文字和 image-to-editable-ppt 页面重建提示。</span>
+      </div>
+      <div className="workflow-text-hint-facts">
+        <span>OCR 页数<b>{ocrSummary.pageCount ?? ocrLinks.filter((link) => link.key === "ocr-page").length}</b></span>
+        <span>OCR 文字<b>{ocrSummary.textCount ?? 0}</b></span>
+        <span>低置信文字<b>{ocrSummary.lowConfidenceCount ?? 0}</b></span>
+        <span>editppt 提示<b>{editableSummary.readyPages ?? 0}/{editableSummary.pageCount ?? 0}</b></span>
+        <span>提示文字行<b>{editableSummary.textLineCount ?? 0}</b></span>
+      </div>
+      {(ocrLinks.length || editableHintLinks.length) ? (
+        <div className="workflow-text-hint-links">
+          {[...ocrLinks, ...editableHintLinks].slice(0, 8).map((link) => (
+            <a key={`${link.key}-${link.pageId || link.fileName}`} href={link.href} target="_blank" rel="noreferrer">
+              <b>{link.label}</b>
+              <span>{formatFileSize(link.size)} / {link.fileName}</span>
+            </a>
+          ))}
+        </div>
+      ) : null}
+      <div className="workflow-ocr-corrections">
+        <div>
+          <b>低置信文字复核</b>
+          <span>{ocrHints.loading ? "正在读取 OCR 文字..." : lowConfidenceLines.length ? "可直接修正低置信 OCR 文本。" : ocrHints.error || "暂无低置信 OCR 文本。"}</span>
+        </div>
+        {lowConfidenceLines.length ? lowConfidenceLines.map((item) => {
+          const key = `${item.pageId}:${item.line.id}`;
+          return (
+            <label key={key}>
+              <span>{item.pageId} / {item.line.id} / 置信度 {Math.round(Number(item.line.confidence || 0) * 100)}%</span>
+              <input
+                value={correctionDrafts[key] || ""}
+                onChange={(event) => setCorrectionDrafts((current) => ({ ...current, [key]: event.target.value }))}
+              />
+              <button type="button" onClick={() => saveCorrection(item)} disabled={correctionBusy === key || !String(correctionDrafts[key] || "").trim()}>
+                {correctionBusy === key ? "保存中..." : "保存修正"}
+              </button>
+            </label>
+          );
+        }) : null}
+        {correctionMessage ? <small>{correctionMessage}</small> : null}
+      </div>
+    </div>
+  );
+}
+
+function getLowConfidenceOcrLines(data = null) {
+  return (Array.isArray(data?.pages) ? data.pages : []).flatMap((page) => {
+    const pageId = page.pageId || "";
+    return (Array.isArray(page.ocrLines) ? page.ocrLines : [])
+      .filter((line) => line?.low_confidence && !line.corrected)
+      .map((line) => ({ pageId, line }));
+  });
+}
+
+function WorkflowArtifactReviewPanel({ artifactBundle, job, onRefresh }) {
+  const links = artifactBundle?.links || [];
+  const rows = useMemo(() => buildWorkflowReviewRows(links), [links]);
+  const [selectedReviewPageId, setSelectedReviewPageId] = useState("");
+  const selectedRow = rows.find((row) => row.pageId === selectedReviewPageId) || rows[0] || null;
+  const [pageValidation, setPageValidation] = useState({ loading: false, data: null, error: "" });
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const manualReview = job?.artifacts?.manualReview || null;
+  const reviewApproved = manualReview?.status === "approved";
+  useEffect(() => {
+    if (rows.length && !rows.some((row) => row.pageId === selectedReviewPageId)) {
+      setSelectedReviewPageId(rows[0].pageId);
+    }
+  }, [rows, selectedReviewPageId]);
+  useEffect(() => {
+    const href = selectedRow?.validation?.href || "";
+    if (!href) {
+      setPageValidation({ loading: false, data: null, error: "" });
+      return undefined;
+    }
+    const controller = new AbortController();
+    setPageValidation({ loading: true, data: null, error: "" });
+    fetch(href, { cache: "no-store", signal: controller.signal })
+      .then((response) => response.json().then((data) => {
+        if (!response.ok) throw new Error(data.error || "页面校验读取失败");
+        return data;
+      }))
+      .then((data) => setPageValidation({ loading: false, data, error: "" }))
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setPageValidation({ loading: false, data: null, error: getErrorMessage(error) });
+      });
+    return () => controller.abort();
+  }, [selectedRow?.validation?.href]);
+  if (!rows.length) return null;
+  const readyRows = rows.filter((row) => row.visual).length;
+  const rebuiltRows = rows.filter((row) => row.rebuild && row.validation).length;
+  async function approveManualReview() {
+    if (!job?.id || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewError("");
+    try {
+      await api.approveWorkflowManualReview(job.id, {
+        reviewer: "operator",
+        note: `Reviewed ${rebuiltRows}/${rows.length} rebuilt page preview(s)`
+      });
+      await onRefresh?.();
+    } catch (error) {
+      setReviewError(getErrorMessage(error));
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+  async function resetManualReview() {
+    if (!job?.id || reviewBusy) return;
+    setReviewBusy(true);
+    setReviewError("");
+    try {
+      await api.resetWorkflowManualReview(job.id, {
+        reviewer: "operator",
+        note: "Manual review reset from workflow review panel"
+      });
+      await onRefresh?.();
+    } catch (error) {
+      setReviewError(getErrorMessage(error));
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+  return (
+    <div className="workflow-review-panel" id="workflow-artifact-review-panel">
+      <div className="workflow-review-head">
+        <div>
+          <b>页面复核</b>
+          <span>{readyRows}/{rows.length} 页已有视觉图片；{rebuiltRows}/{rows.length} 页已有重建预览和页面校验。</span>
+        </div>
+        <div className="workflow-review-actions">
+          <span>{reviewApproved ? `已复核 ${manualReview.approvedAt || ""}` : "等待人工复核"}</span>
+          <button type="button" onClick={approveManualReview} disabled={reviewBusy || !job?.artifacts?.editableFinal?.path || rebuiltRows < rows.length}>{reviewBusy ? "正在保存..." : "标记已复核"}</button>
+          <button type="button" onClick={resetManualReview} disabled={reviewBusy || !reviewApproved}>重置</button>
+        </div>
+      </div>
+      {reviewError ? <p className="workflow-error">{reviewError}</p> : null}
+      <div className="workflow-review-preview">
+        <WorkflowReviewPreviewCard title="源页面" pageId={selectedRow.pageId} link={selectedRow.source} />
+        <WorkflowReviewPreviewCard title="视觉页" pageId={selectedRow.pageId} link={selectedRow.visual} emptyText="等待重建" />
+        <WorkflowReviewPreviewCard title="重建预览" pageId={selectedRow.pageId} link={selectedRow.rebuild} emptyText="待记录" />
+      </div>
+      <WorkflowReviewValidation data={pageValidation.data} error={pageValidation.error} loading={pageValidation.loading} row={selectedRow} />
+      <div className="workflow-review-list">
+        {rows.map((row) => (
+          <div className={`workflow-review-row ${row.rebuild && row.validation ? "ready" : "missing"} ${row.pageId === selectedRow.pageId ? "active" : ""}`} key={row.pageId} onClick={() => setSelectedReviewPageId(row.pageId)}>
+            <b>{row.pageId}</b>
+            {row.source ? <a href={row.source.href} target="_blank" rel="noreferrer">源页</a> : <span>无源页</span>}
+            {row.visual ? <a href={row.visual.href} target="_blank" rel="noreferrer">视觉页</a> : <span>等待视觉页</span>}
+            {row.rebuild ? <a href={row.rebuild.href} target="_blank" rel="noreferrer">重建</a> : <span>等待记录</span>}
+            {row.validation ? <a href={row.validation.href} target="_blank" rel="noreferrer">校验</a> : <span>无校验</span>}
+            <small>{row.rebuild && row.validation ? "可复核重建结果" : row.visual ? "可进行页面对比复核" : "尚未进入完整重建链路"}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowReviewValidation({ data, error, loading, row }) {
+  const issueCount = data ? countWorkflowPageValidationIssues(data) : 0;
+  const passed = data?.passed === true && issueCount === 0;
+  const statusText = loading ? "正在读取页面校验..." : error ? "校验读取失败" : data ? (passed ? "页面校验通过" : "页面校验有问题") : "无页面校验";
+  return (
+    <div className={`workflow-review-validation ${passed ? "passed" : data || error ? "warn" : "empty"}`}>
+      <div>
+        <b>{row?.pageId || "page"} / {statusText}</b>
+        <span>{data ? `${data.editable_text_shapes ?? 0} 段文字 / ${data.images ?? 0} 张图片 / ${data.shape_count ?? 0} 个图形` : row?.validation ? "校验待读取" : "校验未记录"}</span>
+      </div>
+      {error ? <small>{error}</small> : null}
+      {data && issueCount ? <small>{summarizeWorkflowPageValidationIssues(data)}</small> : null}
+      {data?.page_contract_violations?.length ? <small>{data.page_contract_violations.slice(0, 2).join(" / ")}</small> : null}
+    </div>
+  );
+}
+
+function WorkflowReviewPreviewCard({ emptyText = "缺少产物", link, pageId, title }) {
+  return (
+    <div className={`workflow-review-preview-card ${link ? "ready" : "empty"}`}>
+      <div>
+        <b>{title}</b>
+        <span>{pageId}</span>
+      </div>
+      {link ? (
+        <a href={link.href} target="_blank" rel="noreferrer">
+          <img src={link.href} alt={`${pageId} ${title}`} />
+        </a>
+      ) : (
+        <span className="workflow-review-empty">{emptyText}</span>
+      )}
+    </div>
+  );
+}
+
+function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, onOpenPageTasks, onOpenWorkflow }) {
+  const [deliveryBundle, setDeliveryBundle] = useState(null);
+  const [artifactBundle, setArtifactBundle] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState("");
+  const [recoveryMessage, setRecoveryMessage] = useState("");
+  const [recoveryResult, setRecoveryResult] = useState(null);
+  const [error, setError] = useState("");
+  const status = deliveryBundle?.status || deriveWorkflowDeliveryStatus(job, []);
+
+  async function loadDelivery(id = job?.id, signal) {
+    if (!id) return;
+    setLoading(true);
+    setError("");
+    try {
+      const [delivery, artifacts] = await Promise.all([
+        api.workflowDeliveryStatus(id, signal),
+        api.workflowArtifacts(id, signal)
+      ]);
+      setDeliveryBundle(delivery);
+      setArtifactBundle(artifacts);
+    } catch (loadError) {
+      if (signal?.aborted) return;
+      setError(getErrorMessage(loadError));
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }
+
+  async function retryStalePageEvidence() {
+    if (!job?.id || recoveryBusy) return;
+    setRecoveryBusy("stale-page-evidence");
+    setRecoveryMessage("");
+    setRecoveryResult(null);
+    setError("");
+    try {
+      const result = await api.retryStaleWorkflowPageEvidence(job.id, {
+        apply: true,
+        reason: "frontend reset stale editable page evidence for product rerun"
+      });
+      setRecoveryResult(result);
+      setRecoveryMessage(result.retried
+        ? `已重置 ${result.retried} 页过期证据，请回到工作流启动页面任务重跑。`
+        : "没有发现需要重置的过期页面证据。");
+      setRecoveryMessage(result.recovery?.message || (result.retried
+        ? `已重置 ${result.retried} 页过期证据。下一步请重跑这些 editable 页面任务；启动模型页面任务前仍需确认外部图片 API 额度。`
+        : "没有发现需要重置的过期页面证据。"));
+      await loadDelivery(job.id);
+    } catch (recoveryError) {
+      setError(getErrorMessage(recoveryError));
+    } finally {
+      setRecoveryBusy("");
+    }
+  }
+
+  async function previewStalePageEvidence() {
+    if (!job?.id || recoveryBusy) return;
+    setRecoveryBusy("stale-page-evidence-preview");
+    setRecoveryMessage("");
+    setRecoveryResult(null);
+    setError("");
+    try {
+      const result = await api.retryStaleWorkflowPageEvidence(job.id, {
+        dryRun: true,
+        reason: "frontend preview stale editable page evidence recovery"
+      });
+      setRecoveryResult(result);
+      setRecoveryMessage(result.recovery?.message || (result.requested
+        ? `检测到 ${result.requested} 页过期证据。此预览未重置任务，也不会调用外部图片 API。`
+        : "没有发现需要重置的过期页面证据。"));
+    } catch (recoveryError) {
+      setError(getErrorMessage(recoveryError));
+    } finally {
+      setRecoveryBusy("");
+    }
+  }
+
+  async function refreshEditableRunForStaleEvidence() {
+    if (!job?.id || recoveryBusy) return;
+    setRecoveryBusy("fresh-editable-run");
+    setRecoveryMessage("");
+    setError("");
+    try {
+      const result = await api.refreshWorkflowEditableRun(job.id, {
+        force: true,
+        maxConcurrentPages: 6,
+        reason: "frontend fresh editable run recovery for accepted stale page evidence"
+      });
+      const tasks = result.tasks || {};
+      setRecoveryMessage(`已重建 editppt 运行目录、页面提示和任务队列。当前 ${tasks.summary?.ready || 0}/${tasks.summary?.total || 0} 页可重跑；启动页面任务前仍需确认外部图片 API 额度。`);
+      setRecoveryResult((current) => current ? {
+        ...current,
+        freshEditableRun: {
+          ...(current.freshEditableRun || current.recovery?.freshEditableRun || {}),
+          refreshed: true,
+          refreshedAt: new Date().toISOString(),
+          taskSummary: tasks.summary || null
+        }
+      } : current);
+      await loadDelivery(job.id);
+    } catch (freshRunError) {
+      setError(getErrorMessage(freshRunError));
+    } finally {
+      setRecoveryBusy("");
+    }
+  }
+
+  useEffect(() => {
+    if (!job?.id) {
+      setDeliveryBundle(null);
+      setArtifactBundle(null);
+      setError("");
+      setRecoveryMessage("");
+      setRecoveryResult(null);
+      setLoading(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    loadDelivery(job.id, controller.signal);
+    return () => controller.abort();
+  }, [job?.id, job?.updatedAt]);
+
+  if (!job?.id) {
+    return (
+      <StageEmptyState
+        title="暂无可交付文件"
+        body="先创建双技能工作流。完成 codex-ppt 图片型 PPT 和 image-to-editable-ppt 可编辑重建后，这里会出现图片型 PPT、可编辑 PPT、validation.json 和日志包。"
+        action="回到资料识别"
+        onAction={onGoMaterials}
+      />
+    );
+  }
+
+  return (
+    <div className="workflow-delivery-portal">
+      <div className="workflow-delivery-portal-head">
+        <div>
+          <b>双技能交付中心</b>
+          <span>只展示两套核心技能工作流产生的正式产物和诊断文件；辅助 PDF/PNG 导出不作为主交付入口。</span>
+        </div>
+        <div>
+          <button className="btn ghost" type="button" onClick={onOpenWorkflow}>打开工作流</button>
+          <button className="btn ghost" type="button" onClick={() => loadDelivery()} disabled={loading}>{loading ? "刷新中..." : "刷新交付"}</button>
+          <button className="btn ghost" type="button" onClick={onCreateWorkflow}>新建工作流</button>
+        </div>
+      </div>
+      {error ? <p className="workflow-error">{error}</p> : null}
+      {recoveryMessage ? <p className="workflow-note">{recoveryMessage}</p> : null}
+      {recoveryResult ? (
+        <WorkflowPageEvidenceRecoveryResult
+          freshRunBusy={recoveryBusy === "fresh-editable-run"}
+          onFreshEditableRun={refreshEditableRunForStaleEvidence}
+          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+          result={recoveryResult}
+        />
+      ) : null}
+      {loading && !deliveryBundle ? <p className="workflow-note">正在读取交付状态和产物链接...</p> : null}
+        <WorkflowDeliverySummary
+        artifactBundle={artifactBundle}
+        bundle={deliveryBundle}
+        job={job}
+        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+        onOpenWorkflow={onOpenWorkflow}
+        onPreviewStalePageEvidence={previewStalePageEvidence}
+        onRetryStalePageEvidence={retryStalePageEvidence}
+        retryBusy={recoveryBusy}
+        status={status}
+      />
+    </div>
+  );
+}
+
+function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPageTasks, onOpenWorkflow, onPreviewStalePageEvidence, onRetryStalePageEvidence, retryBusy = "", status }) {
+  const validation = bundle?.validation?.data || null;
+  const finalGate = bundle?.finalGate || null;
+  const stalePageIds = stalePageEvidenceIds(bundle?.pageEvidence);
+  const keyLinks = new Set(["final-pptx", "validation", "source-meta", "image-deck", "log-bundle"]);
+  const links = (artifactBundle?.links || []).filter((link) => keyLinks.has(link.key));
+  const logBundleLink = links.find((link) => link.key === "log-bundle") || null;
+  return (
+    <div className={`workflow-delivery-summary ${status.level}`} id="workflow-delivery-panel">
+      <div className="workflow-delivery-head">
+        <div>
+          <b>{status.title}</b>
+          <span>{status.summary}</span>
+        </div>
+      </div>
+      <div className="workflow-delivery-facts">
+        {status.facts.map((fact) => (
+          <span key={fact.label}><b>{fact.value}</b>{fact.label}</span>
+        ))}
+      </div>
+      {status.nextStep ? (
+        <div className="workflow-delivery-next">
+          <b>下一步</b>
+          <span>{uiZh(status.nextStep.label)}：{uiZh(status.nextStep.reason)}</span>
+        </div>
+      ) : null}
+      {status.warnings.length ? (
+        <div className="workflow-delivery-warnings">
+          {status.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+        </div>
+      ) : null}
+      {finalGate ? <WorkflowFinalGate gate={finalGate} /> : null}
+      {stalePageIds.length ? (
+        <WorkflowStalePageEvidenceRecoveryV2
+          busy={retryBusy === "stale-page-evidence"}
+          previewBusy={retryBusy === "stale-page-evidence-preview"}
+          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+          onPreview={onPreviewStalePageEvidence}
+          onRetry={onRetryStalePageEvidence}
+          pageIds={stalePageIds}
+        />
+      ) : null}
+      {finalGate ? (
+        <WorkflowFinalQualityChecklist
+          coverage={bundle?.coverage}
+          finalEvidence={bundle?.finalEvidence}
+          gate={finalGate}
+          pageEvidence={bundle?.pageEvidence}
+          validation={validation}
+        />
+      ) : null}
+      {finalGate ? (
+        <WorkflowManualReviewSummary
+          finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
+          gate={finalGate}
+          manualReview={job?.artifacts?.manualReview || null}
+          onOpenWorkflow={onOpenWorkflow}
+        />
+      ) : null}
+      <WorkflowDeliveryValidationSummary validation={validation} validationBundle={bundle?.validation} />
+      <WorkflowDiagnosticBundleSummary link={logBundleLink} status={status} />
+      {links.length ? (
+        <div className="workflow-delivery-links">
+          {links.map((link) => (
+            <WorkflowDeliveryArtifactLinkV2
+              finalGate={finalGate}
+              key={`${link.key}-${link.pageId || ""}`}
+              link={link}
+            />
+          ))}
+        </div>
+      ) : null}
+      {status.nextActions.length ? (
+        <div className="workflow-delivery-actions">
+          {status.nextActions.map((action) => <span key={action}>{action}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkflowStalePageEvidenceRecovery({ busy = false, onRetry, pageIds = [] }) {
+  return (
+    <div className="workflow-failed-recovery stale-evidence">
+      <div className="workflow-failed-recovery-head">
+        <div>
+          <b>页面证据需要重跑</b>
+          <span>这些页的 editppt 记录哈希和当前产物不一致，需要重置后重新运行页面任务。</span>
+        </div>
+        <div className="workflow-failed-recovery-actions">
+          <small>{pageIds.length} 页</small>
+          <button type="button" onClick={onRetry} disabled={busy}>
+            {busy ? "正在重置..." : "重置过期页面证据"}
+          </button>
+        </div>
+      </div>
+      <div className="workflow-failed-recovery-list">
+        {pageIds.slice(0, 8).map((pageId) => (
+          <div className="workflow-failed-recovery-row" key={pageId}>
+            <div>
+              <b>{pageId}</b>
+              <span>image-to-editable-ppt 页面任务</span>
+              <small>重置后进入可编辑页面任务队列重跑</small>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowPageEvidenceRecoveryResult({ freshRunBusy = false, onFreshEditableRun, onOpenPageTasks, result = null }) {
+  const retried = Number(result?.retried || 0);
+  const pages = Array.isArray(result?.stalePageCandidates)
+    ? result.stalePageCandidates
+    : Array.isArray(result?.candidates)
+      ? result.candidates
+      : Array.isArray(result?.recovery?.pages)
+        ? result.recovery.pages
+        : [];
+  const preflight = result?.workerBatchPreflight || result?.workerBatchPreview || null;
+  const preflightIssues = [...(preflight?.blockingIssues || []), ...(preflight?.warnings || [])].filter(Boolean);
+  const needsExternalConfirmation = Boolean(result?.recovery?.externalImageConfirmationRequired);
+  const freshEditableRun = result?.freshEditableRun || result?.recovery?.freshEditableRun || null;
+  const needsFreshEditableRun = Boolean(freshEditableRun?.required && !freshEditableRun?.refreshed);
+  return (
+    <div className="workflow-page-evidence-result">
+      <div>
+        <b>{retried ? "过期证据已重置" : "没有发现过期证据"}</b>
+        <span>
+          {retried
+            ? `已完成 ${retried} 页本地证据重置。下一步进入 image-to-editable-ppt 页面任务区，重新派发并记录这些页面。`
+            : "当前没有需要重置的页面证据，可以刷新交付状态或继续检查页面任务。"}
+        </span>
+        {needsExternalConfirmation ? (
+          <small>重置本身不调用外部图片 API；真正重跑页面任务前，仍需要确认 gpt-image-2 等外部图片 API 额度。</small>
+        ) : (
+          <small>本次操作只更新本地任务证据状态，不会消耗外部 API 额度。</small>
+        )}
+        {preflight ? (
+          <div className={`workflow-page-evidence-preflight ${preflight.startReady ? "ready" : preflight.ready ? "warning" : "blocked"}`}>
+            <b>{preflight.startReady ? "页面任务已可启动" : preflight.ready ? "页面任务还需确认" : "页面任务预检未通过"}</b>
+            <span>待跑 {preflight.selectedCount || 0} 页：{(preflight.selectedPageIds || []).slice(0, 8).join("、") || "暂无可跑页面"}</span>
+            {preflightIssues.length ? <small>{preflightIssues.map(uiZh).join("；")}</small> : null}
+          </div>
+        ) : null}
+        {freshEditableRun?.required ? (
+          <div className={`workflow-page-evidence-preflight ${freshEditableRun.refreshed ? "ready" : "warning"}`}>
+            <b>{freshEditableRun.refreshed ? "fresh editable run 已重建" : "需要 fresh editable run"}</b>
+            <span>这些页处于 editppt accepted 状态，不能原地 reset；需要先重建 editppt 运行目录、提示和页面任务。</span>
+            <small>本步骤只做本地准备，不调用外部图片 API；后续重跑页面 worker 前仍会要求额度确认。</small>
+          </div>
+        ) : null}
+      </div>
+      <div className="workflow-page-evidence-result-actions">
+        {pages.length ? <small>{pages.slice(0, 6).join("、")}{pages.length > 6 ? ` 等 ${pages.length} 页` : ""}</small> : null}
+        {needsFreshEditableRun ? (
+          <button className="btn" type="button" onClick={onFreshEditableRun} disabled={freshRunBusy}>
+            {freshRunBusy ? "正在重建..." : "重建 editppt 运行目录"}
+          </button>
+        ) : null}
+        <button className="btn primary" type="button" onClick={onOpenPageTasks}>去页面任务区</button>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowStalePageEvidenceRecoveryV2({ busy = false, onOpenPageTasks, onPreview, onRetry, pageIds = [], previewBusy = false }) {
+  const pagesLabel = pageIds.slice(0, 8).join("、");
+  return (
+    <div className="workflow-failed-recovery stale-evidence">
+      <div className="workflow-failed-recovery-head">
+        <div>
+          <b>页面证据需要重置</b>
+          <span>这些页的 image-to-editable-ppt 记录和当前产物不一致，需要先重置证据，再重新运行页面任务。</span>
+          <small>本操作只重置本地任务证据，不会调用外部图片 API；后续重跑页面任务前仍会要求额度确认。</small>
+        </div>
+        <div className="workflow-failed-recovery-actions">
+          <small>{pageIds.length} 页待处理</small>
+          <button type="button" onClick={onPreview} disabled={busy || previewBusy}>
+            {previewBusy ? "正在预览..." : "预览恢复计划"}
+          </button>
+          <button type="button" onClick={onRetry} disabled={busy}>
+            {busy ? "正在重置..." : "只重置过期证据"}
+          </button>
+          <button type="button" onClick={onOpenPageTasks}>
+            打开页面任务区
+          </button>
+        </div>
+      </div>
+      <div className="workflow-recovery-next-steps">
+        <span>1. 重置证据：免费，只更新本地状态。</span>
+        <span>2. 打开工作流：进入 image-to-editable-ppt 页面任务区。</span>
+        <span>3. 重跑页面：确认外部图片 API 额度后再执行。</span>
+      </div>
+      <div className="workflow-failed-recovery-list">
+        {pageIds.slice(0, 8).map((pageId) => (
+          <div className="workflow-failed-recovery-row" key={pageId}>
+            <div>
+              <b>{pageId}</b>
+              <span>image-to-editable-ppt 页面任务</span>
+              <small>重置后回到页面任务队列，等待重新派发和记录。</small>
+            </div>
+          </div>
+        ))}
+      </div>
+      {pageIds.length > 8 ? <small>还有 {pageIds.length - 8} 页未展开显示。</small> : null}
+      {pagesLabel ? <small>本次候选页：{pagesLabel}</small> : null}
+    </div>
+  );
+}
+
+function WorkflowDeliveryArtifactLinkV2({ finalGate = null, link }) {
+  const isFinal = link.key === "final-pptx";
+  const isLogBundle = link.key === "log-bundle";
+  const finalBlocked = isFinal && (finalGate?.downloadable === false || link.blocked);
+  const linkState = isFinal
+    ? finalGate?.productReady
+      ? "ready"
+      : finalBlocked
+        ? "blocked disabled"
+        : "draft"
+    : isLogBundle
+      ? "diagnostic"
+      : "reference";
+  const label = isFinal ? link.label || finalGate?.label || "最终 PPTX" : link.label;
+  const suffix = isFinal
+    ? finalGate?.productReady
+      ? "产品可交付"
+      : finalBlocked
+        ? "文件被阻断"
+        : "仅草稿"
+    : isLogBundle
+      ? "诊断"
+      : "参考";
+  const meta = `${suffix} · ${isLogBundle && !link.size ? "按需生成" : formatFileSize(link.size)} · ${link.fileName}`;
+  const blockedReason = uiZh(link.blockedReason || finalGate?.reasons?.[0] || "");
+  const nextAction = uiZh(link.nextAction || "先处理交付门禁提示，再下载最终 PPTX。");
+  const className = `workflow-delivery-link ${linkState}`;
+  if (finalBlocked) {
+    return (
+      <span
+        aria-disabled="true"
+        className={className}
+        role="link"
+        title={blockedReason || "交付门禁阻断，修复后才能下载最终 PPTX"}
+      >
+        <b>{label}</b>
+        <span>{meta}</span>
+        {blockedReason ? <small>{blockedReason}</small> : null}
+        <small>{nextAction}</small>
+      </span>
+    );
+  }
+  return (
+    <a className={className} href={link.href} target="_blank" rel="noreferrer">
+      <b>{label}</b>
+      <span>{meta}</span>
+    </a>
+  );
+}
+
+function WorkflowDiagnosticBundleSummary({ link = null, status = {} }) {
+  return (
+    <div className="workflow-diagnostic-bundle">
+      <div>
+        <b>诊断包</b>
+        <span>{link ? "可下载当前任务的排障证据。" : "任务创建后会提供日志包下载。"}</span>
+      </div>
+      <div className="workflow-diagnostic-bundle-facts">
+        <span>任务状态<b>{uiZh(status.title || "待生成")}</b></span>
+        <span>生成方式<b>{link?.size ? "已生成" : "按需生成"}</b></span>
+        <span>文件内容<b>状态 / 事件 / 错误 / 产物 / 门禁</b></span>
+        <span>安全范围<b>不包含密钥</b></span>
+      </div>
+      <small>用于把失败现场交给 Agent 复盘：包含 workflow-state.json、events.json、errors.json、artifacts.json、delivery-status.json 和安全日志。</small>
+    </div>
+  );
+}
+
+function WorkflowDeliveryArtifactLink({ finalGate = null, link }) {
+  const isFinal = link.key === "final-pptx";
+  const isLogBundle = link.key === "log-bundle";
+  const finalBlocked = isFinal && finalGate?.downloadable === false;
+  const linkState = isFinal
+    ? finalGate?.productReady
+      ? "ready"
+      : finalBlocked
+        ? "blocked disabled"
+        : "draft"
+    : isLogBundle
+      ? "diagnostic"
+      : "reference";
+  const label = isFinal ? finalGate?.label || link.label : link.label;
+  const suffix = isFinal
+    ? finalGate?.productReady
+      ? "产品可交付"
+      : finalBlocked
+        ? "文件被阻断"
+        : "仅草稿"
+    : isLogBundle
+      ? "诊断"
+      : "参考";
+  const meta = `${suffix} - ${isLogBundle && !link.size ? "按需生成" : formatFileSize(link.size)} - ${link.fileName}`;
+  const className = `workflow-delivery-link ${linkState}`;
+  if (finalBlocked) {
+    return (
+      <span
+        aria-disabled="true"
+        className={className}
+        role="link"
+        title="交付门禁阻断，修复后才能下载最终 PPTX"
+      >
+        <b>{label}</b>
+        <span>{meta}</span>
+      </span>
+    );
+  }
+  return (
+    <a className={className} href={link.href} target="_blank" rel="noreferrer">
+      <b>{label}</b>
+      <span>{meta}</span>
+    </a>
+  );
+}
+
+function WorkflowManualReviewSummary({ finalArtifact = null, gate = null, manualReview = null, onOpenWorkflow }) {
+  const recorded = gate?.checks?.manualReviewRecorded === true;
+  const hasFinal = gate?.checks?.hasFinal === true || Boolean(finalArtifact?.path);
+  const reviewStatus = manualReview?.status || "";
+  const state = recorded ? "passed" : hasFinal ? "warn" : "missing";
+  return (
+    <div className={`workflow-manual-review-summary ${state}`}>
+      <div className="workflow-manual-review-head">
+        <div>
+          <b>人工复核门禁</b>
+          <span>{recorded ? "已记录与当前最终 PPTX 匹配的人工复核。" : hasFinal ? "最终 PPTX 已生成，但还没有记录人工复核。" : "最终 PPTX 生成后才能记录人工复核。"}</span>
+        </div>
+        <strong>{recorded ? "已复核" : hasFinal ? "待复核" : "未开始"}</strong>
+      </div>
+      <div className="workflow-manual-review-facts">
+        <span>复核状态<b>{reviewStatus === "approved" ? "已批准" : reviewStatus === "reset" ? "已重置" : "未记录"}</b></span>
+        <span>复核页数<b>{manualReview?.reviewedPageCount ?? 0}</b></span>
+        <span>复核人<b>{manualReview?.reviewer || "待记录"}</b></span>
+        <span>绑定文件<b>{manualReview?.finalSize && finalArtifact?.size === manualReview.finalSize ? "匹配" : recorded ? "已匹配" : "待匹配"}</b></span>
+      </div>
+      {manualReview?.approvedAt ? <small>复核时间：{manualReview.approvedAt}</small> : null}
+      {manualReview?.note ? <small>备注：{manualReview.note}</small> : null}
+      {!recorded ? (
+        <button type="button" onClick={onOpenWorkflow} disabled={!hasFinal}>
+          打开页面复核区
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkflowDeliveryValidationSummary({ validation = null, validationBundle = null }) {
+  const exists = validationBundle?.exists === true;
+  const artifact = validationBundle?.artifact || null;
+  const error = validationBundle?.error || "";
+  const issueGroups = buildFinalValidationIssueGroups(validation);
+  const issueCount = issueGroups.reduce((sum, group) => sum + group.count, 0);
+  const pageCountAligned = Boolean(validation && Number(validation.expected_pages || 0) === Number(validation.slides || 0));
+  const state = validation?.passed === true && !issueCount ? "passed" : validation || error ? "warn" : "missing";
+  return (
+    <div className={`workflow-delivery-validation-summary ${state}`}>
+      <div className="workflow-delivery-validation-head">
+        <div>
+          <b>最终 validation</b>
+          <span>{validation ? (validation.passed === true ? "校验通过，可以进入交付门禁复核。" : "校验未通过，需要处理问题后再交付。") : exists ? "validation.json 存在但读取失败。" : "还没有最终 validation.json。"}</span>
+        </div>
+        <strong>{validation?.passed === true ? "通过" : validation ? "未通过" : "缺失"}</strong>
+      </div>
+      <div className="workflow-delivery-validation-facts">
+        <span>页数<b>{validation ? `${validation.slides ?? "?"}/${validation.expected_pages ?? "?"}` : "待生成"}</b></span>
+        <span>页数一致<b>{validation ? (pageCountAligned ? "是" : "否") : "待校验"}</b></span>
+        <span>问题数<b>{validation ? issueCount : "待校验"}</b></span>
+        <span>文件<b>{artifact?.fileName || artifact?.relativePath || "validation.json"}</b></span>
+      </div>
+      {issueGroups.length ? (
+        <div className="workflow-delivery-validation-issues">
+          {issueGroups.map((group) => (
+            <span key={group.id}><b>{group.label}</b>{group.summary}</span>
+          ))}
+        </div>
+      ) : validation ? (
+        <small>未发现缺页、页面校验失败、契约违规、缺失部件或警告。</small>
+      ) : (
+        <small>{error || "完成 editable finalize 后，这里会直接展示 validation.json 摘要。"}</small>
+      )}
+    </div>
+  );
+}
+
+function buildFinalValidationIssueGroups(validation = null) {
+  if (!validation) return [];
+  const groups = [
+    ["page_manifests_missing", "页面清单缺失"],
+    ["page_validation_missing", "页面校验缺失"],
+    ["failed_page_validations", "页面校验失败"],
+    ["page_contract_violations", "页面契约违规"],
+    ["notes_hash_mismatches", "备注哈希不一致"],
+    ["missing_parts", "缺失部件"],
+    ["warnings", "警告"]
+  ];
+  return groups
+    .map(([id, label]) => {
+      const items = Array.isArray(validation[id]) ? validation[id] : [];
+      return {
+        id,
+        label,
+        count: items.length,
+        summary: items.length ? `${items.length} 项：${items.slice(0, 2).map((item) => typeof item === "string" ? item : JSON.stringify(item)).join(" / ")}` : "0 项"
+      };
+    })
+    .filter((group) => group.count > 0);
+}
+
+function WorkflowFinalGate({ gate }) {
+  const reasons = Array.isArray(gate?.reasons) ? gate.reasons : [];
+  const warnings = Array.isArray(gate?.warnings) ? gate.warnings : [];
+  const checks = gate?.checks || {};
+  const gateCopy = finalGateCopy(gate);
+  const checkItems = [
+    ["validationPassed", "最终校验", checks.validationPassed],
+    ["editabilityPassed", "对象可编辑", checks.editabilityPassed],
+    ["noFullSlideRaster", "无整页栅格", checks.noFullSlideRaster],
+    ["noExperimentalEvidence", "正式链路", checks.noExperimentalEvidence],
+    ["codexPptOutlineRecorded", "codex-ppt 大纲", checks.codexPptOutlineRecorded],
+    ["codexPptStyleRecorded", "codex-ppt 风格", checks.codexPptStyleRecorded],
+    ["codexPptBackendDecisionRecorded", "生图后端证据", checks.codexPptBackendDecisionRecorded],
+    ["codexPptApprovalsComplete", "确认关卡", checks.codexPptApprovalsComplete],
+    ["codexPptSampleRecorded", "视觉样张", checks.codexPptSampleRecorded],
+    ["codexPptBackendFixed", "后端一致", checks.codexPptBackendFixed],
+    ["codexPptSlideRunComplete", "图片页任务", checks.codexPptSlideRunComplete],
+    ["pageEvidenceComplete", "页面重建证据", checks.pageEvidenceComplete],
+    ["finalEvidenceComplete", "最终生成证据", checks.finalEvidenceComplete],
+    ["manualReviewRecorded", "人工复核", checks.manualReviewRecorded]
+  ];
+  return (
+    <div className={`workflow-final-gate ${gate?.level || "pending"}`}>
+      <div>
+        <b>{gateCopy.title}</b>
+        <span>{gateCopy.summary}</span>
+      </div>
+      <div className="workflow-final-gate-checks">
+        {checkItems.map(([id, label, passed]) => (
+          <span className={passed ? "pass" : "warn"} key={id}>{label}</span>
+        ))}
+      </div>
+      {reasons.length ? (
+        <div className="workflow-final-gate-list blocked">
+          {reasons.map((reason) => <span key={reason}>{uiZh(reason)}</span>)}
+        </div>
+      ) : null}
+      {warnings.length ? (
+        <div className="workflow-final-gate-list">
+          {warnings.map((warning) => <span key={warning}>{uiZh(warning)}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function finalGateCopy(gate = {}) {
+  if (gate?.level === "ready") {
+    return {
+      title: "最终交付门禁已通过",
+      summary: "最终可编辑 PPTX 已通过结构、可编辑性和工作流证据检查，可以作为产品交付。"
+    };
+  }
+  if (gate?.level === "draft") {
+    return {
+      title: "仅可作为可编辑草稿",
+      summary: "最终 PPTX 已存在，但仍有警告项；复核或补齐证据前，不应声明为产品级交付。"
+    };
+  }
+  if (gate?.level === "blocked") {
+    return {
+      title: "最终交付被阻断",
+      summary: "存在必须修复的失败任务、校验失败或证据缺口，当前不能下载为正式最终 PPT。"
+    };
+  }
+  return {
+    title: "最终交付门禁待处理",
+    summary: "工作流尚未生成最终可编辑 PPTX；请继续页面重建、记录和最终组装。"
+  };
+}
+
+function WorkflowFinalQualityChecklist({ coverage = null, finalEvidence = null, gate, pageEvidence = null, validation = null }) {
+  const checks = buildFinalQualityChecks({ coverage, finalEvidence, gate, pageEvidence, validation });
+  const passed = checks.filter((check) => check.pass).length;
+  return (
+    <div className="workflow-final-quality-checklist">
+      <div className="workflow-final-quality-head">
+        <div>
+          <b>最终 QA 清单</b>
+          <span>把可编辑 PPTX 视为产品可交付前，必须通过这些硬性检查。</span>
+        </div>
+        <small>{passed}/{checks.length} 通过</small>
+      </div>
+      <div className="workflow-final-quality-grid">
+        {checks.map((check) => (
+          <div className={`workflow-final-quality-item ${check.pass ? "pass" : "warn"}`} key={check.id}>
+            <b>{check.label}</b>
+            <span>{check.detail}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function buildFinalQualityChecks({ coverage = null, finalEvidence = null, gate = {}, pageEvidence = null, validation = null }) {
+  const gateChecks = gate?.checks || {};
+  const pageSummary = pageEvidence?.summary || {};
+  const finalIssues = Array.isArray(finalEvidence?.issues) ? finalEvidence.issues : [];
+  const sourcePages = Number(coverage?.sourcePages || 0);
+  const finalPages = Number(coverage?.finalPages || 0);
+  const validationExpected = Number(coverage?.validationExpectedPages || validation?.expected_pages || 0);
+  const validationSlides = Number(coverage?.validationSlides || validation?.slides || 0);
+  const pageCountPass = Boolean(finalPages && (!sourcePages || finalPages === sourcePages) && (!validationExpected || finalPages === validationExpected) && (!validationSlides || finalPages === validationSlides));
+  const codexPass = Boolean(
+    gateChecks.codexPptOutlineRecorded
+    && gateChecks.codexPptStyleRecorded
+    && gateChecks.codexPptBackendDecisionRecorded
+    && gateChecks.codexPptApprovalsComplete
+    && gateChecks.codexPptSampleRecorded
+    && gateChecks.codexPptBackendFixed
+    && gateChecks.codexPptSlideRunComplete
+  );
+  return [
+    {
+      id: "page-count-parity",
+      label: "页数一致性",
+      pass: pageCountPass,
+      detail: `源文件 ${sourcePages || "?"} / 最终 ${finalPages || "?"} / 校验 ${validationSlides || validationExpected || "?"}`
+    },
+    {
+      id: "page-worker-evidence",
+      label: "页面任务证据",
+      pass: Boolean(gateChecks.pageEvidenceComplete),
+      detail: `${pageSummary.completePages || 0}/${pageSummary.total || 0} 套页面产物完整`
+    },
+    {
+      id: "finalize-evidence",
+      label: "最终生成证据",
+      pass: Boolean(gateChecks.finalEvidenceComplete),
+      detail: finalIssues.length ? `发现 ${finalIssues.length} 个问题` : "运行摘要、校验、输出副本和哈希证据完整"
+    },
+    {
+      id: "validation",
+      label: "最终校验",
+      pass: Boolean(gateChecks.validationPassed),
+      detail: validation ? `${validation.passed === true ? "通过" : "未通过"} / 期望 ${validation.expected_pages ?? "?"} / 幻灯片 ${validation.slides ?? "?"}` : "校验 JSON 未加载"
+    },
+    {
+      id: "editability",
+      label: "可编辑性风险",
+      pass: Boolean(gateChecks.editabilityPassed && gateChecks.noFullSlideRaster),
+      detail: gateChecks.noFullSlideRaster ? "未发现整页栅格风险" : "存在整页栅格风险"
+    },
+    {
+      id: "codex-ppt-evidence",
+      label: "codex-ppt 证据",
+      pass: codexPass,
+      detail: codexPass ? "审批、后端、样张和图片页运行证据完整" : "缺少 codex-ppt 审批或图片页运行证据"
+    },
+    {
+      id: "manual-review",
+      label: "人工复核",
+      pass: Boolean(gateChecks.manualReviewRecorded),
+      detail: gateChecks.manualReviewRecorded ? "操作员复核已记录" : "仍等待操作员复核"
+    }
+  ];
+}
+
+function stalePageEvidenceIds(pageEvidence = null) {
+  const pages = Array.isArray(pageEvidence?.pages) ? pageEvidence.pages : [];
+  return pages
+    .filter((page) => Array.isArray(page.issues) && page.issues.some((issue) => /^hash-mismatch-/.test(String(issue || ""))))
+    .map((page) => page.pageId)
+    .filter(Boolean);
+}
+
+function WorkflowCompliancePanel({ artifactBundle = null, bundle, job, onRefresh }) {
+  const checks = Array.isArray(bundle?.checks) ? bundle.checks : [];
+  const [approvalBusy, setApprovalBusy] = useState("");
+  const [approvalError, setApprovalError] = useState("");
+  const [approvalPreflights, setApprovalPreflights] = useState({});
+  const approvalGates = Array.isArray(bundle?.codexPpt?.approvals?.gates) ? bundle.codexPpt.approvals.gates : [];
+  const approvalMap = new Map(approvalGates.map((gate) => [gate.id, gate]));
+  const runbook = bundle?.runbook || null;
+  const sampleArtifact = job?.artifacts?.visualSample || bundle?.codexPpt?.sample?.artifact || null;
+  const sampleLink = (artifactBundle?.links || []).find((link) => link.key === "visual-sample") || null;
+  const sampleHref = sampleLink?.href || (job?.id && sampleArtifact?.path ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-sample` : "");
+  const sampleIsImage = /\.(png|jpe?g|webp|gif|svg)$/i.test(sampleLink?.fileName || sampleArtifact?.path || "");
+  const backendRefresh = getBackendRuntimeRefreshState({ bundle, job });
+  const approvalGateStates = CODEX_PPT_APPROVAL_GATES.map((gate) => {
+    const passed = Boolean(approvalMap.get(gate.id)?.passed);
+    const baseUi = getCodexApprovalGateUiState(gate.id, { approvalMap, bundle, job, passed });
+    const preflight = approvalPreflights[gate.id] || null;
+    return {
+      ...gate,
+      passed,
+      preflight,
+      ui: mergeApprovalPreflightUi(baseUi, preflight, passed)
+    };
+  });
+  const readyApprovalGates = approvalGateStates.filter((gate) => !gate.passed && gate.ui.canApprove);
+  const readyApprovalGateLabels = formatReadyApprovalGateLabels(readyApprovalGates);
+  const sampleGateState = approvalGateStates.find((gate) => gate.id === "sample") || null;
+  const sampleLooksNonProduct = looksLikeNonProductVisualSample(sampleArtifact);
+
+  useEffect(() => {
+    if (!job?.id) {
+      setApprovalPreflights({});
+      return undefined;
+    }
+    let active = true;
+    async function loadApprovalPreflights() {
+      const entries = await Promise.all(CODEX_PPT_APPROVAL_GATES.map(async (gate) => {
+        try {
+          return [gate.id, await api.preflightCodexPptGate(job.id, gate.id)];
+        } catch (error) {
+          return [gate.id, {
+            ok: false,
+            gate: gate.id,
+            ready: false,
+            error: getErrorMessage(error),
+            blockers: [getErrorMessage(error)]
+          }];
+        }
+      }));
+      if (active) setApprovalPreflights(Object.fromEntries(entries));
+    }
+    loadApprovalPreflights();
+    return () => {
+      active = false;
+    };
+  }, [job?.id, bundle?.updatedAt, sampleArtifact?.path, sampleArtifact?.dryRun, backendRefresh.needsRefresh]);
+
+  async function runApproval(gate, action) {
+    if (!job?.id || !gate) return;
+    setApprovalBusy(`${gate}:${action}`);
+    setApprovalError("");
+    try {
+      if (action === "reset") await api.resetCodexPptGate(job.id, gate);
+      else {
+        if (gate === "outline" && !job.artifacts?.codexPptOutline?.path) {
+          await api.recordCodexPptOutline(job.id, {
+            source: "frontend-manual-outline-approval",
+            recordedBy: "frontend-skill-first",
+            notes: "Auto-recorded before outline approval from current workflow source."
+          });
+        }
+        if (gate === "style" && !job.artifacts?.codexPptStyle?.path) {
+          await api.recordCodexPptStyle(job.id, {
+            source: "frontend-manual-style-approval",
+            recordedBy: "frontend-skill-first",
+            notes: "Auto-recorded before style approval from current workflow source."
+          });
+        }
+        if (gate === "backend" && !job.artifacts?.codexPptBackendDecision?.path) {
+          await api.recordCodexPptBackend(job.id, {
+            source: "frontend-manual-backend-approval",
+            recordedBy: "frontend-skill-first",
+            notes: "Auto-recorded before backend approval from current provider configuration."
+          });
+        }
+        const preflight = await api.preflightCodexPptGate(job.id, gate, { note: `frontend-${gate}-approval` });
+        if (!preflight.ready && !preflight.passed) {
+          throw new Error(preflight.error || `codex-ppt ${gate} approval is not ready`);
+        }
+        await api.approveCodexPptGate(job.id, gate, { note: `frontend-${gate}-approval` });
+      }
+      await onRefresh?.();
+    } catch (error) {
+      setApprovalError(getErrorMessage(error));
+    } finally {
+      setApprovalBusy("");
+    }
+  }
+
+  async function refreshBackendRuntimeApproval() {
+    if (!job?.id || !backendRefresh.needsRefresh) return;
+    setApprovalBusy("backend:refresh-runtime");
+    setApprovalError("");
+    try {
+      await api.refreshCodexPptBackendApproval(job.id, {
+        source: "frontend-runtime-backend-refresh",
+        recordedBy: "frontend-skill-first",
+        policy: "使用当前已配置的外部图片运行环境生成 codex-ppt 产品级视觉页。",
+        fallbackStatus: "产品级视觉生成不接受回归验证、透传、本地绘制、页面截图或手工叠加作为替代证据。",
+        notes: `已从 ${backendRefresh.approvedLabel || "旧后端证据"} 刷新到 ${backendRefresh.runtimeLabel || "当前图片运行环境"}。`,
+        note: "frontend-runtime-backend-refresh",
+        approvedBy: "frontend-skill-first",
+        reason: "frontend runtime backend approval refresh"
+      });
+      await onRefresh?.();
+    } catch (error) {
+      setApprovalError(getErrorMessage(error));
+    } finally {
+      setApprovalBusy("");
+    }
+  }
+
+  async function approveReadyGates() {
+    if (!job?.id || !readyApprovalGates.length) return;
+    setApprovalBusy("ready:approve");
+    setApprovalError("");
+    try {
+      for (const gate of readyApprovalGates) {
+        const preflight = await api.preflightCodexPptGate(job.id, gate.id, { note: `frontend-ready-${gate.id}-approval` });
+        if (!preflight.ready && !preflight.passed) {
+          throw new Error(preflight.error || `codex-ppt ${gate.id} approval is not ready`);
+        }
+        await api.approveCodexPptGate(job.id, gate.id, { note: `frontend-ready-${gate.id}-approval` });
+      }
+      await onRefresh?.();
+    } catch (error) {
+      setApprovalError(getErrorMessage(error));
+    } finally {
+      setApprovalBusy("");
+    }
+  }
+
+  if (!bundle && !checks.length) {
+    return (
+      <div className="workflow-compliance-panel pending" id="workflow-compliance-panel">
+        <div className="workflow-compliance-head">
+          <div>
+            <b>Skill 路径等待检查</b>
+            <span>等待工作流诊断结果。</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className={`workflow-compliance-panel ${bundle.level || "pending"}`} id="workflow-compliance-panel">
+      <div className="workflow-compliance-head">
+        <div>
+          <b>{uiZh(bundle.title || "Skill 路径状态")}</b>
+          <span>{uiZh(bundle.summary || "正在检查 codex-ppt 和 image-to-editable-ppt 对齐情况。")}</span>
+        </div>
+        <small>{bundle.updatedAt ? new Date(bundle.updatedAt).toLocaleTimeString() : ""}</small>
+      </div>
+      <div className="workflow-compliance-grid">
+        {checks.map((check) => (
+          <div className={`workflow-compliance-check ${check.status || "pending"}`} key={check.id}>
+            <span>{uiZh(check.status || "pending")}</span>
+            <b>{uiZh(check.label)}</b>
+            <small>{uiZh(check.detail)}</small>
+          </div>
+        ))}
+      </div>
+      <div className="workflow-compliance-counts">
+        <span><b>{bundle.counts?.approvalGates ?? 0}/{bundle.counts?.approvalGatesTotal ?? 0}</b> 关卡</span>
+        <span><b>{bundle.counts?.visualPages ?? 0}</b> 视觉页</span>
+        <span><b>{bundle.counts?.textHintPages ?? 0}/{bundle.counts?.textHintPagesTotal ?? 0}</b> 文字提示</span>
+        <span><b>{bundle.counts?.promptPages ?? 0}</b> 页面提示</span>
+        <span><b>{bundle.counts?.recordedPages ?? 0}</b> 已记录</span>
+        <span><b>{bundle.counts?.pageEvidencePages ?? 0}/{bundle.counts?.pageEvidenceTotal ?? 0}</b> 页面证据</span>
+        <span><b>{bundle.counts?.finalEvidenceComplete ? "通过" : "检查"}</b> 最终证据</span>
+        <span><b>{bundle.editppt?.doctor?.ok ? "通过" : "检查"}</b> doctor</span>
+        <span><b>{uiZh(bundle.editppt?.nextStage || "unknown")}</b> editppt 下一步</span>
+      </div>
+      {runbook ? <WorkflowSkillRunbook runbook={runbook} /> : null}
+      <div className="workflow-approval-toolbar">
+        <div>
+          <b>codex-ppt 确认关卡</b>
+          <span>{readyApprovalGates.length ? `可无费用确认：${readyApprovalGateLabels}` : "还没有可确认的关卡。"}</span>
+          <small>确认这些关卡只记录证据，不会生成图片；样张和全量图片前会另行要求外部图片 API 授权。</small>
+        </div>
+        <button type="button" onClick={approveReadyGates} disabled={!job?.id || !readyApprovalGates.length || approvalBusy === "ready:approve"}>
+          {approvalBusy === "ready:approve" ? "正在确认..." : "确认所有就绪关卡（不生成图片）"}
+        </button>
+      </div>
+      {backendRefresh.needsRefresh ? (
+        <div className="workflow-backend-refresh">
+          <div>
+            <b>需要刷新后端运行环境确认</b>
+            <span>{uiZh(backendRefresh.reason)}</span>
+            <small>{backendRefresh.approvedLabel || "缺少已确认后端"} -&gt; {backendRefresh.runtimeLabel || "缺少当前运行环境"}</small>
+          </div>
+          <button type="button" onClick={refreshBackendRuntimeApproval} disabled={!job?.id || approvalBusy === "backend:refresh-runtime"}>
+            {approvalBusy === "backend:refresh-runtime" ? "正在刷新..." : "刷新后端确认"}
+          </button>
+        </div>
+      ) : null}
+      {sampleArtifact?.path ? (
+        <div className={`workflow-sample-evidence ${sampleLooksNonProduct ? "warning" : ""}`}>
+          <div>
+            <b>视觉样张证据</b>
+            <span>{sampleLooksNonProduct ? "这个样张像验证链路或透传证据。请先重新生成产品级样张，再审批。" : "审批样张前请先检查这张图。全量图片生成只能在样张审批后进行。"}</span>
+          </div>
+          {sampleHref ? <a href={sampleHref} target="_blank" rel="noreferrer">打开样张</a> : null}
+          {sampleHref && sampleIsImage ? <img src={sampleHref} alt="codex-ppt 视觉样张" /> : null}
+        </div>
+      ) : null}
+      <SampleApprovalGuard
+        gate={sampleGateState}
+        sampleArtifact={sampleArtifact}
+        sampleHref={sampleHref}
+        sampleLooksNonProduct={sampleLooksNonProduct}
+      />
+      <div className="workflow-approval-gates">
+        {approvalGateStates.map((gate) => {
+          const gateUi = gate.ui;
+          const passed = gate.passed;
+          const blockers = Array.isArray(gateUi.blockers) && gateUi.blockers.length
+            ? gateUi.blockers
+            : !passed && !gateUi.canApprove
+              ? [gateUi.reason]
+              : [];
+          return (
+            <div className={`workflow-approval-gate ${gateUi.status}`} key={gate.id}>
+              <span>{gateUi.label}</span>
+              <b>{gate.label}</b>
+              <small>{uiZh(gateUi.reason)}</small>
+              {gate.preflight && !passed ? (
+                <small className="workflow-approval-preflight">
+                  后端预检：{gate.preflight.ready ? "就绪" : uiZh(gate.preflight.code || "blocked")}
+                </small>
+              ) : null}
+              {blockers.length ? (
+                <div className="workflow-approval-blockers">
+                  {blockers.slice(0, 3).map((blocker) => <em key={blocker}>{uiZh(blocker)}</em>)}
+                </div>
+              ) : null}
+              <div className="workflow-approval-gate-actions">
+                <button
+                  type="button"
+                  title={!gateUi.canApprove && !passed ? gateUi.reason : ""}
+                  onClick={() => runApproval(gate.id, "approve")}
+                  disabled={!job?.id || approvalBusy === `${gate.id}:approve` || passed || !gateUi.canApprove}
+                >批准</button>
+                <button type="button" onClick={() => runApproval(gate.id, "reset")} disabled={!job?.id || approvalBusy === `${gate.id}:reset` || !passed}>閲嶇疆</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {approvalError ? <p className="workflow-error">{approvalError}</p> : null}
+      {bundle.warnings?.length ? (
+        <div className="workflow-compliance-warnings">
+          {bundle.warnings.map((warning) => <span key={warning}>{uiZh(warning)}</span>)}
+        </div>
+      ) : null}
+      {bundle.nextActions?.length ? (
+        <div className="workflow-compliance-actions">
+          {bundle.nextActions.map((action) => <span key={action}>{uiZh(action)}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkflowSkillRunbook({ runbook }) {
+  const steps = Array.isArray(runbook?.steps) ? runbook.steps : [];
+  return (
+    <div className={`workflow-runbook ${runbook?.level || "working"}`}>
+      <div className="workflow-runbook-head">
+        <div>
+          <b>{uiZh(runbook?.currentTitle || "Skill 运行手册")}</b>
+          <span>{uiZh(runbook?.summary || "等待下一步双技能工作流操作。")}</span>
+        </div>
+        <small>{uiZh(runbook?.level || "working")}</small>
+      </div>
+      <div className="workflow-runbook-steps">
+        {steps.map((step) => (
+          <div className={`workflow-runbook-step ${step.status || "pending"}`} key={step.id}>
+            <span>{uiZh(step.status || "pending")}</span>
+            <b>{uiZh(step.title)}</b>
+            <small>{uiZh(step.action || step.summary)}</small>
+          </div>
+        ))}
+      </div>
+      {runbook?.allowedActions?.length ? (
+        <div className="workflow-runbook-actions">
+          {runbook.allowedActions.map((action) => <span key={action}>{uiZh(action)}</span>)}
+        </div>
+      ) : null}
+      {runbook?.blockers?.length ? (
+        <div className="workflow-runbook-blockers">
+          {runbook.blockers.map((blocker) => <span key={blocker}>{uiZh(blocker)}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function buildWorkflowReviewRows(links = []) {
+  const rows = new Map();
+  for (const link of links) {
+    if (!link?.pageId || !["rendered-page", "visual-page", "rebuild-preview", "page-validation", "page-result", "page-pptx"].includes(link.key)) continue;
+    const row = rows.get(link.pageId) || { pageId: link.pageId, source: null, visual: null, rebuild: null, validation: null, result: null, pptx: null };
+    if (link.key === "rendered-page") row.source = link;
+    if (link.key === "visual-page") row.visual = link;
+    if (link.key === "rebuild-preview") row.rebuild = link;
+    if (link.key === "page-validation") row.validation = link;
+    if (link.key === "page-result") row.result = link;
+    if (link.key === "page-pptx") row.pptx = link;
+    rows.set(link.pageId, row);
+  }
+  return [...rows.values()].sort((a, b) => a.pageId.localeCompare(b.pageId));
+}
+
+function countWorkflowPageValidationIssues(data = {}) {
+  return [
+    data.missing_required_text,
+    data.missing_parts,
+    data.missing_relationship_targets,
+    data.missing_asset_provenance,
+    data.missing_manifest_images,
+    data.missing_provenance_sources,
+    data.invalid_asset_provenance,
+    data.media_hash_mismatches,
+    data.page_contract_violations,
+    data.warnings
+  ].reduce((total, items) => total + (Array.isArray(items) ? items.length : 0), data.media_manifest_mismatch ? 1 : 0);
+}
+
+function summarizeWorkflowPageValidationIssues(data = {}) {
+  const parts = [
+    ["missing text", data.missing_required_text],
+    ["missing parts", data.missing_parts],
+    ["missing relationships", data.missing_relationship_targets],
+    ["missing asset provenance", data.missing_asset_provenance],
+    ["invalid asset provenance", data.invalid_asset_provenance],
+    ["hash mismatch", data.media_hash_mismatches],
+    ["page contract", data.page_contract_violations],
+    ["warnings", data.warnings]
+  ].filter(([, items]) => Array.isArray(items) && items.length);
+  if (data.media_manifest_mismatch) parts.push(["media manifest mismatch", [true]]);
+  return parts.map(([label, items]) => `${label} ${items.length}`).join(" / ");
+}
+
+function formatFileSize(size = 0) {
+  const value = Number(size || 0);
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+}
+
+function WorkflowArtifact({ label, value }) {
+  return (
+    <div className="workflow-artifact">
+      <span>{label}</span>
+      <b title={String(value || "")}>{value || "pending"}</b>
     </div>
   );
 }
@@ -1411,15 +7479,15 @@ function WorkspaceLeftPanel({ contextMenu, dirty, draggedSlide, dropTargetSlide,
                 }}
               >
                 <button className="rail-select" type="button" onClick={() => setSelectedSlide(index)}>
-                  {selectedSlide === index && dirty ? <SlideVisual slide={liveSlide} job={job} slideIndex={index} compact /> : job.previewImages?.[index] ? <img src={job.previewImages[index]} alt={`第 ${index + 1} 页`} /> : <SlideVisual slide={slide} job={job} slideIndex={index} compact />}
+                  {selectedSlide === index && dirty ? <SlideVisual slide={liveSlide} job={job} slideIndex={index} compact /> : job.previewImages?.[index] ? <img src={job.previewImages[index]} alt={"page " + (index + 1)} /> : <SlideVisual slide={slide} job={job} slideIndex={index} compact />}
                   <span>{String(index + 1).padStart(2, "0")}</span>
                   <b>{selectedSlide === index && dirty ? liveSlide.title : slide.title}</b>
                 </button>
                 <div className="rail-actions">
-                  <button type="button" title="上移" onClick={() => onSlideAction?.("move-up", { slideIndex: index })} disabled={!job || dirty || index === 0}>↑</button>
-                  <button type="button" title="下移" onClick={() => onSlideAction?.("move-down", { slideIndex: index })} disabled={!job || dirty || index >= slides.length - 1}>↓</button>
-                  <button type="button" title="复制" onClick={() => onSlideAction?.("duplicate", { slideIndex: index })} disabled={!job || dirty}>⧉</button>
-                  <button type="button" title="删除" className="danger" onClick={() => onSlideAction?.("delete", { slideIndex: index })} disabled={!job || dirty || slides.length <= 1}>×</button>
+                  <button type="button" title="上移" onClick={() => onSlideAction?.("move-up", { slideIndex: index })} disabled={!job || dirty || index === 0}>上移</button>
+                  <button type="button" title="下移" onClick={() => onSlideAction?.("move-down", { slideIndex: index })} disabled={!job || dirty || index >= slides.length - 1}>下移</button>
+                  <button type="button" title="复制" onClick={() => onSlideAction?.("duplicate", { slideIndex: index })} disabled={!job || dirty}>复制</button>
+                  <button type="button" title="删除" className="danger" onClick={() => onSlideAction?.("delete", { slideIndex: index })} disabled={!job || dirty || slides.length <= 1}>删除</button>
                 </div>
               </div>
             ))}
@@ -1448,8 +7516,8 @@ function MaterialNavigator({ files = [], outlinePlan = null }) {
   return (
     <div className="left-summary">
       <b>资料导航</b>
-      <span>{files.length ? `已上传 ${files.length} 个文件` : "等待上传资料或输入需求"}</span>
-      <span>{outlinePlan?.layoutSequence?.length ? `大纲 ${outlinePlan.layoutSequence.length} 页` : "可先生成确认大纲"}</span>
+      <span>{files.length ? `已上传 ${files.length} 个文件` : "等待上传或输入简述"}</span>
+      <span>{outlinePlan?.layoutSequence?.length ? `大纲 ${outlinePlan.layoutSequence.length} 页` : "请先生成或确认大纲"}</span>
       {files.slice(0, 8).map((file) => (
         <span className="left-file" key={file.id}>{file.originalName}</span>
       ))}
@@ -1463,8 +7531,8 @@ function OutlineNavigator({ outlinePlan = null }) {
     <div className="left-summary outline-summary">
       <b>大纲草稿</b>
       {steps.length ? steps.slice(0, 12).map((step, index) => (
-        <span key={`${step.layout}-${index}`}>{String(index + 1).padStart(2, "0")} 路 {step.title || step.layout}</span>
-      )) : <span>还没有大纲，先在中间生成可确认大纲。</span>}
+        <span key={`${step.layout}-${index}`}>{String(index + 1).padStart(2, "0")} / {step.title || step.layout}</span>
+      )) : <span>还没有大纲。请先在中间面板生成可确认的大纲。</span>}
     </div>
   );
 }
@@ -1491,51 +7559,16 @@ function EditReadinessGate({ readiness, localImage, onApplyImageSupplement, onAp
       {visibleIssues?.length ? <ul>{visibleIssues.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {hasActionButtons ? (
         <div className="button-row tight">
-          {actions.has("apply-image-supplement") ? <button className={blocked ? "btn primary" : "btn ghost"} type="button" onClick={onApplyImageSupplement}>{blocked ? "先复用/绑定已有素材" : "可选绑定已有素材"}</button> : null}
-          {actions.has("apply-local-image-supplement") ? <button className="btn primary" type="button" onClick={onApplyLocalImageSupplement} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "本地补图并抠图" : "等待本地生图在线"}</button> : null}
-          {actions.has("rescan-local-image-qa") ? <button className="btn ghost" type="button" onClick={onRescanLocalImageQa}>重扫图片 QA</button> : null}
+          {actions.has("apply-image-supplement") ? <button className={blocked ? "btn primary" : "btn ghost"} type="button" onClick={onApplyImageSupplement}>{blocked ? "先复用已有绑定素材" : "可选：绑定已有素材"}</button> : null}
+          {actions.has("apply-local-image-supplement") ? <button className="btn primary" type="button" onClick={onApplyLocalImageSupplement} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "生成本地补图" : "等待本地生图服务"}</button> : null}
+          {actions.has("rescan-local-image-qa") ? <button className="btn ghost" type="button" onClick={onRescanLocalImageQa}>重新扫描图片 QA</button> : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function TemplatePreflightSelector({ style, themes = [], templatePacks = [], styleReferences = [], onChange }) {
-  const selectedTheme = themes.find((theme) => theme.name === style) || themes[0] || {};
-  const selectedPack = findTemplatePack(templatePacks, selectedTheme) || templatePacks.find((pack) => pack.themeName === style);
-  const selectedRefs = styleReferences;
-  const coreLayouts = (selectedPack?.coreLayouts || []).map((layout) => LAYOUT_LABELS[layout] || layout);
-  return (
-    <div className="template-preflight">
-      <div>
-        <b>{"\u8bbe\u8ba1\u65b9\u5411\u63a7\u5236\u53f0"}</b>
-        <span>{"\u8fd9\u91cc\u9009\u7684\u662f\u6a21\u677f\u548c\u7248\u5f0f\u65b9\u5411\uff1b\u98ce\u683c\u53c2\u8003\u5e93\u662f\u72ec\u7acb\u8c03\u6027\u8f93\u5165\uff0c\u4f1a\u6574\u4f53\u5f71\u54cd\u56fe\u7247\u3001\u7559\u767d\u3001\u8272\u5f69\u548c\u6392\u7248\u8282\u594f\u3002"}</span>
-      </div>
-      <div className="template-preflight-controls">
-        <label>
-          <span>{"\u6a21\u677f / \u7248\u5f0f\u65b9\u5411"}</span>
-          <select value={style || selectedTheme.name || ""} onChange={(event) => onChange?.(event.target.value)} title={"\u9009\u62e9\u6574\u5957 PPT \u7684\u7ed3\u6784\u548c\u7248\u5f0f\u503e\u5411"}>
-            {themes.map((theme) => {
-              const pack = findTemplatePack(templatePacks, theme);
-              return <option key={theme.name} value={theme.name}>{formatDesignDirectionName(pack?.name || theme.name)}</option>;
-            })}
-          </select>
-        </label>
-        <div className={selectedRefs.length ? "style-library-call active" : "style-library-call"}>
-          <span>{"\u98ce\u683c\u53c2\u8003\u5e93"}</span>
-          <b>{selectedRefs.length ? selectedRefs.length + " \u5f20\u53c2\u8003\u56fe\u5df2\u63a5\u5165" : "\u6682\u65e0\u53c2\u8003\u56fe\uff0c\u4f7f\u7528\u5185\u7f6e\u8bbe\u8ba1\u89c4\u5219"}</b>
-        </div>
-      </div>
-      <div className="template-preflight-meta">
-        <span>{"\u9002\u5408\uff1a"}{selectedPack?.scenario || selectedTheme.bestFor || "\u6309\u5f53\u524d\u8d44\u6599\u81ea\u52a8\u9002\u914d"}</span>
-        <span>{"\u7248\u5f0f\u7b56\u7565\uff1a"}{coreLayouts.join(" / ") || "\u81ea\u52a8\u7248\u5f0f"}</span>
-        <span>{selectedRefs.length ? "\u53c2\u8003\u56fe\u53ea\u5f71\u54cd\u8c03\u6027\u548c\u7248\u5f0f\uff0c\u4e0d\u4f5c\u4e3a\u4e8b\u5b9e\u56fe\u7247\u76f4\u63a5\u590d\u5236" : "\u53ef\u5728\u8bbe\u7f6e\u91cc\u4e0a\u4f20\u4e00\u7ec4\u98ce\u683c\u53c2\u8003\u56fe"}</span>
-      </div>
-    </div>
-  );
-}
-
-function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTemplate, draft, dirty, editBlocked = false, focusPreview, job, liveSlide, selectedSlide, setFocusPreview, setSelectedSlide, slides, updateDraft, onSaveText, onRetryPreview, previewBusy, templateBusy, templateHit, themes = [], templatePacks = [], onRerenderTemplate }) {
+function PreviewCanvas({ currentImage, currentSlide, draft, dirty, editBlocked = false, focusPreview, job, liveSlide, selectedSlide, setFocusPreview, setSelectedSlide, slides, updateDraft, onSaveText, onRetryPreview, previewBusy }) {
   const editableSlide = dirty ? liveSlide : currentSlide;
   const [layerMode, setLayerMode] = useState("preview");
   const textLayerActive = layerMode === "text";
@@ -1547,16 +7580,7 @@ function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTempla
       <div className="stage-toolbar">
         <div>
           <b>{dirty ? liveSlide?.title : currentSlide?.title || "等待生成"}</b>
-          <span>第 {selectedSlide + 1} 页 · {LAYOUT_LABELS[currentSlide?.layout] || currentSlide?.layout || "自动版式"}{(dirty ? liveSlide?.storyRole : currentSlide?.storyRole) ? ` · ${dirty ? liveSlide?.storyRole : currentSlide?.storyRole}` : ""}</span>
-        </div>
-        <div className="template-switcher">
-          <span>切换设计方向并重渲染 · {formatDesignDirectionName(currentTemplate?.name || "当前设计方向")} · {templateHit.label}</span>
-          <select value={currentStyle} onChange={(event) => onRerenderTemplate?.(event.target.value)} disabled={!job || dirty || templateBusy} title="切换设计方向后，会重渲染整套 PPT">
-            {themes.map((theme) => {
-              const pack = findTemplatePack(templatePacks, theme);
-              return <option key={theme.name} value={theme.name}>{formatDesignDirectionName(pack?.name || theme.name)}</option>;
-            })}
-          </select>
+          <span>第 {selectedSlide + 1} 页 / {LAYOUT_LABELS[currentSlide?.layout] || currentSlide?.layout || "自动版式"}{(dirty ? liveSlide?.storyRole : currentSlide?.storyRole) ? ` / ${dirty ? liveSlide?.storyRole : currentSlide?.storyRole}` : ""}</span>
         </div>
         <div className="stage-controls">
           <button className={layerMode === "preview" ? "active" : ""} onClick={() => setLayerMode("preview")} disabled={!job}>预览</button>
@@ -1571,13 +7595,13 @@ function PreviewCanvas({ currentImage, currentSlide, currentStyle, currentTempla
       {currentSlide ? <LayerSeparationBar slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : null}
       <div className="large-slide">
         <div className="editable-slide-stage">
-          {currentImage && layerMode === "preview" ? <img src={currentImage} alt={`第 ${selectedSlide + 1} 页大图预览`} /> : currentSlide ? <LayerBaseCanvas slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : <div className="empty-preview">生成后这里显示大图预览</div>}
+          {currentImage && layerMode === "preview" ? <img src={currentImage} alt={`第 ${selectedSlide + 1} 页预览`} /> : currentSlide ? <LayerBaseCanvas slide={editableSlide} job={job} slideIndex={selectedSlide} layerMode={layerMode} /> : <div className="empty-preview">生成后会在这里显示预览</div>}
           {currentSlide && assetLayerActive ? <CanvasAssetLayer draft={draft} slide={editableSlide} job={job} slideIndex={selectedSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
           {currentSlide && shapeLayerActive ? <CanvasShapeLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
           {currentSlide && textLayerActive ? <CanvasTextLayer draft={draft} slide={editableSlide} updateDraft={updateDraft} onSave={() => onSaveText?.(draft)} /> : null}
         </div>
       </div>
-      {job?.previewWarning ? <div className="preview-warning"><div><b>PNG 预览图未生成，当前使用网页预览</b><span>{job.previewWarning}</span></div><button type="button" onClick={onRetryPreview} disabled={previewBusy}>{previewBusy ? "正在重试" : "重新生成预览图"}</button></div> : null}
+      {job?.previewWarning ? <div className="preview-warning"><div><b>PNG 预览未生成，暂时使用网页预览。</b><span>{job.previewWarning}</span></div><button type="button" onClick={onRetryPreview} disabled={previewBusy}>{previewBusy ? "正在重试" : "重新生成预览图"}</button></div> : null}
     </div>
   );
 }
@@ -1590,7 +7614,7 @@ function HybridPreviewStrip({ job, currentImage, selectedSlide = 0 }) {
     <div className="hybrid-preview-strip">
       <div>
         <b>视觉目标</b>
-        <span>{sample.status === "generated" ? "方向图已生成" : job.visualProject?.status || "待生成"} / 不可编辑中间稿</span>
+        <span>{sample.status === "generated" ? "方向图已生成" : uiZh(job.visualProject?.status || "pending")} / 不可编辑中间产物</span>
       </div>
       <div>
         <b>可编辑结果</b>
@@ -1598,7 +7622,7 @@ function HybridPreviewStrip({ job, currentImage, selectedSlide = 0 }) {
       </div>
       <div>
         <b>一致性</b>
-        <span>{compare.score ? `${compare.score}/100` : "待 QA"}</span>
+        <span>{compare.score ? `${compare.score}/100` : "等待 QA"}</span>
       </div>
     </div>
   );
@@ -1642,7 +7666,7 @@ function LayerSeparationBar({ slide = {}, job, slideIndex = 0, layerMode = "prev
       <span className={layerMode === "asset" || materialCount ? "active" : ""}>素材 {materialCount}</span>
       <span className={layerMode === "text" ? "active" : ""}>文字 {textCount}</span>
       <span className={layerMode === "shape" ? "active" : ""}>图形 {decorationCount}</span>
-      <em>{layerMode === "text" ? "正在编辑文字层：拖动蓝色标签移动对象，保存后写回 PPTX。" : layerMode === "asset" ? "正在编辑素材层：拖动图片或右下角缩放，不会压扁原图。" : layerMode === "shape" ? "正在编辑图形层：调整装饰线、卡片和强调块的位置与颜色。" : "当前为干净预览：不叠加编辑框，避免和底图/预览图重复。"}</em>
+      <em>{layerMode === "text" ? "正在编辑文字层：拖动蓝色标签后保存回 PPTX。" : layerMode === "asset" ? "正在编辑素材层：拖动图片或从角落调整尺寸。" : layerMode === "shape" ? "正在编辑图形层：调整强调线、卡片和装饰块。" : "干净预览：已隐藏编辑框，避免遮挡预览图。"}</em>
     </div>
   );
 }
@@ -1684,9 +7708,9 @@ function CanvasAssetLayer({ draft = {}, slide = {}, job, slideIndex = 0, updateD
       {selectedObject ? (
         <div className="layer-property-panel">
           <b>{selectedObject.label}</b>
-          <label>适配<select value={selectedEdit?.fit || "contain"} onChange={(event) => patchCanvasEdit(selectedObject.key, { fit: event.target.value })}><option value="contain">完整显示</option><option value="cover">铺满裁切</option></select></label>
+          <label>适配<select value={selectedEdit?.fit || "contain"} onChange={(event) => patchCanvasEdit(selectedObject.key, { fit: event.target.value })}><option value="contain">完整显示</option><option value="cover">填满裁切</option></select></label>
           <label>透明度<input type="number" min="0.15" max="1" step="0.05" value={selectedEdit?.opacity ?? 1} onChange={(event) => patchCanvasEdit(selectedObject.key, { opacity: Number(event.target.value) })} /></label>
-          <span>图片只用 contain 或 cover，避免被拉伸变形。</span>
+          <span>图片使用完整显示或填满裁切，避免变形。</span>
         </div>
       ) : null}
       {objects.length ? objects.map((object) => {
@@ -1700,12 +7724,12 @@ function CanvasAssetLayer({ draft = {}, slide = {}, job, slideIndex = 0, updateD
             onPointerDown={(event) => startGesture(event, object.key, "move")}
             style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%`, opacity: edit.opacity ?? object.opacity ?? 1 }}
           >
-            <img src={object.image.uploadUrl} alt={object.image.originalName || "素材图"} style={{ objectFit: edit.fit || object.fit || "contain" }} draggable="false" />
-            <figcaption>{object.label} · {object.image.originalName || "未命名"}</figcaption>
+            <img src={object.image.uploadUrl} alt={object.image.originalName || "asset image"} style={{ objectFit: edit.fit || object.fit || "contain" }} draggable="false" />
+            <figcaption>{object.label} / {object.image.originalName || "未命名"}</figcaption>
             <button className="canvas-resize-handle" type="button" aria-label="缩放素材" onPointerDown={(event) => startGesture(event, object.key, "resize")} />
           </figure>
         );
-      }) : <div className="canvas-empty-layer">当前页没有绑定素材图。到右侧“图片槽 / 素材名”填写文件名，或让 Agent 重新匹配素材。</div>}
+      }) : <div className="canvas-empty-layer">这一页还没有绑定素材图。请填写图片槽位和素材名，或让 agent 重新匹配素材。</div>}
     </div>
   );
 }
@@ -1785,23 +7809,23 @@ function CanvasShapeLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
 function EditorPanel({ deckRevision, dirty, draft, job, revision, savedDraft, setDeckRevision, setDraft, setRevision, updateDraft, onQuickAction, onRevise, onSaveText, onRewriteDeck, onUndoJob }) {
   return (
     <aside className="editor-panel">
-      <div className="edit-mode-title"><div><b>直接编辑当前页</b>{dirty ? <strong>未保存</strong> : <strong className="saved">已同步</strong>}</div><span>保存后写入 SceneGraph，并重新渲染 PPTX 和预览。</span></div>
-      <Field label="版式"><button className="btn ghost wide undo-button" type="button" onClick={onUndoJob} disabled={!job?.canUndo || dirty}>{job?.undoLabel || "撤销上一轮修改"}</button><select value={draft.layout} onChange={(e) => updateDraft("layout", e.target.value)} disabled={!job}>{Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}</select></Field>
+      <div className="edit-mode-title"><div><b>直接编辑当前页</b>{dirty ? <strong>未保存</strong> : <strong className="saved">已同步</strong>}</div><span>保存后会写回 SceneGraph，并重新渲染 PPTX 和预览。</span></div>
+      <Field label="版式"><button className="btn ghost wide undo-button" type="button" onClick={onUndoJob} disabled={!job?.canUndo || dirty}>{job?.undoLabel || "撤销上次修改"}</button><select value={draft.layout} onChange={(e) => updateDraft("layout", e.target.value)} disabled={!job}>{Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}</select></Field>
       <Field label="标题"><input value={draft.title} onChange={(e) => updateDraft("title", e.target.value)} disabled={!job} /></Field>
       <Field label="副标题 / 摘要"><textarea className="compact-textarea" value={draft.subtitle} onChange={(e) => updateDraft("subtitle", e.target.value)} disabled={!job} /></Field>
       <Field label="叙事角色"><input value={draft.storyRole} onChange={(e) => updateDraft("storyRole", e.target.value)} disabled={!job} /></Field>
-      <Field label="内容来源"><select value={draft.contentSource} onChange={(e) => updateDraft("contentSource", e.target.value)} disabled={!job}>{["用户输入", "用户资料", "用户图片", "系统推断", "待人工确认", "系统推断 + 待人工确认"].map((item) => <option key={item} value={item}>{item}</option>)}</select></Field>
-      <Field label="要点（一行一条）"><textarea value={draft.bullets} onChange={(e) => updateDraft("bullets", e.target.value)} disabled={!job} /></Field>
-      <details className="advanced-edit" open><summary>高级字段</summary><Field label="讲稿备注"><textarea className="compact-textarea" value={draft.speakerNotes} onChange={(e) => updateDraft("speakerNotes", e.target.value)} disabled={!job} /></Field><Field label="视觉意图"><textarea className="compact-textarea" value={draft.visualIntent} onChange={(e) => updateDraft("visualIntent", e.target.value)} disabled={!job} /></Field><Field label="价格 / 数据点"><textarea className="compact-textarea" value={draft.dataPoints} onChange={(e) => updateDraft("dataPoints", e.target.value)} disabled={!job} /></Field><Field label="图片槽 / 素材名"><textarea className="compact-textarea" value={draft.imageSlots} onChange={(e) => updateDraft("imageSlots", e.target.value)} disabled={!job} /></Field></details>
+      <Field label="内容来源"><select value={draft.contentSource} onChange={(e) => updateDraft("contentSource", e.target.value)} disabled={!job}>{["user input", "user materials", "user images", "system inference", "needs manual confirmation", "system inference + needs manual confirmation"].map((item) => <option key={item} value={item}>{uiZh(item)}</option>)}</select></Field>
+      <Field label="要点，每行一条"><textarea value={draft.bullets} onChange={(e) => updateDraft("bullets", e.target.value)} disabled={!job} /></Field>
+      <details className="advanced-edit" open><summary>高级字段</summary><Field label="演讲备注"><textarea className="compact-textarea" value={draft.speakerNotes} onChange={(e) => updateDraft("speakerNotes", e.target.value)} disabled={!job} /></Field><Field label="视觉意图"><textarea className="compact-textarea" value={draft.visualIntent} onChange={(e) => updateDraft("visualIntent", e.target.value)} disabled={!job} /></Field><Field label="价格 / 数据点"><textarea className="compact-textarea" value={draft.dataPoints} onChange={(e) => updateDraft("dataPoints", e.target.value)} disabled={!job} /></Field><Field label="图片槽位 / 素材名"><textarea className="compact-textarea" value={draft.imageSlots} onChange={(e) => updateDraft("imageSlots", e.target.value)} disabled={!job} /></Field></details>
       <div className="button-row tight"><button className="btn primary" onClick={() => onSaveText(draft)} disabled={!job || !dirty}>保存当前页</button><button className="btn ghost" onClick={() => setDraft(savedDraft)} disabled={!job || !dirty}>放弃修改</button></div>
       <p className="save-hint">也可以按 Ctrl+S 保存当前页。</p>
       <div className="edit-separator" />
-      <div className="edit-mode-title"><b>用指令改写</b><span>适合让系统帮你重写表达或调整页面结构。</span></div>
+      <div className="edit-mode-title"><b>按指令改写</b><span>用于让系统改写文案或调整页面结构。</span></div>
       <div className="quick-actions">{QUICK_ACTIONS.map((item) => <button key={item} type="button" onMouseDown={(event) => { event.preventDefault(); onQuickAction(item); }} disabled={!job}>{item}</button>)}</div>
       <textarea value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="例如：第 3 页产品矩阵太密，改成两行展示。" />
       <button className="btn primary wide" onClick={onRevise} disabled={!job || !revision.trim()}>应用到当前页</button>
       <div className="edit-separator" />
-      <div className="edit-mode-title"><b>整份批量改写</b><span>适合统一口吻、减少文字或强化行动。</span></div>
+      <div className="edit-mode-title"><b>整份批量改写</b><span>用于统一口吻、减少文字或强化行动项。</span></div>
       <div className="quick-actions">{DECK_ACTIONS.map((item) => <button key={item} type="button" onMouseDown={(event) => { event.preventDefault(); setDeckRevision(item); }} disabled={!job || dirty}>{item}</button>)}</div>
       <textarea className="compact-textarea" value={deckRevision} onChange={(e) => setDeckRevision(e.target.value)} disabled={!job || dirty} placeholder="例如：整份减少文字，改成客户提案口吻。" />
       <button className="btn primary wide" onClick={onRewriteDeck} disabled={!job || dirty || !deckRevision.trim()}>应用到整份 PPT</button>
@@ -1892,10 +7916,10 @@ function ProductFactPreview({ facts }) {
 }
 
 const CANVAS_FIELD_FALLBACKS = {
-  title: { label: "标题", box: { x: 56, y: 18, w: 36, h: 13 }, fontSize: 28, bold: true },
-  subtitle: { label: "副标题", box: { x: 56, y: 34, w: 36, h: 10 }, fontSize: 14 },
-  visualIntent: { label: "视觉意图", box: { x: 56, y: 47, w: 36, h: 10 }, fontSize: 10 },
-  speakerNotes: { label: "讲稿备注", box: { x: 56, y: 72, w: 36, h: 18 }, fontSize: 9 }
+  title: { label: "Title", box: { x: 56, y: 18, w: 36, h: 13 }, fontSize: 28, bold: true },
+  subtitle: { label: "Subtitle", box: { x: 56, y: 34, w: 36, h: 10 }, fontSize: 14 },
+  visualIntent: { label: "Visual intent", box: { x: 56, y: 47, w: 36, h: 10 }, fontSize: 10 },
+  speakerNotes: { label: "Speaker notes", box: { x: 56, y: 72, w: 36, h: 18 }, fontSize: 9 }
 };
 
 const CANVAS_LAYOUT_BOXES = {
@@ -2009,7 +8033,7 @@ function buildCanvasAssetObjects(job, slide = {}, slideIndex = 0) {
   return images.map((image, index) => ({
     key: `asset_${index}`,
     type: "image",
-    label: `素材 ${index + 1}`,
+    label: `缁辩姵娼?${index + 1}`,
     image,
     box: boxes[index] || boxes[0] || { x: 58, y: 24, w: 28, h: 38 },
     fit: slide.layout === "cover" ? "cover" : "contain",
@@ -2024,11 +8048,11 @@ function buildCanvasShapeObjects(slide = {}) {
   let shapeIndex = 0;
   const shapes = [];
   const pushShape = (item) => shapes.push({ key: `shape_${shapeIndex++}`, type: "shape", ...item });
-  pushShape({ label: "顶部强调线", box: { x: 0, y: 0, w: 100, h: 1.1 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+  pushShape({ label: "Top accent line", box: { x: 0, y: 0, w: 100, h: 1.1 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
   if (["cover", "section", "quote"].includes(layout)) {
-    pushShape({ label: "侧边强调线", box: { x: 3.6, y: 10.4, w: 0.6, h: 64 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+    pushShape({ label: "Side accent line", box: { x: 3.6, y: 10.4, w: 0.6, h: 64 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
   }
-  pushShape({ label: "内容强调线", box: { x: boxes.title?.x || 8, y: clamp((boxes.subtitle?.y || boxes.title?.y || 16) + 14, 4, 90), w: boxes.title?.w || 42, h: 0.8 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
+  pushShape({ label: "Content accent line", box: { x: boxes.title?.x || 8, y: clamp((boxes.subtitle?.y || boxes.title?.y || 16) + 14, 4, 90), w: boxes.title?.w || 42, h: 0.8 }, fill: "#2854d8", line: "#2854d8", radius: 0, opacity: 1 });
   if (hasCards) {
     const start = boxes.dataStart || boxes.bulletStart || CANVAS_LAYOUT_BOXES.default.dataStart;
     pushShape({ label: "信息卡片 1", box: { x: clamp(start.x - 2, 4, 88), y: clamp(start.y - 4, 8, 84), w: 28, h: 14 }, fill: "#eef3ff", line: "#d7e2ff", radius: 8, opacity: 0.92 });
@@ -2120,12 +8144,12 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
       {selectedObject ? (
         <div className="text-layer-property-panel">
           <b>{selectedObject.label}</b>
-          <label>字号<input type="number" min="6" max="72" value={selectedEdit?.style?.fontSize || selectedObject.style.fontSize} onChange={(event) => patchLayerStyle(selectedObject.key, { fontSize: Number(event.target.value) })} /></label>
-          <label>颜色<input type="color" value={selectedEdit?.style?.color || selectedObject.style.color} onChange={(event) => patchLayerStyle(selectedObject.key, { color: event.target.value })} /></label>
-          <label>字重<select value={selectedEdit?.style?.fontWeight || selectedObject.style.fontWeight} onChange={(event) => patchLayerStyle(selectedObject.key, { fontWeight: event.target.value })}><option value="400">常规</option><option value="600">半粗</option><option value="800">粗体</option></select></label>
-          <label>对齐<select value={selectedEdit?.style?.textAlign || selectedObject.style.textAlign} onChange={(event) => patchLayerStyle(selectedObject.key, { textAlign: event.target.value })}><option value="left">左</option><option value="center">中</option><option value="right">右</option></select></label>
-          <label>行距<input type="number" min="1" max="2.4" step="0.1" value={selectedEdit?.style?.lineHeight || selectedObject.style.lineHeight} onChange={(event) => patchLayerStyle(selectedObject.key, { lineHeight: Number(event.target.value) })} /></label>
-          <label>字距<input type="number" min="0" max="8" step="0.2" value={selectedEdit?.style?.letterSpacing || selectedObject.style.letterSpacing} onChange={(event) => patchLayerStyle(selectedObject.key, { letterSpacing: Number(event.target.value) })} /></label>
+          <label>Font size<input type="number" min="6" max="72" value={selectedEdit?.style?.fontSize || selectedObject.style.fontSize} onChange={(event) => patchLayerStyle(selectedObject.key, { fontSize: Number(event.target.value) })} /></label>
+          <label>Color<input type="color" value={selectedEdit?.style?.color || selectedObject.style.color} onChange={(event) => patchLayerStyle(selectedObject.key, { color: event.target.value })} /></label>
+          <label>Weight<select value={selectedEdit?.style?.fontWeight || selectedObject.style.fontWeight} onChange={(event) => patchLayerStyle(selectedObject.key, { fontWeight: event.target.value })}><option value="400">Regular</option><option value="600">Semi bold</option><option value="800">Bold</option></select></label>
+          <label>Align<select value={selectedEdit?.style?.textAlign || selectedObject.style.textAlign} onChange={(event) => patchLayerStyle(selectedObject.key, { textAlign: event.target.value })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label>
+          <label>Line height<input type="number" min="1" max="2.4" step="0.1" value={selectedEdit?.style?.lineHeight || selectedObject.style.lineHeight} onChange={(event) => patchLayerStyle(selectedObject.key, { lineHeight: Number(event.target.value) })} /></label>
+          <label>Letter spacing<input type="number" min="0" max="8" step="0.2" value={selectedEdit?.style?.letterSpacing || selectedObject.style.letterSpacing} onChange={(event) => patchLayerStyle(selectedObject.key, { letterSpacing: Number(event.target.value) })} /></label>
         </div>
       ) : null}
       {canvasObjects.map((field) => {
@@ -2139,7 +8163,7 @@ function CanvasTextLayer({ draft = {}, slide = {}, updateDraft, onSave }) {
             onClick={(event) => { event.stopPropagation(); setSelectedLayerId(field.key); }}
             style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}
           >
-            <button type="button" className="canvas-drag-handle" onPointerDown={(event) => startDrag(event, field.key)} title="拖动位置">{field.label}</button>
+            <button type="button" className="canvas-drag-handle" onPointerDown={(event) => startDrag(event, field.key)} title="拖动调整位置">{field.label}</button>
             <textarea
               value={field.value || ""}
               onChange={(event) => patchText(field, event.target.value)}
@@ -2168,15 +8192,15 @@ function buildCanvasObjects(draft = {}, slide = {}) {
   const bullets = toBulletList(draft.bullets ?? slide.bullets);
   const dataPoints = toBulletList(draft.dataPoints ?? slide.dataPoints);
   const objects = [
-    buildCanvasObject("title", "标题", draft.title ?? slide.title ?? "", boxes.title || CANVAS_FIELD_FALLBACKS.title.box),
-    buildCanvasObject("subtitle", "副标题", draft.subtitle ?? slide.subtitle ?? "", boxes.subtitle || CANVAS_FIELD_FALLBACKS.subtitle.box)
+    buildCanvasObject("title", "Title", draft.title ?? slide.title ?? "", boxes.title || CANVAS_FIELD_FALLBACKS.title.box),
+    buildCanvasObject("subtitle", "Subtitle", draft.subtitle ?? slide.subtitle ?? "", boxes.subtitle || CANVAS_FIELD_FALLBACKS.subtitle.box)
   ];
   bullets.forEach((value, index) => {
-    objects.push(buildCanvasObject(`bullet_${index}`, `要点 ${index + 1}`, value, stackBox(boxes.bulletStart || CANVAS_LAYOUT_BOXES.default.bulletStart, index), "bullet", index));
+    objects.push(buildCanvasObject(`bullet_${index}`, `Bullet ${index + 1}`, value, stackBox(boxes.bulletStart || CANVAS_LAYOUT_BOXES.default.bulletStart, index), "bullet", index));
   });
   if (["pricing", "kpi", "compare", "timeline", "product-detail"].includes(layout)) {
     dataPoints.forEach((value, index) => {
-      objects.push(buildCanvasObject(`data_${index}`, `数据 ${index + 1}`, value, stackBox(boxes.dataStart || CANVAS_LAYOUT_BOXES.default.dataStart, index), "dataPoint", index));
+      objects.push(buildCanvasObject(`data_${index}`, `Data ${index + 1}`, value, stackBox(boxes.dataStart || CANVAS_LAYOUT_BOXES.default.dataStart, index), "dataPoint", index));
     });
   }
   return objects.filter((item) => String(item.value || "").trim());
@@ -2289,7 +8313,7 @@ function buildDeliveryChecks(job = {}) {
   return [
     { label: "\u9875\u6570", value: slideCount ? `${slideCount} \u9875` : "\u672a\u751f\u6210", state: slideCount >= 5 ? "pass" : slideCount > 0 ? "warn" : "fail" },
     { label: "\u7248\u5f0f", value: `${usedLayouts.length || 0} \u79cd`, state: usedLayouts.length >= minLayoutVariety ? "pass" : usedLayouts.length > 0 ? "warn" : "fail" },
-    { label: "\u8def\u7531", value: Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : route.templatePack?.name || "\u672a\u77e5", state: Number.isFinite(routeScore) && routeScore < 0.75 ? "warn" : "pass" },
+    { label: "\u8def\u7531", value: Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : route.skillWorkflow?.name || "\u53cc\u6280\u80fd\u5de5\u4f5c\u6d41", state: Number.isFinite(routeScore) && routeScore < 0.75 ? "warn" : "pass" },
     { label: "\u56fe\u7247", value: imageCount ? `${imageSlotCount} \u69fd` : "\u65e0\u56fe", state: imageCount && imageSlotCount === 0 ? "warn" : "pass" },
     { label: "\u672c\u5730\u56fe QA", value: localQa.total ? `${localQa.passCount || 0}/${localQa.total}` : "\u672a\u626b\u63cf", state: localQa.warnCount ? "warn" : "pass" },
     { label: "\u6bd4\u4f8b QA", value: renderQa.total ? `${renderQa.total} \u5f20` : "\u672a\u626b\u63cf", state: renderQa.warningCount ? "warn" : renderQa.total ? "pass" : "warn" },
@@ -2314,7 +8338,7 @@ function buildDeliveryIssues(job = {}) {
     job.warning,
     job.previewWarning,
     job.exportWarning,
-    ...(material.confirmationFields?.length ? [`待确认：${material.confirmationFields.slice(0, 3).join(" / ")}`] : [])
+    ...(material.confirmationFields?.length ? [`待确认字段：${material.confirmationFields.slice(0, 3).join(" / ")}`] : [])
   ].filter((item) => item && !isNonBlockingWarning(item)).slice(0, 3);
 }
 
@@ -2328,6 +8352,7 @@ function renderQaRiskLabel(value = "") {
 }
 
 function localQaRiskLabel(value = "") {
+  if (value === "possible-title-or-text-loss") return "\u6807\u9898\u6216\u5173\u952e\u6587\u5b57\u53ef\u80fd\u88ab\u5f31\u5316";
   const map = {
     "image-may-be-too-blank": "图片主体偏弱",
     "text-safe-area-too-busy": "文字安全区过花",
@@ -2365,14 +8390,14 @@ function AgentWorkRecord({ job, files = [] }) {
   return (
     <div className="agent-record">
       <div className="agent-record-header">
-        <b>Agent {"\u5de5\u4f5c\u8bb0\u5f55"}</b>
+        <b>智能工作记录</b>
         <span>{decision.hasOldDeck ? "旧稿优化" : "新建 PPT"}</span>
       </div>
       <div className="agent-record-grid">
-        <RecordBlock title="任务意图" value={decision.intent || "PPT 生成"} detail={`${inputStrengthLabel(decision.inputStrength || material.inputStrength)} / ${decision.targetSlides || route.targetSlides || job?.deck?.slides?.length || 0} 页`} />
-        <RecordBlock title="资料规模" value="已解析" detail={`文字 ${material.charCount || 0} 字 / 图片 ${material.imageCount || 0} 张 / 价格 ${material.priceCount || 0} 条`} />
-        <RecordBlock title="智能路由" value={route.deckType || decision.routeType || "待识别"} detail={routeReasons.slice(0, 2).join(" / ") || "暂无原因"} />
-        <RecordBlock title="自动修复" value={fixes.length ? `${fixes.length} 轮` : "未触发"} detail={fixes[0]?.changes?.slice(0, 2).join(" / ") || "暂无修复"} />
+        <RecordBlock title="意图" value={uiZh(decision.intent || "PPT 生成")} detail={inputStrengthLabel(decision.inputStrength || material.inputStrength) + " / " + (decision.targetSlides || route.targetSlides || job?.deck?.slides?.length || 0) + " 页"} />
+        <RecordBlock title="资料规模" value="已解析" detail={"文字 " + (material.charCount || 0) + " / 图片 " + (material.imageCount || 0) + " / 价格 " + (material.priceCount || 0)} />
+        <RecordBlock title="智能路由" value={uiZh(route.deckType || decision.routeType || "pending")} detail={routeReasons.slice(0, 2).join(" / ") || "无原因"} />
+        <RecordBlock title="自动修复" value={fixes.length ? fixes.length + " 轮" : "未触发"} detail={fixes[0]?.changes?.slice(0, 2).join(" / ") || "无修复"} />
       </div>
       <div className="agent-record-section">
         <b>{"\u6267\u884c\u6b65\u9aa4"}</b>
@@ -2411,13 +8436,13 @@ function RecordBlock({ title, value, detail }) {
 
 function PipelineCard({ pipeline }) {
   if (!pipeline?.stages?.length) return null;
-  const statusText = { pass: "通过", warn: "需检查", block: "阻断", skipped: "跳过" };
+  const statusText = { pass: "通过", warn: "需检查", block: "阻断", skipped: "已跳过" };
   const jobs = Array.isArray(pipeline.slideJobs) ? pipeline.slideJobs : [];
   return (
     <div className="pipeline-card">
       <div className="pipeline-head">
         <b>设计流水线</b>
-        <span>{pipeline.lastCompletedStage || "pending"}</span>
+        <span>{uiZh(pipeline.lastCompletedStage || "pending")}</span>
       </div>
       <div className="pipeline-stage-list">
         {pipeline.stages.map((stage) => (
@@ -2438,7 +8463,7 @@ function PipelineCard({ pipeline }) {
           ))}
         </div>
       ) : null}
-      {pipeline.blockingReasons?.length ? <small className="pipeline-blockers">{pipeline.blockingReasons.slice(0, 2).join(" / ")}</small> : null}
+      {pipeline.blockingReasons?.length ? <small className="pipeline-blockers">{pipeline.blockingReasons.slice(0, 2).map(uiZh).join(" / ")}</small> : null}
     </div>
   );
 }
@@ -2446,7 +8471,7 @@ function PipelineCard({ pipeline }) {
 function EditableRebuildCard({ plan }) {
   if (!plan?.candidate) return null;
   const pages = Array.isArray(plan.pages) ? plan.pages : [];
-  const statusLabel = plan.status === "active" ? "已规划" : plan.status === "warn" ? "需复核" : plan.status || "待处理";
+  const statusLabel = plan.status === "active" ? "已规划" : plan.status === "warn" ? "需复核" : uiZh(plan.status || "pending");
   return (
     <div className={`editable-rebuild-card ${plan.status || "warn"}`}>
       <div className="editable-rebuild-head">
@@ -2457,7 +8482,7 @@ function EditableRebuildCard({ plan }) {
       <div className="editable-rebuild-facts">
         <span>{plan.inputType || "mixed"}</span>
         <span>{plan.pageCount || pages.length || 0} 页</span>
-        <span>{(plan.warnings || []).length} 风险</span>
+        <span>{(plan.warnings || []).length} 个风险</span>
       </div>
       {plan.hardRules?.length ? (
         <ul>
@@ -2473,7 +8498,7 @@ function EditableRebuildCard({ plan }) {
             return (
               <div className={page.qa?.fakeEditableRisk ? "warn" : "pass"} key={page.pageId}>
                 <strong>#{String(page.index).padStart(2, "0")} {page.title || page.pageId}</strong>
-                <small>{textCount} 文本框 / {imageCount} 图片对象 / {page.source?.status || "source"}</small>
+                <small>{textCount} 个文本框 / {imageCount} 个图片对象 / {uiZh(page.source?.status || "来源")}</small>
                 {page.qa?.warnings?.length ? <em>{page.qa.warnings.slice(0, 2).join(" / ")}</em> : null}
               </div>
             );
@@ -2493,23 +8518,23 @@ function VisualTargetCard({ target, onGenerateSample, localImage }) {
     <div className="scenegraph-card">
       <div className="scenegraph-head">
         <b>视觉目标方向图</b>
-        <span>{sample.status || target.status || "brief"}</span>
+        <span>{uiZh(sample.status || target.status || "简述")}</span>
       </div>
-      <p>{target.styleBrief || "已生成视觉目标 brief；img2/codex-ppt 只作为风格参考，不作为最终整页背景。"}</p>
+      <p>{target.styleBrief || "视觉目标简述已生成。img2/codex-ppt 只作为调性参考，不作为最终整页背景。"}</p>
       <div className="scenegraph-facts">
         <span>{target.engine || "visual-target"}</span>
-        <span>{target.density || "density"}</span>
-        <span>{sample.status || "sample-not-generated"}</span>
+        <span>{target.density || "密度待定"}</span>
+        <span>{uiZh(sample.status || "样张未生成")}</span>
       </div>
       {sample.imageUrl ? <img className="visual-target-sample" src={sample.imageUrl} alt="visual target sample" /> : null}
       {sample.prompt ? <small className="scenegraph-warning">{sample.prompt.slice(0, 180)}</small> : null}
-      {onGenerateSample ? <button className="btn ghost wide" type="button" onClick={onGenerateSample} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "生成视觉目标方向图" : "等待本地生图在线"}</button> : null}
+      {onGenerateSample ? <button className="btn ghost wide" type="button" onClick={onGenerateSample} disabled={localImage?.state !== "online"}>{localImage?.state === "online" ? "生成视觉目标图" : "等待本地生图服务"}</button> : null}
       {pages.length ? (
         <div className="scenegraph-page-list">
           {pages.slice(0, 5).map((page) => (
             <div className="pass" key={page.slideId}>
               <strong>{page.slideId} / {page.role}</strong>
-              <small>{page.composition} / image {page.imagePriority}</small>
+              <small>{page.composition} / 图片优先级 {page.imagePriority}</small>
             </div>
           ))}
         </div>
@@ -2525,13 +8550,13 @@ function SceneGraphCard({ graph, qa }) {
   return (
     <div className={`scenegraph-card ${status}`}>
       <div className="scenegraph-head">
-        <b>SceneGraph 可编辑真源</b>
-        <span>{status}</span>
+        <b>SceneGraph 可编辑源数据</b>
+        <span>{uiZh(status)}</span>
       </div>
-      <p>最终 PPTX 从 SceneGraph 渲染：文本是真文本框，色块是 shape，图片是独立对象。</p>
+      <p>最终 PPTX 从 SceneGraph 渲染：文字是真实文本框，色块是图形，图片是独立对象。</p>
       <div className="scenegraph-facts">
         <span>{qa?.slideCount || slides.length || 0} 页</span>
-        <span>{qa?.textBoxes || 0} 文本框</span>
+        <span>{qa?.textBoxes || 0} 个文本框</span>
         <span>{qa?.shapeCount || 0} 形状</span>
         <span>{qa?.imageCount || 0} 图片</span>
       </div>
@@ -2540,7 +8565,7 @@ function SceneGraphCard({ graph, qa }) {
           {slides.slice(0, 6).map((slide) => (
             <div className="pass" key={slide.id}>
               <strong>#{String(slide.index).padStart(2, "0")} {slide.role}</strong>
-              <small>{slide.texts?.length || 0} text / {slide.shapes?.length || 0} shapes / {slide.images?.length || 0} images</small>
+              <small>{slide.texts?.length || 0} 段文字 / {slide.shapes?.length || 0} 个图形 / {slide.images?.length || 0} 张图片</small>
             </div>
           ))}
         </div>
@@ -2559,7 +8584,7 @@ function VisualCompareCard({ compare }) {
         <b>视觉一致性评分</b>
         <span>{compare.score || 0}</span>
       </div>
-      <p>{compare.note || "检查 SceneGraph 渲染结构是否贴近视觉目标；后续可升级为截图级对比。"}</p>
+      <p>{compare.note || "检查 SceneGraph 渲染结构是否匹配视觉目标。后续可升级为截图级对比。"}</p>
       {items.length ? (
         <div className="scenegraph-page-list">
           {items.slice(0, 5).map((item) => (
@@ -2584,7 +8609,7 @@ function SceneGraphRepairCard({ repair }) {
         <b>自动返工记录</b>
         <span>{repair.status}</span>
       </div>
-      <p>{repair.policy || "只修 SceneGraph，不把视觉图贴成最终背景。"}</p>
+      <p>{repair.policy || "只修复 SceneGraph，不把视觉图粘成最终背景。"}</p>
       <div className="scenegraph-facts">
         <span>{actions.length} 待处理</span>
         <span>{completed.length} 已完成</span>
@@ -2608,18 +8633,17 @@ function SourceRecognitionCard({ report }) {
   if (!report) return null;
   const pages = Array.isArray(report.pages) ? report.pages : [];
   const slotReport = report.imageSlotReport || null;
-  const templateProfile = report.templateProfile || null;
   const extractionAudit = report.extractionAudit || null;
   const cloudSource = report.cloudSourceAnalysis || null;
-  const statusLabel = { "text+image": "文字+图片", "text-only": "仅文字", "image-only": "仅图片", empty: "空白" };
+  const statusLabel = { "text+image": "text + image", "text-only": "text only", "image-only": "image only", empty: "empty" };
   return (
     <div className="source-report-card">
       <b>{"\u8d44\u6599\u8bc6\u522b"}</b>
-      <p>{report.hasOldDeck ? "已识别旧 PPT 的文字、图片和页面结构。" : "已识别上传资料并抽取关键信息。"}</p>
+      <p>{report.hasOldDeck ? "已从旧 PPT 识别文字、图片和页面结构。" : "已识别上传资料并抽取关键信息。"}</p>
       <div className="source-report-stats">
-        <span><strong>{report.pageCount || 0}</strong>页</span>
+        <span><strong>{report.pageCount || 0}</strong> 页</span>
         <span><strong>{report.textPageCount || 0}</strong>{"\u6587\u5b57\u9875"}</span>
-        <span><strong>{report.imageCount || 0}</strong>张图片</span>
+        <span><strong>{report.imageCount || 0}</strong> 图片</span>
         <span><strong>{report.boundImageCount || 0}</strong>{"\u5df2\u7ed1\u5b9a\u56fe\u7247"}</span>
       </div>
       {slotReport ? (
@@ -2629,25 +8653,18 @@ function SourceRecognitionCard({ report }) {
           <span>{"\u5df2\u66ff\u6362"}{slotReport.changedSlides || 0} {"\u9875"}</span>
         </div>
       ) : null}
-      {templateProfile ? (
-        <div className="source-slot-summary">
-          <span>{"\u6bcd\u7248"}{templateProfile.usedLayoutCount || 0}/{templateProfile.layoutCount || 0}</span>
-          <span>{"\u53ef\u590d\u7528"}{templateProfile.reusableLayoutCount || 0}</span>
-          <span>{templateProfile.warnings?.length ? `warning ${templateProfile.warnings.length}` : "\u5360\u4f4d\u7b26\u5df2\u8bc6\u522b"}</span>
-        </div>
-      ) : null}
       {extractionAudit ? (
         <div className={`source-slot-summary ${extractionAudit.confidence === "high" ? "pass" : "warning"}`}>
           <span>抽取审计 {extractionAudit.confidence || "medium"}</span>
           <span>文本 {extractionAudit.textSlideCount || 0}/{extractionAudit.slideCount || 0}</span>
           <span>图 {extractionAudit.extractedImageRefs || 0}/{extractionAudit.embeddedImageRefs || 0}</span>
-          <span>{extractionAudit.linkedImageRefs || extractionAudit.missingImageRefs ? `外链/缺失 ${extractionAudit.linkedImageRefs || 0}/${extractionAudit.missingImageRefs || 0}` : "无缺失记录"}</span>
+          <span>{extractionAudit.linkedImageRefs || extractionAudit.missingImageRefs ? `已关联 / 缺失 ${extractionAudit.linkedImageRefs || 0}/${extractionAudit.missingImageRefs || 0}` : "无缺失记录"}</span>
         </div>
       ) : null}
       {cloudSource ? (
         <div className={`cloud-review-summary ${cloudSource.status || "warn"}`}>
-          <strong>{cloudSource.used ? "云端源稿分析" : "云端源稿分析未运行"}</strong>
-          <small>{cloudSource.used ? (cloudSource.summary || cloudSource.status) : (cloudSource.reason || "not available")}</small>
+          <strong>{cloudSource.used ? "云端源文件分析" : "未运行云端源文件分析"}</strong>
+          <small>{cloudSource.used ? (cloudSource.summary || cloudSource.status) : (cloudSource.reason || "不可用")}</small>
         </div>
       ) : null}
       {report.warnings?.length ? <div className="source-report-warnings">{report.warnings.slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div> : null}
@@ -2657,7 +8674,7 @@ function SourceRecognitionCard({ report }) {
             <div className={`source-page-row ${page.status || "empty"}`} key={page.page}>
               <span>#{page.page}</span>
               <div>
-                <b>{page.title || `第 ${page.page} 页`}</b>
+                <b>{page.title || "第 " + page.page + " 页"}</b>
                 <small>{page.textChars || 0} 字 / {page.imageCount || 0} 图 / {statusLabel[page.status] || page.status || "未知"}</small>
               </div>
             </div>
@@ -2672,16 +8689,16 @@ function AgentReviewCard({ reviews = [], visualFixes = [] }) {
   const latest = Array.isArray(reviews) ? reviews.at(-1) : null;
   if (!latest) return null;
   const latestFix = Array.isArray(visualFixes) ? visualFixes.at(-1) : null;
-  const statusLabel = latest.status === "block" ? "需处理" : latest.status === "warn" ? "需确认" : "通过";
-  const stageLabel = latest.stage === "style-preview" ? "视觉方向阶段" : "整稿阶段";
+  const statusLabel = latest.status === "block" ? "需要处理" : latest.status === "warn" ? "需要确认" : "已通过";
+  const stageLabel = latest.stage === "style-preview" ? "视觉方向阶段" : "整套生成阶段";
   return (
     <div className={`agent-review-card ${latest.status || "pass"}`}>
-      <div className="agent-review-head"><b>Agent {"\u590d\u5ba1"}</b><span>{stageLabel} / {statusLabel}</span></div>
-      <p>{latest.nextGate === "human-style-confirmation" ? "自动质检后等待人工确认风格。" : "已进入可编辑与导出检查。"}</p>
+      <div className="agent-review-head"><b>智能复审</b><span>{stageLabel} / {statusLabel}</span></div>
+      <p>{latest.nextGate === "human-style-confirmation" ? "自动 QA 后等待人工确认风格。" : "已进入可编辑和导出检查。"}</p>
       {latest.cloudVisualReview ? (
         <div className={`cloud-review-summary ${latest.cloudVisualReview.status || "warn"}`}>
           <strong>{latest.cloudVisualReview.used ? "云端视觉复审" : "云端复审跳过"}</strong>
-          <small>{latest.cloudVisualReview.used ? (latest.cloudVisualReview.summary || latest.cloudVisualReview.status) : (latest.cloudVisualReview.reason || "not available")}</small>
+          <small>{latest.cloudVisualReview.used ? (latest.cloudVisualReview.summary || latest.cloudVisualReview.status) : (latest.cloudVisualReview.reason || "不可用")}</small>
         </div>
       ) : null}
       {latestFix ? <div className="visual-fix-summary"><strong>{"\u5df2\u81ea\u52a8\u4fee\u590d 1 \u8f6e"}</strong><small>{latestFix.changes?.join(" / ") || "\u5df2\u8bb0\u5f55\u4fee\u590d"}</small></div> : null}
@@ -2697,7 +8714,7 @@ function ImageSupplementPlanCard({ plan, onApply, onApplyLocal, localImage }) {
   const items = Array.isArray(plan.items) ? plan.items : [];
   const localTargets = items.filter((item) => item.action === "need-remote-generation").length;
   const localReady = localImage?.state === "online";
-  const actionLabel = { "use-source-image": "复用原图", "use-uploaded-image": "使用上传图", "need-remote-generation": "需要补图" };
+  const actionLabel = { "use-source-image": "复用源图", "use-uploaded-image": "使用上传图", "need-remote-generation": "需要补图" };
   return (
     <div className="image-supplement-card">
       <div className="image-supplement-head"><b>{"\u8865\u56fe\u8ba1\u5212"}</b><span>{plan.status === "needs-human-confirmation" ? "\u5f85\u786e\u8ba4" : "\u5df2\u68c0\u67e5"}</span></div>
@@ -2735,9 +8752,18 @@ function AestheticDiagnosisCard({ diagnosis }) {
   return (
     <div className={`route-card aesthetic-card ${Number.isFinite(score) && score < 72 ? "warning" : ""}`}>
       <b>{"\u7f8e\u5b66\u8bca\u65ad"}</b>
-      <p>{Number.isFinite(score) ? `${score} 分` : "未评分"} / {diagnosis.slideCount || slides.length || 0} 页</p>
-      <div><span>{low.length ? `低分页 ${low.length}` : "无低分页"}</span><span>{dense.length ? `高密度 ${dense.length}` : "密度正常"}</span></div>
-      {slides.length ? <ul className="local-qa-list">{slides.slice(0, 5).map((slide) => <li className={Number(slide.diagnosisScore) < 72 ? "warn" : "pass"} key={slide.page}><strong>#{slide.page} {slide.type || "unknown"} / {slide.diagnosisScore ?? "-"} 分</strong><span>{slide.layoutStrategy || "structured_summary"} / {(slide.problems || []).map((item) => item.message || item).slice(0, 2).join(" / ") || "暂无问题"}</span></li>)}</ul> : null}
+      <p>{(Number.isFinite(score) ? score + " 分" : "未评分") + " / " + (diagnosis.slideCount || slides.length || 0) + " 页"}</p>
+      <div><span>{low.length ? `低分页 ${low.length}` : "无低分页"}</span><span>{dense.length ? `高密度页面 ${dense.length}` : "密度正常"}</span></div>
+      {slides.length ? (
+        <ul className="local-qa-list">
+          {slides.slice(0, 5).map((slide) => (
+            <li className={Number(slide.diagnosisScore) < 72 ? "warn" : "pass"} key={slide.page}>
+              <strong>#{slide.page} {uiZh(slide.type || "未知")} / {slide.diagnosisScore ?? "-"} 分</strong>
+              <span>{slide.layoutStrategy || "structured_summary"} / {(slide.problems || []).map((item) => item.message || item).slice(0, 2).join(" / ") || "no issues"}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -2749,9 +8775,9 @@ function StyleProofConfirmationCard({ confirmation }) {
   return (
     <div className={`route-card style-proof-confirm-card ${confirmation.reviewStatus === "block" ? "warning" : ""}`}>
       <b>{"\u98ce\u683c\u786e\u8ba4"}</b>
-      <p>{confirmation.title || confirmation.id} / {confirmation.previewCount || 0} {"\u5f20\u6837\u5f20"} / {"\u590d\u5ba1"} {confirmation.reviewStatus || "未开始"}</p>
-      <div><span>{confirmation.style || "未选择风格"}</span><span>{confirmation.styleFingerprint?.prompt ? "已提取风格指纹" : "无风格指纹"}</span><span>{fix?.changes?.length ? `已修复 ${fix.changes.length} 项` : "未自动修复"}</span></div>
-      {cloud.summary ? <small>{cloud.used ? cloud.summary : "云端复审未执行"}</small> : null}
+      <p>{confirmation.title || confirmation.id} / {confirmation.previewCount || 0} 张样图 / 复核 {uiZh(confirmation.reviewStatus || "未开始")}</p>
+      <div><span>{confirmation.style || "未选择风格"}</span><span>{confirmation.styleFingerprint?.prompt ? "已抽取风格指纹" : "无风格指纹"}</span><span>{fix?.changes?.length ? "已修复 " + fix.changes.length + " 项" : "无自动修复"}</span></div>
+      {cloud.summary ? <small>{cloud.used ? cloud.summary : "未运行云端复核"}</small> : null}
     </div>
   );
 }
@@ -2763,8 +8789,17 @@ function LocalImageQaCard({ qa, onRescan }) {
     <div className={`route-card local-qa-card ${qa.warnCount ? "warning" : ""}`}>
       <div className="local-qa-head"><b>{"\u672c\u5730\u56fe QA"}</b>{onRescan ? <button type="button" onClick={onRescan}>{"\u91cd\u626b"}</button> : null}</div>
       <p>{qa.passCount || 0}/{qa.total} {"\u901a\u8fc7"} / {qa.checked || 0} {"\u5f20\u5df2\u68c0\u67e5"}</p>
-      <div><span>{qa.warnCount ? `风险 ${qa.warnCount}` : "全部通过"}</span><span>{qa.risks?.length ? qa.risks.map(localQaRiskLabel).slice(0, 2).join(" / ") : "暂无风险"}</span></div>
-      {items.length ? <ul className="local-qa-list">{items.slice(0, 5).map((item) => <li className={item.status === "pass" ? "pass" : "warn"} key={item.id || item.name}><strong>{item.slide ? `#${item.slide} ` : ""}{item.status === "pass" ? "通过" : "需检查"}</strong><span>{item.risks?.length ? item.risks.map(localQaRiskLabel).join(" / ") : "暂无风险"}</span></li>)}</ul> : null}
+      <div><span>{qa.warnCount ? `风险 ${qa.warnCount}` : "全部通过"}</span><span>{qa.risks?.length ? qa.risks.map(localQaRiskLabel).slice(0, 2).join(" / ") : "无风险"}</span></div>
+      {items.length ? (
+        <ul className="local-qa-list">
+          {items.slice(0, 5).map((item) => (
+            <li className={item.status === "pass" ? "pass" : "warn"} key={item.id || item.name}>
+              <strong>{item.slide ? `#${item.slide} ` : ""}{item.status === "pass" ? "通过" : "需检查"}</strong>
+              <span>{item.risks?.length ? item.risks.map(localQaRiskLabel).join(" / ") : "无风险"}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -2782,96 +8817,235 @@ function RenderImageQaCard({ qa }) {
   );
 }
 
-function StatusPanel({ job, files, fileIds, status, error, connection, localImage, skillRules, onRepairDelivery, onApplyImageSupplement, onApplyLocalImageSupplement, onRescanLocalImageQa, onGenerateVisualTargetSample }) {
-  const [showDetails, setShowDetails] = useState(false);
-  const warnings = uniqueList([error, job?.warning, job?.previewWarning, job?.exportWarning].filter(Boolean)).filter((item) => !isNonBlockingWarning(item));
-  const ruleGroups = Object.keys(skillRules || {});
-  const ruleCount = ruleGroups.reduce((sum, group) => sum + (Array.isArray(skillRules[group]) ? skillRules[group].length : 0), 0);
-  const routeSummary = job?.quality?.routePlan || job?.input?.routePlan || null;
-  const rawSourceReport = job?.quality?.material?.sourceReport || job?.input?.materialBrief?.sourceReport || null;
-  const imageSlotReport = job?.quality?.material?.imageSlotReport || job?.input?.materialBrief?.imageSlotReport || null;
-  const sourceReport = rawSourceReport ? { ...rawSourceReport, imageSlotReport } : null;
-  const aestheticDiagnosis = job?.quality?.aestheticDiagnosis || rawSourceReport?.aestheticDiagnosis || null;
-  const deliveryChecks = buildDeliveryChecks(job);
-  const deliveryIssues = buildDeliveryIssues(job);
-  const warnChecks = deliveryChecks.filter((item) => item.state === "warn").length;
-  const failChecks = deliveryChecks.filter((item) => item.state === "fail").length;
-  const statusTone = failChecks ? "fail" : warnChecks || warnings.length ? "warn" : "pass";
-  const routeScore = Number(job?.quality?.routeAdherence?.score);
+function DirectorChatPanel({ busy, draft, files, job, messages, setDraft, workflowJob, onAction, onKeyDown, onSend, onSuggestion }) {
+  const deliveryStatus = workflowJob ? deriveWorkflowDeliveryStatus(workflowJob, []) : null;
+  const stageRows = workflowJob ? workflowStageRows(workflowJob) : [];
+  const doneCount = stageRows.filter((row) => row.status === "done").length;
+  const totalCount = stageRows.length || 0;
+  const agentStatus = workflowJob
+    ? `${doneCount}/${totalCount || "-"} 阶段 / ${uiZh(deliveryStatus?.summary || workflowJob.currentStage || workflowJob.status || "工作流中")}`
+    : files.length
+      ? `${files.length} 个材料 / 等待创建工作流`
+      : "等待上传或输入需求";
+  const suggestions = [
+    "判断下一步该做什么",
+    "解释当前工作流状态",
+    "检查 codex-ppt 确认关卡",
+    "检查 editppt 可编辑重建"
+  ];
   return (
-    <div className="side-section">
-      <h2>{"\u72b6\u6001"}</h2>
-      {job ? <div className={`status-summary ${statusTone}`}><div><b>{statusTone === "pass" ? "\u5df2\u901a\u8fc7" : statusTone === "warn" ? "\u9700\u68c0\u67e5" : "\u9700\u4fee\u590d"}</b><span>{job.deck?.slides?.length || 0} {"\u9875"} / {"\u8def\u7531"} {Number.isFinite(routeScore) ? `${Math.round(routeScore * 100)}%` : "-"} / {(job.previewImages || []).filter(Boolean).length} {"\u5f20\u9884\u89c8"}</span></div><button type="button" onClick={() => setShowDetails((value) => !value)}>{showDetails ? "\u6536\u8d77" : "\u8be6\u60c5"}</button></div> : null}
-      <EditReadinessGate readiness={job?.editReadiness} localImage={localImage} onApplyImageSupplement={onApplyImageSupplement} onApplyLocalImageSupplement={onApplyLocalImageSupplement} onRescanLocalImageQa={onRescanLocalImageQa} />
-      <ImageSupplementPlanCard plan={job?.imageSupplementPlan} onApply={onApplyImageSupplement} onApplyLocal={onApplyLocalImageSupplement} localImage={localImage} />
-      {showDetails ? <ul className="status-list"><li><b>{fileIds.length}</b><span>{"\u4e0a\u4f20\u6587\u4ef6"}</span></li><li><b>{job?.deck?.slides?.length || 0}</b><span>{"\u5df2\u751f\u6210\u9875"}</span></li><li><b>{job?.aiUsed ? "AI" : "\u672c\u5730"}</b><span>{"\u751f\u6210\u6a21\u5f0f"}</span></li></ul> : null}
-      <div className={`health-card ${connection?.state || "checking"}`}><span className={connection?.state === "offline" ? "state-dot error" : connection?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{connection?.state === "offline" ? "\u672c\u5730\u79bb\u7ebf" : connection?.state === "online" ? "\u672c\u5730\u5728\u7ebf" : "\u68c0\u67e5\u4e2d"}</b><p>{connection?.message || "\u6b63\u5728\u68c0\u67e5..."}</p></div></div>
-      {routeSummary ? <div className="route-card"><b>{"\u667a\u80fd\u8def\u7531"}</b><p>{routeSummary.deckType || "\u672a\u77e5"} / {routeSummary.recommendedTheme || "\u672a\u8bbe\u7f6e\u98ce\u683c"}</p><div><span>{routeSummary.targetSlides || job?.deck?.slides?.length || 0} {"\u9875"}</span><span>{routeSummary.layoutSequence?.length || 0} {"\u4e2a\u7248\u5f0f"}</span><span>{routeSummary.imageStrategy?.hasImageSlides ? "\u542b\u56fe\u7247\u9875" : "\u65e0\u56fe\u7247\u9875"}</span><span>{routeSummary.riskStrategy?.includeRiskChecklist ? "\u542b\u98ce\u9669\u9875" : "\u65e0\u98ce\u9669\u9875"}</span></div></div> : null}
-      <StyleProofConfirmationCard confirmation={job?.input?.styleProofConfirmation} />
-      <SourceRecognitionCard report={sourceReport} />
-      <AestheticDiagnosisCard diagnosis={aestheticDiagnosis} />
-      <LocalImageQaCard qa={job?.quality?.localImageQa} onRescan={onRescanLocalImageQa} />
-      <RenderImageQaCard qa={job?.quality?.renderImageQa} />
-      {deliveryChecks.length ? <div className="delivery-card"><div className="delivery-card-head"><b>{"\u4ea4\u4ed8\u81ea\u68c0"}</b><span>{failChecks ? "\u672a\u901a\u8fc7" : warnChecks ? "\u9700\u68c0\u67e5" : "\u901a\u8fc7"}</span></div><div className="delivery-check-grid">{deliveryChecks.map((item) => <span className={item.state} key={item.label}><strong>{item.label}</strong>{item.value}</span>)}</div>{deliveryIssues.length ? <ul>{deliveryIssues.map((item) => <li key={item}>{item}</li>)}</ul> : null}{hasRepairableDeliveryIssues(job) && onRepairDelivery ? <button className="btn primary wide" type="button" onClick={onRepairDelivery} disabled={status === "running"}>{"\u81ea\u52a8\u4fee\u590d\u4ea4\u4ed8\u95ee\u9898"}</button> : null}</div> : null}
-      {warnings.length ? <div className="warning-box"><b>{"\u63d0\u793a"}</b><span>{warnings[0]}</span></div> : null}
-      {showDetails ? (
-        <>
-          {job?.agentPlan ? <AgentWorkRecord job={job} files={files} /> : null}
-          {job?.agentReviews?.length ? <AgentReviewCard reviews={job.agentReviews} visualFixes={job.visualFixes || []} /> : null}
-          <PipelineCard pipeline={job?.pipeline} />
-          <VisualTargetCard target={job?.visualTarget} onGenerateSample={onGenerateVisualTargetSample} localImage={localImage} />
-          <SceneGraphCard graph={job?.sceneGraph} qa={job?.sceneGraphQa} />
-          <VisualCompareCard compare={job?.visualCompare} />
-          <SceneGraphRepairCard repair={job?.sceneGraphRepair} />
-          <EditableRebuildCard plan={job?.editableRebuildPlan} />
-          <AestheticPlanCard plan={job?.aestheticPlan} />
-          <div className={`health-card ${localImage?.state || "checking"}`}><span className={localImage?.state === "offline" ? "state-dot error" : localImage?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{localImage?.state === "online" ? "\u751f\u56fe\u5728\u7ebf" : localImage?.state === "offline" ? "\u751f\u56fe\u79bb\u7ebf" : "\u68c0\u67e5\u751f\u56fe"}</b><p>{localImage?.message || "\u68c0\u67e5 Z-Image / ComfyUI..."}</p></div></div>
-          <details className="task-log"><summary>{"\u67e5\u770b\u4efb\u52a1\u65e5\u5fd7"}</summary>{(job?.events || []).map((event, index) => <div key={`${event.type}-${index}`}><strong>{event.type}</strong><span>{event.message}</span></div>)}</details>
-          {ruleCount ? <div className="rule-summary"><b>{"\u89c4\u5219"}</b><span>{ruleGroups.length} {"\u7ec4"} / {ruleCount} {"\u6761"}</span></div> : null}
-        </>
-      ) : null}
-    </div>
-  );
-}
-
-function HistoryPanel({ jobs, onSelect, onDelete, onDeleteMany, onRepair }) {
-  const [query, setQuery] = useState("");
-  const [mode, setMode] = useState("all");
-  const filteredJobs = jobs.filter((item) => {
-    const text = [item.deck?.title, item.mode, item.id].filter(Boolean).join(" ").toLowerCase();
-    return (!query.trim() || text.includes(query.trim().toLowerCase())) && (mode === "all" || item.mode === mode);
-  });
-  return (
-    <div className="side-section">
-      <h2>{"\u5386\u53f2"}</h2>
-      <div className="history-tools">
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="\u641c\u7d22\u4efb\u52a1" />
-        <select value={mode} onChange={(event) => setMode(event.target.value)}><option value="all">{"\u5168\u90e8"}</option><option value="generate">{"\u65b0\u5efa"}</option><option value="optimize">{"\u4f18\u5316"}</option></select>
-        <button type="button" onClick={() => onDeleteMany(filteredJobs)} disabled={!filteredJobs.length}>{"\u6279\u91cf\u5220\u9664"}</button>
+    <div className="director-chat-panel">
+      <div className="director-head">
+        <div>
+          <b>PPT 智能体</b>
+          <span>双技能工作流助手</span>
+        </div>
+        <small>{agentStatus}</small>
       </div>
-      <div className="history-list">
-        {filteredJobs.map((item) => (
-          <div className="history-row" key={item.id}>
-            <button type="button" onClick={() => onSelect(item)}><b>{item.deck?.title || "\u672a\u547d\u540d PPT"}</b><span>{new Date(item.createdAt).toLocaleString()} ? {item.mode === "optimize" ? "\u4f18\u5316 PPT" : "\u65b0\u5efa PPT"}</span></button>
-            <span className={`history-quality ${jobHealthClass(item)}`}>{jobHealthLabel(item)}</span>
-            {jobHealthClass(item) !== "good" ? <button className="history-repair" type="button" onClick={() => onRepair(item)}>{"\u4fee\u590d"}</button> : null}
-            <button className="history-delete" type="button" onClick={() => onDelete(item)}>{"\u5220\u9664"}</button>
+      <div className="director-workflow-card">
+        <span>{workflowJob ? "当前工作流" : "未创建工作流"}</span>
+        <b>{workflowJob?.input?.sourceOriginalName || (workflowJob?.input?.sourceBrief ? "需求简述 / 大纲来源" : workflowJob?.id || "先上传文件或输入需求")}</b>
+        <small>{workflowJob ? workflowJobLabel(workflowJob) : "创建后会进入 codex-ppt 确认关卡"}</small>
+        <div>
+          <button type="button" onClick={() => onAction?.({ event: "open-workflow" })} disabled={busy}>打开工作流</button>
+          <button type="button" onClick={() => onAction?.({ event: "refresh-workflow" })} disabled={busy || !workflowJob?.id}>刷新状态</button>
+        </div>
+      </div>
+      <div className="director-thread" aria-live="polite">
+        {messages.map((message) => (
+          <div className={`director-message ${message.role || "assistant"}`} key={message.id}>
+            {message.title ? <b>{message.title}</b> : null}
+            <p>{message.text}</p>
+            {message.facts?.length ? (
+              <div className="director-facts">
+                {message.facts.map((fact) => <span key={fact}>{fact}</span>)}
+              </div>
+            ) : null}
+            {message.actions?.length ? (
+              <div className="director-actions">
+                {message.actions.map((action) => (
+                  <button type="button" key={action.id} onClick={() => onAction(action)}>{action.label}</button>
+                ))}
+              </div>
+            ) : null}
           </div>
         ))}
-        {jobs.length === 0 ? <p className="empty">{"\u6682\u65e0\u5386\u53f2\u4efb\u52a1"}</p> : null}
+        {busy ? <div className="director-message assistant"><p>正在判断当前状态...</p></div> : null}
+      </div>
+      <div className="director-suggestions">
+        {suggestions.map((item) => <button type="button" key={item} onClick={() => onSuggestion(item)} disabled={busy}>{item}</button>)}
+      </div>
+      <div className="director-input">
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="和 PPT 智能体说你的目标，例如：把上传的 PPT 按现代提案风重做，先出样张。"
+        />
+        <button className="btn primary" type="button" onClick={onSend} disabled={busy || !draft.trim()}>{busy ? "处理中" : "发送"}</button>
       </div>
     </div>
   );
 }
 
-function SettingsPanel({ config, busy, models, styleReferences = [], onChange, onSave, onTest, onDetectModels, onUploadStyleReference, onDeleteStyleReference }) {
+function WorkflowSideStatusPanel({ connection, doctor, job, jobs = [], localImage, onOpenWorkflow, onRefresh }) {
+  const deliveryStatus = deriveWorkflowDeliveryStatus(job, []);
+  const rows = workflowStageRows(job);
+  const doneCount = rows.filter((row) => row.status === "done").length;
+  const failedCount = rows.filter((row) => row.status === "failed").length;
+  const sourcePages = Array.isArray(job?.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
+  const visualPages = Array.isArray(job?.artifacts?.visualImages) ? job.artifacts.visualImages.length : 0;
+  const editablePages = job?.artifacts?.editableFinal?.summary?.page_count || job?.artifacts?.editableFinal?.pptxEditability?.slideCount || 0;
+  const statusTone = failedCount ? "fail" : deliveryStatus.level === "ready" || deliveryStatus.level === "success" ? "pass" : "warn";
+  return (
+    <div className="side-section workflow-side-status">
+      <h2>工作流状态</h2>
+      <div className={`status-summary ${statusTone}`}>
+        <div>
+          <b>{uiZh(deliveryStatus.title || "交付状态")}</b>
+          <span>{uiZh(deliveryStatus.summary || "等待工作流推进")}</span>
+        </div>
+        <button type="button" onClick={onRefresh}>刷新</button>
+      </div>
+      <div className="workflow-side-id">
+        <b>{job?.input?.sourceOriginalName || (job?.input?.sourceBrief ? "需求简述 / 大纲来源" : "当前工作流")}</b>
+        <span>{workflowJobLabel(job)}</span>
+      </div>
+      <div className="workflow-side-metrics">
+        <Metric label="任务数" value={jobs.length} />
+        <Metric label="源页" value={sourcePages} />
+        <Metric label="图片页" value={visualPages} />
+        <Metric label="可编辑页" value={editablePages || "-"} />
+      </div>
+      <div className="workflow-side-stages">
+        {rows.map((row) => (
+          <div className={`workflow-side-stage ${row.status}`} key={row.id}>
+            <span />
+            <div>
+              <b>{uiZh(row.label)}</b>
+              <small>{workflowStatusLabel(row.status)}{row.message ? ` / ${uiZh(row.message)}` : ""}</small>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="workflow-side-actions">
+        <button className="btn primary" type="button" onClick={onOpenWorkflow}>打开工作流控制台</button>
+        <button className="btn ghost" type="button" onClick={onRefresh}>刷新当前任务</button>
+      </div>
+      <div className={`health-card ${connection?.state || "checking"}`}><span className={connection?.state === "offline" ? "state-dot error" : connection?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{connection?.state === "offline" ? "本地服务离线" : connection?.state === "online" ? "本地服务在线" : "正在检查服务"}</b><p>{uiZh(connection?.message || "正在检查...")}</p></div></div>
+      <div className={`health-card ${localImage?.state || "checking"}`}><span className={localImage?.state === "offline" ? "state-dot error" : localImage?.state === "online" ? "state-dot active" : "state-dot checking"} /><div><b>{localImage?.state === "online" ? "图片 API 就绪" : localImage?.state === "offline" ? "图片 API 未就绪" : "正在检查图片 API"}</b><p>{uiZh(localImage?.message || "-")}</p></div></div>
+      <div className={`health-card ${doctor?.state || "checking"}`}><span className={doctor?.state === "fail" ? "state-dot error" : doctor?.state === "pass" ? "state-dot active" : "state-dot checking"} /><div><b>{doctor?.state === "pass" ? "产品环境通过" : doctor?.state === "fail" ? "产品环境需检查" : "正在检查产品环境"}</b><p>{uiZh(doctor?.message || "-")}</p></div></div>
+    </div>
+  );
+}
+
+function ProductOnlyStatusPanel({ connection, doctor, localImage, onOpenMaterials, onOpenWorkflow }) {
+  const serviceOnline = connection?.state === "online";
+  const imageReady = localImage?.state === "online" || connection?.details?.providers?.image?.configured;
+  const doctorChecks = Array.isArray(doctor?.details?.checks) ? doctor.details.checks : [];
+  const failedChecks = doctorChecks.filter((check) => !check.ok);
+  return (
+    <div className="side-section product-only-status">
+      <h2>双技能状态</h2>
+      <p className="panel-help">当前前端只保留 codex-ppt 和 image-to-editable-ppt 双技能工作流。</p>
+      <div className={`health-card ${serviceOnline ? "online" : "offline"}`}>
+        <span className={serviceOnline ? "state-dot active" : "state-dot error"} />
+        <div>
+          <b>{serviceOnline ? "本地服务在线" : "本地服务离线"}</b>
+          <p>{uiZh(connection?.message || "等待本地服务状态")}</p>
+        </div>
+      </div>
+      <div className={`health-card ${imageReady ? "online" : "offline"}`}>
+        <span className={imageReady ? "state-dot active" : "state-dot error"} />
+        <div>
+          <b>{imageReady ? "图片 API 已配置" : "图片 API 未就绪"}</b>
+          <p>{connection?.details?.providers?.image?.model || uiZh(localImage?.message || "codex-ppt 图片页生成需要外部图片 API")}</p>
+        </div>
+      </div>
+      <div className={`health-card ${failedChecks.length ? "offline" : "online"}`}>
+        <span className={failedChecks.length ? "state-dot error" : "state-dot active"} />
+        <div>
+          <b>{failedChecks.length ? "环境仍需处理" : "环境检查通过"}</b>
+          <p>{doctorChecks.length ? `${doctorChecks.length - failedChecks.length}/${doctorChecks.length} 项通过` : uiZh(doctor?.message || "等待环境检查")}</p>
+        </div>
+      </div>
+      <div className="workflow-side-actions">
+        <button className="btn primary" type="button" onClick={onOpenMaterials}>上传资料</button>
+        <button className="btn ghost" type="button" onClick={onOpenWorkflow}>打开工作流</button>
+      </div>
+    </div>
+  );
+}
+
+function WorkflowHistoryPanel({ activeId = "", busy = false, jobs = [], onRefresh, onSelect, onToggleArchive, onToggleArchivedVisibility, showArchived = false }) {
+  const [query, setQuery] = useState("");
+  const [stage, setStage] = useState("all");
+  const filteredJobs = jobs.filter((item) => {
+    const text = [
+      item.id,
+      item.input?.sourceOriginalName,
+      item.input?.sourceBrief,
+      item.currentStage,
+      item.status
+    ].filter(Boolean).join(" ").toLowerCase();
+    return (!query.trim() || text.includes(query.trim().toLowerCase()))
+      && (stage === "all" || item.currentStage === stage || item.status === stage);
+  });
+  const stages = [...new Set(jobs.map((item) => item.currentStage || item.status).filter(Boolean))].slice(0, 12);
+  return (
+    <div className="side-section workflow-history-panel">
+      <h2>工作流历史</h2>
+      <p className="panel-help">这里只显示 codex-ppt 到 image-to-editable-ppt 的双技能工作流任务。</p>
+      <div className="history-tools workflow-history-tools">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索工作流" />
+        <select value={stage} onChange={(event) => setStage(event.target.value)}>
+          <option value="all">全部阶段</option>
+          {stages.map((item) => <option key={item} value={item}>{uiZh(item)}</option>)}
+        </select>
+        <button type="button" onClick={() => onToggleArchivedVisibility?.(!showArchived)} disabled={busy}>
+          {showArchived ? "隐藏已归档" : "显示已归档"}
+        </button>
+        <button type="button" onClick={onRefresh} disabled={busy}>刷新列表</button>
+      </div>
+      <div className="history-list workflow-history-list">
+        {filteredJobs.map((item) => {
+          const active = item.id === activeId;
+          const stageRows = workflowStageRows(item);
+          const doneCount = stageRows.filter((row) => row.status === "done").length;
+          const totalCount = stageRows.length || 1;
+          const updatedAt = item.updatedAt || item.createdAt || "";
+          const sourceName = item.input?.sourceOriginalName || (item.input?.sourceBrief ? "需求简述 / 大纲来源" : "");
+          return (
+            <div className={active ? "history-row workflow-history-row active" : "history-row workflow-history-row"} key={item.id}>
+              <button type="button" onClick={() => onSelect?.(item.id)} disabled={busy}>
+                <b>{sourceName || item.id}</b>
+                <span>{workflowJobLabel(item)}</span>
+                <span>{updatedAt ? new Date(updatedAt).toLocaleString() : "暂无更新时间"}</span>
+              </button>
+              <span className={`history-quality ${workflowHistoryClass(item)}`}>
+                {item.archived ? "已归档" : workflowStatusLabel(item.status || item.currentStage)}
+              </span>
+              <span className="workflow-history-progress">{doneCount}/{totalCount}</span>
+              <button className="history-repair" type="button" onClick={() => onToggleArchive?.(item.id, !item.archived)} disabled={busy}>
+                {item.archived ? "恢复" : "归档"}
+              </button>
+            </div>
+          );
+        })}
+        {!filteredJobs.length ? <p className="empty">暂无双技能工作流任务</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({ config, busy, models, styleReferences = [], onChange, onSave, onSavePaddleOcrToken, onTest, onTestImage, onDetectModels, onUploadStyleReference, onDeleteStyleReference }) {
   const [styleName, setStyleName] = useState("");
   const [styleTone, setStyleTone] = useState("");
   function update(name, value) { onChange((current) => ({ ...current, [name]: value })); }
   function handleStyleUpload(event) {
     const files = event.target.files;
     if (files?.length) {
-      onUploadStyleReference(files, { name: styleName, tone: styleTone, themeName: "", themeSlug: "" });
+      onUploadStyleReference(files, { name: styleName, tone: styleTone });
       setStyleName("");
       setStyleTone("");
     }
@@ -2880,20 +9054,28 @@ function SettingsPanel({ config, busy, models, styleReferences = [], onChange, o
   return (
     <div className="side-section settings-panel">
       <h2>{"API \u8bbe\u7f6e"}</h2>
-      <div className={"api-state " + (config.hasApiKey ? "ready" : "missing")}><span className={config.hasApiKey ? "state-dot active" : "state-dot error"} /><div><b>{config.hasApiKey ? "AI \u5df2\u914d\u7f6e" : "\u672a\u914d\u7f6e API Key"}</b><p>{config.hasApiKey ? "\u5f53\u524d Key: " + (config.maskedApiKey || "-") : "\u672a\u914d\u7f6e\uff0c\u5c06\u4f7f\u7528\u672c\u5730\u6a21\u677f\u751f\u6210"}</p></div></div>
-      <Field label="OpenAI API Key"><input type="password" value={config.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={config.hasApiKey ? "\u7559\u7a7a\u5219\u4fdd\u7559\u5df2\u4fdd\u5b58\u7684 Key" : "sk-..."} autoComplete="off" /></Field>
-      <Field label="Base URL"><input value={config.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.openai.com/v1" /></Field>
-      <Field label="Model"><select value={config.model || ""} onChange={(event) => update("model", event.target.value)}>{models?.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value={config.model || "gpt-4.1-mini"}>{config.model || "gpt-4.1-mini"}</option>}</select></Field>
-      <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>{"\u4fdd\u5b58\u914d\u7f6e"}</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>{"\u6d4b\u8bd5\u8fde\u63a5"}</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>{"\u68c0\u6d4b\u6a21\u578b"}</button></div>
+      <div className={"api-state " + (config.hasApiKey ? "ready" : "missing")}><span className={config.hasApiKey ? "state-dot active" : "state-dot error"} /><div><b>{config.hasApiKey ? "AI 已配置" : "未配置 API Key"}</b><p>{config.hasApiKey ? "当前 Key: " + (config.maskedApiKey || "-") : "未配置，双技能生成会停在配置检查。"}</p></div></div>
+      <Field label="OpenAI 密钥"><input type="password" value={config.apiKey || ""} onChange={(event) => update("apiKey", event.target.value)} placeholder={config.hasApiKey ? "\u7559\u7a7a\u5219\u4fdd\u7559\u5df2\u4fdd\u5b58\u7684 Key" : "sk-..."} autoComplete="off" /></Field>
+      <Field label="接口地址"><input value={config.baseUrl || ""} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.openai.com/v1" /></Field>
+      <Field label="对话模型"><select value={config.model || ""} onChange={(event) => update("model", event.target.value)}>{models?.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value={config.model || "gpt-4.1-mini"}>{config.model || "gpt-4.1-mini"}</option>}</select></Field>
+      <Field label="图片模型"><input value={config.imageModel || ""} onChange={(event) => update("imageModel", event.target.value)} placeholder="gpt-image-2" /></Field>
+      <p className="settings-note">图片模型用于 codex-ppt 样张和全量图片页生成。真正调用外部图片 API 前，工作流会再次要求确认。</p>
+      <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>保存配置</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>测试对话 API</button><button className="btn ghost" type="button" onClick={onTestImage} disabled={busy}>测试图片 API</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>检测模型</button></div>
       <div className="settings-divider" />
-      <h2>{"\u98ce\u683c\u53c2\u8003\u5e93"}</h2>
-      <p className="settings-note">{"\u4e0a\u4f20\u4e00\u7ec4\u53c2\u8003\u56fe\uff0c\u7cfb\u7edf\u4f1a\u628a\u5b83\u4eec\u4f5c\u4e3a\u6574\u4f53\u8c03\u6027\u8f93\u5165\uff1a\u8272\u5f69\u3001\u7559\u767d\u3001\u8d28\u611f\u3001\u56fe\u7247\u6bd4\u4f8b\u3001\u6587\u5b57\u5bc6\u5ea6\u548c\u6392\u7248\u8282\u594f\u90fd\u4f1a\u53c2\u4e0e\u540e\u7eed PPT \u751f\u6210\u3002"}</p>
-      <Field label={"\u53c2\u8003\u540d\u79f0"}><input value={styleName} onChange={(event) => setStyleName(event.target.value)} placeholder={"\u4f8b\u5982\uff1a\u4e1c\u65b9\u81ea\u7136\u98ce\u793c\u76d2\u53c2\u8003"} /></Field>
-      <Field label={"\u8c03\u6027\u8bf4\u660e"}><textarea className="compact-textarea" value={styleTone} onChange={(event) => setStyleTone(event.target.value)} placeholder={"\u4f8b\u5982\uff1a\u7559\u767d\u591a\u3001\u4f4e\u9971\u548c\u3001\u7eb8\u611f\u7eb9\u7406\u3001\u6807\u9898\u514b\u5236\u3002"} /></Field>
-      <label className="style-upload"><input type="file" accept="image/*" multiple onChange={handleStyleUpload} disabled={busy} /><span>{"\u4e0a\u4f20\u98ce\u683c\u53c2\u8003\u56fe"}</span></label>
-      <div className="style-current-gallery"><div className="style-current-gallery-head"><b>{"\u5df2\u4e0a\u4f20\u53c2\u8003\u56fe"}</b><span>{styleReferences.length} {"\u5f20"}</span></div>{styleReferences.length ? <div className="style-thumb-grid">{styleReferences.slice(0, 12).map((item) => <img key={item.id} src={item.imageUrl} alt={item.name || item.originalName || "\u53c2\u8003\u56fe"} />)}</div> : <p className="empty">{"\u8fd8\u6ca1\u6709\u98ce\u683c\u53c2\u8003\u56fe"}</p>}</div>
+      <h2>image-to-editable-ppt OCR</h2>
+      <div className={"api-state " + (config.editppt?.textHints?.paddleToken === "set" ? "ready" : "missing")}><span className={config.editppt?.textHints?.paddleToken === "set" ? "state-dot active" : "state-dot error"} /><div><b>{config.editppt?.textHints?.paddleToken === "set" ? "PaddleOCR 令牌已配置" : "PaddleOCR 令牌未设置"}</b><p>{uiZh(config.editppt?.textHints?.selection || "unknown")} 文字提示 / <a href={config.editppt?.textHints?.applyUrl || "https://aistudio.baidu.com/account/accessToken"} target="_blank" rel="noreferrer">申请令牌</a></p></div></div>
+      <Field label="PaddleOCR 令牌"><input type="password" value={config.paddleOcrToken || ""} onChange={(event) => update("paddleOcrToken", event.target.value)} placeholder={config.editppt?.textHints?.paddleToken === "set" ? "留空则保留已保存的令牌" : "粘贴 PaddleOCR 令牌"} autoComplete="off" /></Field>
+      <p className="settings-note">会通过 editppt config 保存到 ~/.editppt/config.yaml。保存后，在工作流中使用“重新生成 editppt 提示”刷新页面文字提示。</p>
+      <div className="button-row tight"><button className="btn ghost" type="button" onClick={onSavePaddleOcrToken} disabled={busy || !String(config.paddleOcrToken || "").trim()}>保存 PaddleOCR 令牌</button></div>
+      <div className="settings-divider" />
+      <h2>可选参考图（非模板）</h2>
+      <p className="settings-note">参考图只作为 codex-ppt 的色彩、留白、质感和画面密度约束，不是旧模板库，也不会锁死固定版式。</p>
+      <Field label="参考名称"><input value={styleName} onChange={(event) => setStyleName(event.target.value)} placeholder="例如：客户提供的参考页 / 品牌视觉参考" /></Field>
+      <Field label="调性说明"><textarea className="compact-textarea" value={styleTone} onChange={(event) => setStyleTone(event.target.value)} placeholder="例如：留白多、低饱和、纸感纹理、标题克制。" /></Field>
+      <label className="style-upload"><input type="file" accept="image/*" multiple onChange={handleStyleUpload} disabled={busy} /><span>上传参考图</span></label>
+      <div className="style-current-gallery"><div className="style-current-gallery-head"><b>{"\u5df2\u4e0a\u4f20\u53c2\u8003\u56fe"}</b><span>{styleReferences.length} {"\u5f20"}</span></div>{styleReferences.length ? <div className="style-thumb-grid">{styleReferences.slice(0, 12).map((item) => <img key={item.id} src={item.imageUrl} alt={item.name || item.originalName || "\u53c2\u8003\u56fe"} />)}</div> : <p className="empty">还没有可选参考图</p>}</div>
       <div className="style-reference-list">
-        {styleReferences.length ? styleReferences.map((item) => <StyleReferenceItem key={item.id} item={item} busy={busy} onDelete={onDeleteStyleReference} />) : <p className="empty">{"\u6682\u65e0\u98ce\u683c\u53c2\u8003"}</p>}
+        {styleReferences.length ? styleReferences.map((item) => <StyleReferenceItem key={item.id} item={item} busy={busy} onDelete={onDeleteStyleReference} />) : <p className="empty">暂无可选参考图</p>}
       </div>
     </div>
   );
@@ -2920,7 +9102,7 @@ function DownloadLinks({ job, compact = false }) {
   if (links.length === 0) return <p className="empty">暂无导出文件</p>;
   return (
     <div className={compact ? "download-links compact" : "download-links"}>
-      {blocked ? <span className="download-warning">QA blocked: 当前 PPTX 是可编辑草稿，不能作为最终成品交付。</span> : null}
+      {blocked ? <span className="download-warning">QA 已阻断：当前 PPTX 只是可编辑草稿，不能作为最终交付文件。</span> : null}
       {links.map(([label, url, size]) => <a key={`${label}-${url}`} href={url} target="_blank" rel="noreferrer">{label}{size ? <small>{size}</small> : null}</a>)}
     </div>
   );
@@ -2945,8 +9127,8 @@ function Metric({ label, value }) { return <div className="metric"><b>{value}</b
 
 function GenerationProgress({ progress }) {
   const value = Math.max(0, Math.min(100, progress?.value || 0));
-  const title = progress?.mode === "style-preview" ? "正在生成主视觉方向" : progress?.mode === "optimize" ? "正在优化旧 PPT" : "正在生成 PPT";
-  return <div className="generation-progress"><div><b>{title}</b><span>{progress?.label || "正在处理，请稍等..."}</span></div><strong>{value}%</strong><em><i style={{ width: `${value}%` }} /></em></div>;
+  const title = progress?.mode === "style-preview" ? "正在生成主视觉方向" : progress?.mode === "optimize" ? "正在重制现有 PPT" : "正在生成 PPT";
+  return <div className="generation-progress"><div><b>{title}</b><span>{uiZh(progress?.label || "正在处理，请稍等...")}</span></div><strong>{value}%</strong><em><i style={{ width: `${value}%` }} /></em></div>;
 }
 
 function toggle(list, item) {
@@ -2962,25 +9144,25 @@ function toBulletList(value) {
 function normalizePreviewPrices(slide = {}) {
   const data = toBulletList(slide.dataPoints);
   const source = data.length ? data : toBulletList(slide.bullets);
-  const tiers = ["基础档", "推荐档", "升级档", "高配档", "定制档", "补充项"];
+  const tiers = ["基础", "推荐", "升级", "高级", "定制", "补充"];
   const entries = source.slice(0, 6).map((item, index) => {
     const text = String(item || "");
     const price = text.match(/\d+(?:\.\d+)?/)?.[0] || String(index + 1);
-    const label = text.replace(price, "").replace(/[，、；;\-]/g, " ").trim() || tiers[index] || `第 ${index + 1} 档`;
+    const label = text.replace(price, "").replace(/[，。；、:：\-]/g, " ").trim() || tiers[index] || "Plan " + (index + 1);
     return {
-      tier: tiers[index] || `第 ${index + 1} 档`,
+      tier: tiers[index] || "Plan " + (index + 1),
       price,
       label,
-      note: index === 0 ? "入门预算" : index === source.length - 1 ? "需复核" : "可推荐",
+        note: index === 0 ? "入门预算" : index === source.length - 1 ? "需要复核" : "推荐",
       accented: /recommended|upgrade|premium|推荐|升级|高配/i.test(text) || index === 1
     };
   });
-  return entries.length ? entries : [{ tier: "推荐档", price: "01", label: slide.title || "待补充", note: "需复核", accented: true }];
+  return entries.length ? entries : [{ tier: "推荐", price: "01", label: slide.title || "待处理", note: "需要复核", accented: true }];
 }
 
 function buildPreviewProductFacts(slide = {}) {
   const text = [slide.title, slide.subtitle, ...toBulletList(slide.bullets), ...toBulletList(slide.dataPoints)].join(" ");
-  const price = text.match(/\d+(?:\.\d+)?/)?.[0] || "待确认";
+  const price = text.match(/\d+(?:\.\d+)?/)?.[0] || "pending";
   const spec = text.match(/\d{2,4}\s*[xX*]\s*\d{2,4}(?:\s*[xX*]\s*\d{2,4})?\s*(?:mm|cm)?/i)?.[0] || "待确认";
   const scene = toBulletList(slide.bullets).find((item) => /scene|client|gift|benefit|客户|礼品|福利|场景/i.test(item)) || slide.subtitle || "按客户预算匹配";
   return [
@@ -3080,8 +9262,8 @@ function scoreImageLayout(name, layout) {
   return 0;
 }
 
-function normalizeMatchText(value = "") { return String(value).toLowerCase().replace(/s+/g, "").replace(/[^一-龥a-z0-9]/g, ""); }
-function tokenizeForMatch(value = "") { return [...new Set([...(value.match(/[一-龥]{2,8}/g) || []), ...(value.match(/[a-z0-9]{2,}/g) || [])])].slice(0, 24); }
+function normalizeMatchText(value = "") { return String(value).toLowerCase().replace(/\s+/g, "").replace(/[^\u4e00-\u9fa5a-z0-9]/g, ""); }
+function tokenizeForMatch(value = "") { return [...new Set([...(value.match(/[\u4e00-\u9fa5]{2,8}/g) || []), ...(value.match(/[a-z0-9]{2,}/g) || [])])].slice(0, 24); }
 
 function getCompletion({ form, fileIds, job }) {
   let score = 0;
@@ -3094,7 +9276,7 @@ function getCompletion({ form, fileIds, job }) {
 
 function generationProgressLabel(value = 0, mode = "") {
   if (mode === "style-preview") {
-    if (value < 30) return "正在读取资料、设计方向和已确认大纲";
+    if (value < 30) return "正在读取资料、参考图和已确认大纲";
     if (value < 55) return "正在判断方向页和版式路线";
     if (value < 78) return "正在生成 3-4 页主视觉方向";
     if (value < 92) return "正在执行自动质检和视觉复审";
@@ -3129,6 +9311,375 @@ function isJobBlockedForFinal(job) {
   return Boolean(job?.editReadiness?.ready === false || job?.editReadiness?.status === "blocked");
 }
 
+function workflowStageRows(job = {}) {
+  const stages = job?.stages || {};
+  const artifact = job?.artifacts || {};
+  const rows = [
+    ["source-render", "源稿渲染", artifact.renderedPages],
+    ["visual-generate", "视觉重绘", artifact.visualImages],
+    ["image-deck", "图片型 PPT", artifact.imageDeck],
+    ["editable-prepare", "editppt prepare", artifact.editableRun],
+    ["worker-prompts", "页面提示", artifact.editableWorkerPrompts],
+    ["finalize", "合成可编辑 PPT", artifact.editableFinal]
+  ];
+  return rows.map(([id, label, output]) => {
+    const stage = stages[id] || stages[id.replace("-", "_")] || {};
+    const current = job?.currentStage === id;
+    const done = Boolean(output) || stage.status === "completed";
+    return {
+      id,
+      label,
+      status: done ? "done" : current || stage.status === "running" ? "running" : stage.status === "failed" ? "failed" : "pending",
+      message: stage.message || stage.error || stage.updatedAt || ""
+    };
+  });
+}
+
+function buildProductWorkflowMap({ complianceBundle = null, deliveryGate = null, job = null, tasks = {} } = {}) {
+  const artifacts = job?.artifacts || {};
+  const approvals = complianceBundle?.codexPpt?.approvals || {};
+  const approvedCount = Number(approvals.passed || 0);
+  const approvalTotal = Number(approvals.total || 5);
+  const codexSlideTasks = Array.isArray(tasks.codexSlideTasks) ? tasks.codexSlideTasks : [];
+  const editableTasks = Array.isArray(tasks.editableTasks) ? tasks.editableTasks : [];
+  const sourcePages = Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0;
+  const visualPages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages.length : 0;
+  const recordedCodexSlides = codexSlideTasks.filter((task) => task.status === "recorded" && task.imagePath).length;
+  const failedCodexSlides = codexSlideTasks.filter((task) => task.status === "failed").length;
+  const recordedEditablePages = editableTasks.filter((task) => task.status === "recorded").length;
+  const failedEditablePages = editableTasks.filter((task) => task.status === "failed").length;
+  const pendingEditablePages = editableTasks.filter((task) => task.status && task.status !== "recorded" && task.status !== "failed").length;
+  const hasSource = sourcePages > 0;
+  const hasImageDeck = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const hasEditableRun = Boolean(artifacts.editableRun?.path || artifacts.editableRun?.relativePath);
+  const hasEditableFinal = Boolean(artifacts.editableFinal?.path);
+  const isDeliverable = deliveryGate?.downloadable === true || deliveryGate?.productReady === true;
+
+  return [
+    {
+      id: "source",
+      label: "源文件渲染",
+      state: hasSource ? "ready" : job?.id ? "working" : "pending",
+      detail: hasSource ? `${sourcePages} 页已渲染` : "创建工作流并渲染源页面"
+    },
+    {
+      id: "codex-approvals",
+      label: "codex-ppt 确认关卡",
+      state: approvalTotal && approvedCount >= approvalTotal ? "ready" : approvedCount > 0 ? "working" : hasSource ? "working" : "pending",
+      detail: approvalTotal ? `${approvedCount}/${approvalTotal} 项确认已记录` : "大纲、风格、后端、样张、全量生成"
+    },
+    {
+      id: "image-deck",
+
+      label: "图片型 PPT",
+      state: hasImageDeck ? "ready" : failedCodexSlides ? "blocked" : visualPages || recordedCodexSlides ? "working" : "pending",
+      detail: hasImageDeck ? "图片型 PPT 已组装" : failedCodexSlides ? `${failedCodexSlides} 个图片页任务失败` : `${visualPages || recordedCodexSlides} 个视觉页就绪`
+    },
+    {
+      id: "editable-rebuild",
+      label: "可编辑重建",
+      state: hasEditableFinal ? "ready" : failedEditablePages ? "blocked" : hasEditableRun || recordedEditablePages || pendingEditablePages ? "working" : "pending",
+      detail: hasEditableFinal ? "可编辑 PPTX 已生成" : failedEditablePages ? `${failedEditablePages} 个可编辑页失败` : `${recordedEditablePages}/${editableTasks.length || 0} 个可编辑页已记录`
+    },
+    {
+      id: "delivery",
+      label: "交付门禁",
+      state: isDeliverable ? "ready" : deliveryGate?.level === "blocked" ? "blocked" : hasEditableFinal ? "working" : "pending",
+      detail: uiZh(deliveryGate?.label || deliveryGate?.title || "最终质检、人工复核、下载")
+    }
+  ];
+}
+
+function workflowJobLabel(job = {}) {
+  const id = String(job.id || "").replace(/^workflow_/, "");
+  const sourcePages = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
+  const visualPages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages.length : 0;
+  const finalPages = job.artifacts?.editableFinal?.summary?.page_count || job.artifacts?.editableFinal?.pptxEditability?.slideCount || 0;
+  const pages = finalPages ? `${finalPages} final` : visualPages ? `${visualPages} visual` : sourcePages ? `${sourcePages} source` : "new";
+  const archived = job.archived ? " archived" : "";
+  return `${id} 路 ${pages} 路 ${job.currentStage || job.status || "created"}${archived}`;
+}
+
+function selectDefaultWorkflowJob(jobs = []) {
+  const visibleJobs = Array.isArray(jobs) ? jobs.filter(Boolean) : [];
+  if (!visibleJobs.length) return null;
+  const sorted = [...visibleJobs].sort(compareWorkflowRecency);
+  return sorted.find(isActiveWorkflowJob)
+    || sorted.find((job) => Boolean(job.artifacts?.editableFinal?.path))
+    || sorted[0]
+    || null;
+}
+
+function compareWorkflowRecency(a = {}, b = {}) {
+  const bTime = Date.parse(b.updatedAt || b.createdAt || "") || 0;
+  const aTime = Date.parse(a.updatedAt || a.createdAt || "") || 0;
+  return bTime - aTime;
+}
+
+function isActiveWorkflowJob(job = {}) {
+  if (job.archived) return false;
+  if (job.artifacts?.editableFinal?.path) return false;
+  return !["complete", "failed"].includes(job.currentStage || job.status || "");
+}
+
+function isUserWorkflowJob(job = {}) {
+  return !isInternalWorkflowJob(job);
+}
+
+function isInternalWorkflowJob(job = {}) {
+  if (job.internal === true || job.input?.internal === true) return true;
+  const text = [
+    job.input?.mode,
+    job.input?.sourceOriginalName,
+    job.input?.notes,
+    ...(Array.isArray(job.events) ? job.events.map((event) => `${event.type || ""} ${event.message || ""}`) : [])
+  ].filter(Boolean).join(" ");
+  return /\b(regression|smoke-e2e|product-visual-readiness|codex-slide-negative)\b/i.test(text);
+}
+
+function workflowStatusLabel(status = "") {
+  if (status === "not_started") return "未开始";
+  if (status === "done") return "完成";
+  if (status === "running") return "运行中";
+  if (status === "failed") return "失败";
+  return "待处理";
+}
+
+
+function workflowHistoryClass(job = {}) {
+  if (job.archived) return "warn";
+  if (job.status === "failed" || job.currentStage === "failed") return "bad";
+  if (job.status === "complete" || job.currentStage === "complete" || job.artifacts?.editableFinal?.path) return "good";
+  return "warn";
+}
+function v1AcceptanceStatusLabel(status = "") {
+  if (status === "pass") return "通过";
+  if (status === "warning") return "需复核";
+  if (status === "fail") return "阻断";
+  return "待处理";
+}
+
+function workerTaskStatusLabel(status = "") {
+  if (status === "ready") return "就绪";
+  if (status === "claimed") return "已领取";
+  if (status === "running") return "运行中";
+  if (status === "recorded") return "已记录";
+  if (status === "failed") return "失败";
+  return "未知";
+}
+
+function getEditableWorkerNextAction({ selectedPrompt = null, selectedTask = null, nextStage = "" } = {}) {
+  if (!selectedPrompt) return "请先生成或读取页面提示。";
+  if (!selectedTask) return "先同步队列，再领取当前页面。";
+  if (selectedTask.status === "recorded") return "结果已记录，可以继续下一页或进入最终合成。";
+  if (selectedTask.status === "failed") return "检查错误后重置重试。";
+  if (selectedTask.status === "claimed" || selectedTask.status === "running" || selectedTask.status === "dispatched") return "等待页面任务输出，然后记录结果。";
+  if (nextStage === "rebuild_page_locally") return "对当前单页运行受限本地重建。";
+  return "确认页面任务已启动，然后领取或派发任务。";
+}
+
+function getCodexSlideWorkerNextAction({ selectedTask = null, hasImagePath = false } = {}) {
+  if (!selectedTask) return "全量确认后同步 codex 图片页任务。";
+  if (selectedTask.status === "recorded") return "图片页已记录；全部完成后可组装图片型 PPT。";
+  if (selectedTask.status === "failed") return "检查阻断原因后重置重试。";
+  if (selectedTask.status === "claimed" || selectedTask.status === "running") {
+    return hasImagePath ? "记录生成图片路径。" : "等待图片页任务输出图片路径。";
+  }
+  return "确认真实图片页任务已启动，然后领取任务。";
+}
+
+function formatWorkerRunSummary(run = {}) {
+  if (!run) return "";
+  const task = run.taskSummary || run.summary?.taskSummary || null;
+  const parts = [];
+  if (run.succeeded !== null && run.succeeded !== undefined) parts.push(`succeeded ${run.succeeded}`);
+  if (run.failed !== null && run.failed !== undefined) parts.push(`failed ${run.failed}`);
+  if (task) parts.push(`recorded ${task.recorded || 0}/${task.total || 0}`);
+  if (run.finalize?.ok) parts.push("finalized");
+  if (run.finalize?.error) parts.push(`finalize failed: ${run.finalize.error}`);
+  if (run.error) parts.push(run.error);
+  if (!parts.length && run.startedAt) parts.push(run.startedAt);
+  return parts.join(" / ");
+}
+
+function deliveryStepTargetId(stepId = "") {
+  if (["start-page-workers", "sync-page-workers", "wait-page-workers", "retry-failed-pages"].includes(stepId)) return "editable-page-worker-panel";
+  if (["generate-image-deck"].includes(stepId)) return "codex-slide-worker-panel";
+  if (["record-sample-authorization", "record-full-deck-authorization"].includes(stepId)) return "workflow-authorization-panel";
+  if (["generate-sample", "approve-sample", "approve-fullDeck"].includes(stepId)) return "workflow-compliance-panel";
+  if (["review-validation", "review-delivery", "retry-stale-page-evidence"].includes(stepId)) return "workflow-delivery-panel";
+  if (["render-source", "prepare-editable", "finalize-editable", "continue-workflow", "refresh-backend-approval", "refresh-style-approval"].includes(stepId)) return "workflow-compliance-panel";
+  return "";
+}
+
+function buildRefreshedCodexPptStyleBody(job = {}) {
+  const sourceName = job.input?.sourceOriginalName || job.artifacts?.source?.originalName || "";
+  const sourceBrief = job.input?.sourceBrief || job.input?.notes || "";
+  const pageCount = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
+  const briefParts = [
+    "基于 codex-ppt 到 image-to-editable-ppt 的双技能主流程，重新记录整套 PPT 的视觉风格证据。",
+    sourceName ? `源文件：${sourceName}。` : "",
+    pageCount ? `已渲染源页面：${pageCount} 页。` : "",
+    sourceBrief ? `用户需求 / 源稿简述：${sourceBrief}` : "",
+    "风格目标：视觉统一、层级清晰、版式随页面角色变化；参考图和源页只作为调性约束，不沿用历史风格包名称。"
+  ].filter(Boolean).join(" ");
+  return {
+    source: "frontend-refresh-skill-first-style",
+    title: job.input?.sourceOriginalName || "双技能 codex-ppt 视觉风格",
+    styleBrief: briefParts,
+    audience: job.input?.audience || "",
+    constraints: "Use codex-ppt to create image-based visual pages first, then use image-to-editable-ppt/editppt for editable reconstruction. Do not use historical local style names as product workflow evidence.",
+    references: [sourceName].filter(Boolean),
+    recordedBy: "frontend-skill-first",
+    notes: "从产品级 v1 风格证据保护刷新；不会触发图片生成。",
+    invalidateApprovals: true,
+    invalidateReason: "style evidence refreshed for skill-first workflow"
+  };
+}
+
+function mergeApprovalPreflightUi(ui = {}, preflight = null, passed = false) {
+  if (!preflight || passed) return ui;
+  if (preflight.ready) return {
+    ...ui,
+    canApprove: Boolean(ui.canApprove),
+    blockers: Array.isArray(ui.blockers) ? ui.blockers : []
+  };
+  const backendBlockers = Array.isArray(preflight.blockers) && preflight.blockers.length
+    ? preflight.blockers
+    : [preflight.error || "Backend approval preflight is not ready."];
+  return {
+    ...ui,
+    canApprove: false,
+    label: "blocked",
+    reason: preflight.error || ui.reason || "Backend approval preflight is not ready.",
+    status: ui.status === "pass" ? "pass" : "warning",
+    blockers: [...new Set([...backendBlockers, ...(Array.isArray(ui.blockers) ? ui.blockers : [])])]
+  };
+}
+
+function getCodexApprovalGateUiState(gateId = "", { approvalMap = new Map(), bundle = null, job = null, passed = false } = {}) {
+  if (passed) return { canApprove: false, label: "passed", reason: "approval evidence recorded", status: "pass" };
+  const artifacts = job?.artifacts || {};
+  const hasOutline = Boolean(artifacts.codexPptOutline?.path || bundle?.codexPpt?.outline?.path);
+  const hasStyle = Boolean(artifacts.codexPptStyle?.path || bundle?.codexPpt?.style?.path);
+  const styleLooksLegacy = looksLikeLegacyCodexPptStyle(artifacts.codexPptStyle || bundle?.codexPpt?.style);
+  const hasBackend = Boolean(artifacts.codexPptBackendDecision?.path || bundle?.codexPpt?.backendDecision?.path);
+  const sampleArtifact = artifacts.visualSample || bundle?.codexPpt?.sample?.artifact || null;
+  const hasSample = Boolean(sampleArtifact?.path);
+  const sampleLooksNonProduct = looksLikeNonProductVisualSample(sampleArtifact);
+  const approved = (id) => Boolean(approvalMap.get(id)?.passed);
+  const firstThreeApproved = ["outline", "style", "backend"].every(approved);
+  if (gateId === "outline") {
+    return hasOutline
+      ? { canApprove: true, label: "ready", reason: "大纲证据已存在，可以确认。", status: "ready" }
+      : { canApprove: false, label: "pending", reason: "请先生成或记录大纲证据。", status: "pending" };
+  }
+  if (gateId === "style") {
+    if (hasStyle && styleLooksLegacy) return { canApprove: false, label: "blocked", reason: "当前视觉风格证据仍是历史调性，请先刷新 codex-ppt 风格证据。", status: "warning", blockers: ["历史风格证据不能作为产品级双技能流程确认依据。"] };
+    return hasStyle
+      ? { canApprove: true, label: "ready", reason: "视觉风格证据已存在，可以确认。", status: "ready" }
+      : { canApprove: false, label: "pending", reason: "请先生成或记录视觉风格。", status: "pending" };
+  }
+  if (gateId === "backend") {
+    return hasBackend
+      ? { canApprove: true, label: "ready", reason: "图片后端已确认。", status: "ready" }
+      : { canApprove: false, label: "pending", reason: "请先确认图片后端配置。", status: "pending" };
+  }
+  if (gateId === "sample") {
+    if (!firstThreeApproved) return { canApprove: false, label: "pending", reason: "请先确认大纲、风格和后端。", status: "pending", blockers: ["样张复核前必须先完成大纲、风格和后端确认。"] };
+    if (sampleLooksNonProduct) return { canApprove: false, label: "blocked", reason: "请先用已确认的图片运行环境重新生成产品级视觉样张。", status: "warning", blockers: ["验证链路或透传样张证据不能审批。", "请使用当前配置的图片运行环境生成一页产品级样张。"] };
+    return hasSample
+      ? { canApprove: true, label: "ready", reason: "样张已生成，可以复核。", status: "ready" }
+      : { canApprove: false, label: "pending", reason: "请先生成一页视觉样张。", status: "pending", blockers: ["审批前需要先生成并检查一页视觉样张。"] };
+  }
+  if (gateId === "fullDeck") {
+    if (!approved("sample")) return { canApprove: false, label: "pending", reason: "请先确认视觉样张。", status: "pending", blockers: ["产品样张关卡确认前，整套生成会保持锁定。"] };
+    if (sampleLooksNonProduct) return { canApprove: false, label: "blocked", reason: "全量授权需要产品级视觉样张。", status: "warning", blockers: ["授权整套图片前，请先重新生成并确认产品级样张。"] };
+    return hasSample
+      ? { canApprove: true, label: "ready", reason: "样张已通过，可以授权整套生成。", status: "ready" }
+      : { canApprove: false, label: "pending", reason: "缺少视觉样张证据。", status: "pending", blockers: ["全量授权前必须有视觉样张证据。"] };
+  }
+  return { canApprove: false, label: "pending", reason: "未知确认关卡。", status: "pending" };
+}
+
+function looksLikeNonProductVisualSample(sample = null) {
+  if (!sample) return false;
+  const text = [
+    sample.source,
+    sample.provider,
+    sample.model,
+    sample.baseUrl,
+    sample.dryRun ? "dry-run" : "",
+    sample.passthrough ? "passthrough" : ""
+  ].join(" ");
+  return Boolean(sample.dryRun || sample.passthrough) || /\b(regression|dry[-_\s]?run|dryrun|passthrough|source[-_\s]?page[-_\s]?passthrough)\b/i.test(text);
+}
+
+function getBackendRuntimeRefreshState({ bundle = null, job = null } = {}) {
+  const provider = bundle?.providers?.image || {};
+  const decision = bundle?.codexPpt?.backendDecision || job?.artifacts?.codexPptBackendDecision || {};
+  const gates = Array.isArray(bundle?.codexPpt?.approvals?.gates) ? bundle.codexPpt.approvals.gates : [];
+  const backendApproved = gates.some((gate) => gate.id === "backend" && gate.passed);
+  const runtimeModel = provider.model || "";
+  const runtimeBaseUrl = provider.baseUrl || "";
+  const approvedModel = decision.model || "";
+  const approvedBaseUrl = decision.baseUrl || "";
+  const modelMatches = !approvedModel || !runtimeModel || approvedModel === runtimeModel;
+  const baseUrlMatches = !approvedBaseUrl || !runtimeBaseUrl || normalizeEndpoint(approvedBaseUrl) === normalizeEndpoint(runtimeBaseUrl);
+  const dryRunEvidence = /\b(regression|dry[-_\s]?run|passthrough|source[-_\s]?page[-_\s]?passthrough)\b/i.test([
+    decision.source,
+    decision.provider,
+    decision.model,
+    decision.baseUrl
+  ].join(" "));
+  const runtimeReady = Boolean(provider.configured && provider.enabled !== false && runtimeModel);
+  const needsRefresh = Boolean(backendApproved && runtimeReady && (dryRunEvidence || !modelMatches || !baseUrlMatches));
+  const approvedLabel = [decision.provider, approvedModel, normalizeEndpoint(approvedBaseUrl)].filter(Boolean).join(" @ ");
+  const runtimeLabel = [runtimeModel, normalizeEndpoint(runtimeBaseUrl)].filter(Boolean).join(" @ ");
+  return {
+    needsRefresh,
+    dryRunEvidence,
+    approvedLabel,
+    runtimeLabel,
+    reason: dryRunEvidence
+      ? "已确认的后端证据仍像回归验证、dry-run 或透传输出。"
+      : "已确认的后端证据不再匹配当前图片运行环境。"
+  };
+}
+
+function normalizeEndpoint(value = "") {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function artifactCount(value) {
+  if (Array.isArray(value)) return value.length ? value.length + " 页" : "待处理";
+  if (value?.count) return value.count + " 页";
+  if (value?.pages?.length) return value.pages.length + " 页";
+  if (value?.images?.length) return value.images.length + " 页";
+  return value ? "已生成" : "待处理";
+}
+
+function artifactCountNumber(value) {
+  if (Array.isArray(value)) return value.length;
+  if (value?.count) return Number(value.count) || 0;
+  if (value?.pages?.length) return value.pages.length;
+  if (value?.images?.length) return value.images.length;
+  return value ? 1 : 0;
+}
+
+function shortPath(value = "") {
+  const text = String(value || "");
+  if (!text) return "";
+  const normalized = text.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  return parts.slice(-3).join("/");
+}
+
+function shortHash(value = "") {
+  const text = String(value || "").trim();
+  return text ? text.slice(0, 10) : "-";
+}
+
 function fileExt(name = "") { const ext = name.split(".").pop(); return ext ? ext.slice(0, 4).toUpperCase() : "FILE"; }
 function getEffectiveProjectName(form = {}, files = []) {
   if (form.projectName?.trim()) return form.projectName.trim();
@@ -3136,6 +9687,31 @@ function getEffectiveProjectName(form = {}, files = []) {
   if (fromNotes) return fromNotes;
   const fromFile = files[0]?.originalName?.replace(/\.[^.]+$/, "")?.trim();
   return fromFile || "未命名项目";
+}
+
+function buildSkillFirstBriefSource({ form = {}, outlinePlan = null, files = [], inferredMaterials = [] } = {}) {
+  const outline = outlinePlan?.layoutSequence || [];
+  const lines = [
+    `项目：${getEffectiveProjectName(form, files)}`,
+    form.audience ? `受众：${form.audience}` : "",
+    form.pageCount ? `页数偏好：${form.pageCount}` : "",
+    form.copyMode ? `文案模式：${form.copyMode}` : "",
+    inferredMaterials.length ? `推断资料类型：${inferredMaterials.join("、")}` : "",
+    files.length ? `已上传文件：${files.map((file) => file.originalName || file.id).filter(Boolean).join("、")}` : "已上传文件：无",
+    "",
+    "用户需求：",
+    form.notes?.trim() || "未提供自由描述。",
+    "",
+    outline.length ? "已确认大纲：" : "",
+    ...outline.map((step, index) => [
+      `${index + 1}. ${step.title || LAYOUT_LABELS[step.layout] || step.layout || "未命名页面"}`,
+      step.layout ? `   版式：${step.layout}` : "",
+      step.purpose ? `   目的：${step.purpose}` : "",
+      step.storyRole ? `   叙事角色：${step.storyRole}` : "",
+      step.evidence ? `   证据：${step.evidence}` : ""
+    ].filter(Boolean).join("\n"))
+  ];
+  return lines.filter((line) => line !== "").join("\n");
 }
 
 function inferMaterialTypes(files = []) {
@@ -3162,42 +9738,42 @@ function analyzeIntakeMessage(text = "", context = {}) {
     return {
       kind: "meta",
       actionable: false,
-      reply: "我是一个 PPT 设计智能体。你可以直接和我聊：从零做 PPT、优化旧 PPT、提炼 PDF/文档、统一风格、先出大纲、先出样稿、再导出可编辑 PPTX。你不用先填表，我会先追问关键信息。"
+      reply: "我是 PPT 设计助手。你可以让我从零制作 PPT、优化旧稿、提取 PDF/文档要点、统一风格、先出大纲、先出样张，并导出可编辑 PPTX。"
     };
   }
   if (/先问|问我|引导|不知道怎么说|帮我梳理/.test(normalized)) {
     return {
       kind: "question",
       actionable: false,
-      reply: "可以。先回答三个点就够：1. 这份 PPT 给谁看？2. 想让对方做什么决定？3. 偏商务、科技、东方自然、画册，还是你有参考图？"
+      reply: "可以。先回答三点：谁会看这份 PPT、希望他们做什么决定、整体风格想偏向哪一种？"
     };
   }
   if (/开始|继续|生成大纲|出大纲|下一步/.test(normalized) && readiness.ready) {
     return {
       kind: "ready",
       actionable: false,
-      reply: "信息已经够我先规划。点击下面的“开始理解并生成大纲”，我会先给你可确认的大纲，不会直接生成整套 PPT。"
+      reply: "信息已经足够先规划。可以使用生成大纲动作，先得到一版可确认的大纲，再制作完整 PPT。"
     };
   }
   if (isVaguePptRequest(normalized) && !files.length) {
     return {
       kind: "question",
       actionable: false,
-      reply: "可以做，但这句话还太宽。请补一句：主题是什么、给谁看、希望几页左右、偏什么风格。比如：做一份给销售团队看的端午礼盒提案，12 页，东方自然风。"
+      reply: "可以做，但需求还比较宽。请补充主题、受众、大致页数和偏好的风格。"
     };
   }
   if (/优化|重塑|重做|改旧稿|旧\s*PPT|原稿/.test(normalized) && !files.length) {
     return {
       kind: "upload-needed",
       actionable: true,
-      reply: "我理解你想优化旧稿。请先上传 PPT/PDF/图片资料，我会识别原文字、图片、素材身份，再让你选择“保留结构优化”还是“重新规划”。"
+      reply: "我理解你想优化旧稿。请先上传 PPT/PDF/图片，我会先识别原文字、图片和素材，再判断是保留结构优化还是重新规划。"
     };
   }
   return {
     kind: readiness.ready ? "ready" : "collecting",
     actionable: true,
     reply: readiness.ready
-      ? "我已经记录需求，信息足够先生成一版可确认的大纲。你也可以继续补充风格、受众或参考资料。"
+      ? "需求已记录。当前信息足够先生成一版可确认的大纲，你仍然可以继续补充风格、受众或参考资料。"
       : `我已记录这条需求。还差一步：${readiness.nextQuestion}`
   };
 }
@@ -3221,7 +9797,7 @@ function isMetaIntakeQuestion(text = "") {
 function isVaguePptRequest(text = "") {
   const value = String(text || "").trim();
   if (!/ppt|PPT|幻灯片|演示|提案|汇报|路演/.test(value)) return false;
-  return value.length < 18 && !/[，,。；;：:]/.test(value);
+  return value.length < 18 && !/[，。；;？?]/.test(value);
 }
 
 function getIntakeReadiness(notes = "", files = []) {
@@ -3242,57 +9818,59 @@ function getIntakeReadiness(notes = "", files = []) {
   if (hasTopic && hasGoal && (hasAudience || hasStyle)) {
     return {
       ready: true,
-      label: "需求基本够用",
-      hint: "可以先生成大纲，后面再补风格和素材。",
-      nextQuestion: "信息够用。"
+      label: "需求可用",
+      hint: "可以先生成大纲，后续再细化风格或素材。",
+      nextQuestion: "信息已足够。"
     };
   }
   const missing = [];
-  if (!hasTopic || !hasGoal) missing.push("主题和用途");
-  if (!hasAudience) missing.push("给谁看");
-  if (!hasStyle) missing.push("希望的风格或参考");
+  if (!hasTopic || !hasGoal) missing.push("主题和目标");
+  if (!hasAudience) missing.push("受众");
+  if (!hasStyle) missing.push("期望风格或参考");
   return {
     ready: false,
     label: text ? "正在收集需求" : "等待你发起对话",
-    hint: text ? "我会先追问必要信息，再进入大纲。" : "你可以问能力，也可以直接说要做什么 PPT。",
-    nextQuestion: `请补充${missing.slice(0, 2).join("、")}。`
+    hint: text ? "我会先追问必要信息，再进入大纲生成。" : "你可以问我能做什么，也可以直接描述你需要的 PPT。",
+    nextQuestion: "请补充 " + missing.slice(0, 2).join(" / ") + "。"
   };
 }
 
 function formatBytes(value) { if (!value) return "-"; if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`; return `${(value / 1024 / 1024).toFixed(1)} MB`; }
-function inputStrengthLabel(value) { if (value === "strong") return "资料充分"; if (value === "weak") return "资料偏少"; if (value === "empty") return "无资料"; return "资料待识别"; }function uniqueList(items = []) { return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))]; }
+function inputStrengthLabel(value) { if (value === "strong") return "资料充足"; if (value === "weak") return "资料有限"; if (value === "empty") return "无资料"; return "资料待补充"; }
+function uniqueList(items = []) { return [...new Set(items.map((item) => String(item || "").trim()).filter(Boolean))]; }
 
 function getOutlineSourceMeta(step = {}) {
   const type = step.sourceType || (step.kind === "source" ? "original-ppt" : "");
   if (type === "original-ppt") return { label: step.sourceLabel || "来自原 PPT", tone: "source-original", evidence: step.evidence || "" };
   if (type === "extracted") return { label: step.sourceLabel || "资料抽取", tone: "source-extracted", evidence: step.evidence || "" };
-  if (type === "needs-confirmation" || step.needsConfirmation) return { label: step.sourceLabel || "待确认", tone: "source-confirm", evidence: step.evidence || "" };
+  if (type === "needs-confirmation" || step.needsConfirmation) return { label: step.sourceLabel || "需要确认", tone: "source-confirm", evidence: step.evidence || "" };
   if (["prices", "products", "productDetail", "visual", "compare", "bundle"].includes(step.kind)) return { label: "资料抽取", tone: "source-extracted", evidence: step.evidence || "" };
-  if (["risks", "assumptions"].includes(step.kind)) return { label: "待确认", tone: "source-confirm", evidence: step.evidence || "" };
+  if (["risks", "assumptions"].includes(step.kind)) return { label: "需要确认", tone: "source-confirm", evidence: step.evidence || "" };
   return { label: step.sourceLabel || "AI 推断", tone: "source-inferred", evidence: step.evidence || "" };
 }
 
 function formatDuration(seconds = 0) { const value = Math.max(0, Number(seconds) || 0); if (value < 60) return `${value}s`; if (value < 3600) return `${Math.floor(value / 60)}m`; return `${Math.floor(value / 3600)}h ${Math.floor((value % 3600) / 60)}m`; }
-function isMojibake(value = "") { return /[�]|Ã|ç|閿|鐢|锟|脙|莽|闁|閻/.test(String(value)); }
-function findTemplatePack(packs = [], theme = {}) { return packs.find((pack) => pack.themeName === theme.name || pack.themeSlug === theme.slug); }
-function formatDesignDirectionName(name = "") {
-  return String(name || "").replace(/模板/g, "方向");
-}
+function isMojibake(value = "") { return ["閿", "鑴", "鑾", "闂", "闁"].some((token) => String(value).includes(token)); }
 
 function makeOutlineStep(layout = "section") {
-  const map = { cover: ["新封面", "建立主题和第一视觉印象", "开场"], visual: ["视觉页", "用大图承接核心场景", "视觉证明"], section: ["章节页", "切换叙事段落", "结构转场"], toc: ["目录", "说明整份内容结构", "导航"], kpi: ["关键指标", "突出数字和结果", "数据证明"], pricing: ["报价方案", "呈现价格与配置", "预算决策"], "product-detail": ["单品详情", "展示产品卖点和参数", "产品证明"], bundle: ["组合方案", "说明套餐和搭配逻辑", "组合推荐"], "risk-checklist": ["风险清单", "提示交付、价格和确认风险", "风险控制"], compare: ["对比分析", "比较不同选项", "辅助决策"], timeline: ["时间计划", "说明节点和推进节奏", "执行路径"], cards: ["要点卡片", "拆分关键信息", "卖点归纳"], quote: ["核心话术", "沉淀一句可复述表达", "记忆点"], closing: ["下一步行动", "收束确认事项", "行动收口"] };
+  const map = {
+    cover: ["封面", "建立主题和第一视觉印象", "开场"],
+    visual: ["视觉页", "用大图承载关键场景", "视觉证明"],
+    section: ["章节页", "切换叙事章节", "过渡"],
+    toc: ["目录", "解释整套结构", "导航"],
+    kpi: ["关键指标", "突出数字和结果", "数据证明"],
+    pricing: ["预算与规格", "呈现预算、规格和待确认数字", "数字依据"],
+    "product-detail": ["详情页", "展示单个对象、模块或素材说明", "事实说明"],
+    bundle: ["分组方案", "解释不同组别、档位或路径", "方案组织"],
+    "risk-checklist": ["确认清单", "展示交付、事实和人工确认项", "边界确认"],
+    compare: ["对比", "比较选项", "决策支持"],
+    timeline: ["时间线", "解释里程碑和节奏", "执行路径"],
+    cards: ["信息卡片", "拆分关键信息", "摘要"],
+    quote: ["核心信息", "浓缩一句可复用表达", "记忆点"],
+    closing: ["下一步行动", "以确认项收尾", "行动收口"]
+  };
   const [title, purpose, storyRole] = map[layout] || map.section;
   return { layout, title, purpose, storyRole, kind: layout, imageSlots: [] };
-}
-
-const TEMPLATE_RENDER_LAYOUTS = { "sales-proposal": ["cover", "pricing", "cards", "quote", "risk-checklist", "closing"], "seasonal-gift": ["cover", "visual", "pricing", "product-detail", "bundle", "closing"], "brand-editorial": ["cover", "visual", "quote", "cards", "product-detail", "closing"], "tech-solution": ["cover", "toc", "kpi", "compare", "timeline", "closing"], "launch-dark": ["cover", "section", "kpi", "visual", "timeline", "quote", "closing"] };
-function getCurrentTemplate(job = {}, packs = []) { const routePack = job?.quality?.routePlan?.templatePack || job?.input?.routePlan?.templatePack; return packs.find((pack) => pack.slug === routePack?.slug || pack.themeName === job?.input?.style || pack.name === routePack?.name) || routePack || null; }
-function getTemplateRenderHit(templatePack, slide = {}) {
-  const layout = slide?.layout || "";
-  const supported = TEMPLATE_RENDER_LAYOUTS[templatePack?.slug] || [];
-  if (!templatePack?.slug) return { active: false, label: "通用渲染" };
-  if (supported.includes(layout)) return { active: true, label: `${LAYOUT_LABELS[layout] || layout} 专属渲染` };
-  return { active: false, label: `${LAYOUT_LABELS[layout] || layout || "当前页"} 通用渲染` };
 }
 
 function isRestorableJob(job = {}) {
@@ -3301,7 +9879,7 @@ function isRestorableJob(job = {}) {
   const text = [deck.title, deck.summary, firstSlide.title, firstSlide.subtitle, ...(firstSlide.bullets || []), job.input?.projectName, job.input?.notes].filter(Boolean).join(" ");
   if (!text.trim()) return false;
   const questionMarks = (text.match(/\?/g) || []).length;
-  const signalChars = text.replace(/[\s\d.,，。/\\|:：;；()（）[\]{}?？\-_*]/g, "").length;
+  const signalChars = text.replace(/[\s\d.,锛屻€亅:;:()锛堬級[\]{}?!_*\\-]/g, "").length;
   if (questionMarks >= 6 && questionMarks > signalChars * 0.25) return false;
   if (/<!doctype|not valid JSON/i.test(job.warning || "")) return false;
   return true;
@@ -3313,7 +9891,5 @@ function isFullDeckJob(job = {}) {
 }
 
 function isPreferredStartupJob(job = {}) { if (!isRestorableJob(job)) return false; const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const routeScore = Number(job.quality?.routeAdherence?.score ?? 1); const warningCount = Number(job.quality?.warningCount || job.quality?.warnings?.length || 0); if (!slideCount || previewCount < slideCount) return false; if (warningCount > 12 && routeScore < 0.5) return false; return true; }
-function jobHealthClass(job = {}) { const score = Number(job.quality?.routeAdherence?.score ?? 1); const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const blockingWarnings = getBlockingWarnings(job).length; if (!slideCount || previewCount < slideCount || score < 0.5) return "bad"; if (blockingWarnings || score < 0.85) return "warn"; return "good"; }
-function jobHealthLabel(job = {}) { const cls = jobHealthClass(job); const slideCount = job.deck?.slides?.length || 0; const previewCount = (job.previewImages || []).filter(Boolean).length; const score = Number(job.quality?.routeAdherence?.score ?? 1); if (cls === "bad") return `需修复 / ${slideCount}页 / 路由${Math.round(score * 100)}% / 预览${previewCount}`; if (cls === "warn") return `可检查 / ${slideCount}页 / 路由${Math.round(score * 100)}%`; return `可继续 / ${slideCount}页`; }
 
 createRoot(document.getElementById("root")).render(<App />);

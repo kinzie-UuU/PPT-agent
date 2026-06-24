@@ -279,7 +279,7 @@ export async function generateDeckPlan(input, mode) {
   const env = globalThis.process?.env || {};
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) {
-    return { deck: fallbackDeck(input), aiUsed: false, warning: "未配置 OPENAI_API_KEY，已使用本地模板生成。", provider: { configured: false } };
+    return { deck: fallbackDeck(input), aiUsed: false, warning: "未配置 OPENAI_API_KEY，已使用本地结构化草稿。", provider: { configured: false } };
   }
 
   const baseUrl = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -311,13 +311,13 @@ export async function generateDeckPlan(input, mode) {
     input.materialBrief?.confirmationFields?.length ? `必须提示这些待确认字段：${input.materialBrief.confirmationFields.join("、")}` : "",
     `目标页数：${targetSlides} 页。必须尽量接近这个页数，不要只生成 5 页。`,
     `已选主题：${theme.name}。气质：${theme.tone.join(" / ")}。适合：${theme.bestFor}。`,
-    `已选设计方向包：${templatePack.name}。适用场景：${templatePack.scenario}。`,
+    `当前工作流方向：${templatePack.name}。适用场景：${templatePack.scenario}。`,
     `可用版式：${layouts.map((layout) => `${layout.id}=${layout.name}(${layout.bestFor}，最多 ${layout.maxBullets} 条)`).join("；")}`,
     templatePackPrompt ? `设计方向规则（必须遵守）：\n${templatePackPrompt}` : "",
     skillRulePrompt ? `PPT 技能规则：\n${skillRulePrompt}` : "",
-    styleReferences.length ? `风格参考库（需要内化到调性里，不要直接复制图片内容）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "风格参考"}：${item.tone || "参考色彩、留白、质感和版式密度"}${item.styleFingerprint?.prompt ? `；本地风格指纹：${item.styleFingerprint.prompt}` : ""}`).join("\n")}` : "",
-    routePlan?.styleReferenceStrategy?.fingerprint?.prompt ? `风格库综合指纹：${routePlan.styleReferenceStrategy.fingerprint.prompt}` : "",
-    routePlan?.styleReferenceStrategy?.instruction ? `风格参考策略：${routePlan.styleReferenceStrategy.instruction}` : "",
+    styleReferences.length ? `可选参考图（只作为调性约束，不锁定固定版式）：\n${styleReferences.map((item, index) => `${index + 1}. ${item.name || item.originalName || "参考图"}：${item.tone || "参考色彩、留白、质感和版式密度"}${item.styleFingerprint?.prompt ? `；本地风格指纹：${item.styleFingerprint.prompt}` : ""}`).join("\n")}` : "",
+    routePlan?.styleReferenceStrategy?.fingerprint?.prompt ? `可选参考图综合指纹：${routePlan.styleReferenceStrategy.fingerprint.prompt}` : "",
+    routePlan?.styleReferenceStrategy?.instruction ? `可选参考图策略：${routePlan.styleReferenceStrategy.instruction}` : "",
     input.reconstructionMode === "design-led" || input.designDirectorMode ? [
       "设计总监模式：这不是普通 PPT 生成，而是把资料重构成视觉优质、提案级、可编辑的演示文稿。",
       "必须先判断内容类型，再抽取或建立视觉 DNA：主色、背景、字体气质、图片语言、Logo/品牌露出、留白、装饰语言和页面密度。",
@@ -365,12 +365,12 @@ export async function generateDeckPlan(input, mode) {
   try {
     data = await response.json();
   } catch (error) {
-    return { deck: fallbackDeck(input), aiUsed: false, warning: `AI 返回不是 JSON，已使用本地模板生成：${error.message}`, provider: { ...provider, baseUrl: usedBaseUrl } };
+    return { deck: fallbackDeck(input), aiUsed: false, warning: `AI 返回不是 JSON，已使用本地结构化草稿：${error.message}`, provider: { ...provider, baseUrl: usedBaseUrl } };
   }
   const content = data.choices?.[0]?.message?.content || "";
   const parsed = extractJson(content);
   if (!parsed?.slides?.length) {
-    return { deck: fallbackDeck(input), aiUsed: false, warning: "AI 返回内容无法解析，已使用本地模板生成。", provider: { ...provider, baseUrl: usedBaseUrl } };
+    return { deck: fallbackDeck(input), aiUsed: false, warning: "AI 返回内容无法解析，已使用本地结构化草稿。", provider: { ...provider, baseUrl: usedBaseUrl } };
   }
   return { deck: parsed, aiUsed: true, provider: { ...provider, baseUrl: usedBaseUrl, usage: data.usage || null } };
 }

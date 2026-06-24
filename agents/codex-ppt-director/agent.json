@@ -1,0 +1,44 @@
+{
+  "name": "codex-ppt-director",
+  "displayName": "Codex PPT Director",
+  "version": "0.1.0",
+  "description": "A director-style agent wrapper around the codex-ppt skill for image-based PPT redesign and generation.",
+  "skillPath": "skills/codex-ppt/SKILL.md",
+  "defaultOutputRoot": "outputs/codex-ppt-agent",
+  "primaryBackend": "Codex built-in image_gen when available",
+  "fallbackAssembly": "scripts/assemble-image-deck.mjs",
+  "requiresHumanApproval": [
+    "outline",
+    "visualStyle",
+    "imageBackend",
+    "sampleSlide",
+    "fullDeckGeneration"
+  ],
+  "workerModel": {
+    "mode": "one-slide-per-worker",
+    "handoffTemplate": "agents/codex-ppt-director/slide-worker.md",
+    "parentOwns": [
+      "source reading",
+      "outline",
+      "style and backend confirmation",
+      "sample approval",
+      "job state",
+      "QA",
+      "PPTX assembly"
+    ],
+    "workerOwns": [
+      "one final slide image candidate"
+    ]
+  },
+  "outputs": [
+    "outline.md",
+    "deck_spec.json",
+    "prompts/slide_XX.json",
+    "slide_jobs.json",
+    "slide_run_state.json",
+    "origin_image/slide_XX.png",
+    "speech.md",
+    "{deck_name}.pptx",
+    "contact sheets for QA"
+  ]
+}

@@ -6,8 +6,10 @@ const PNG_SIGNATURE = "89504e470d0a1a0a";
 export async function analyzeGeneratedImage(filePath, options = {}) {
   const image = await readPng(filePath);
   const safeRegion = parseTextSafeArea(options.textSafeArea, image.width, image.height) || defaultSafeRegion(image.width, image.height);
+  const titleRegion = parseTextSafeArea(options.titleArea, image.width, image.height) || defaultTitleRegion(image.width, image.height);
   const full = analyzeRegion(image, { x: 0, y: 0, width: image.width, height: image.height });
   const textSafe = analyzeRegion(image, safeRegion);
+  const titleArea = analyzeRegion(image, titleRegion);
   const risks = [];
   if (full.variance < 12) risks.push("image-may-be-too-blank");
   if (textSafe.edgeDensity > 0.105) risks.push("text-safe-area-too-busy");
@@ -21,8 +23,10 @@ export async function analyzeGeneratedImage(filePath, options = {}) {
     width: image.width,
     height: image.height,
     textSafeArea: safeRegion,
+    titleRegion,
     full,
     textSafe,
+    titleArea,
     risks
   };
 }
@@ -156,6 +160,10 @@ function parseTextSafeArea(value, width, height) {
 
 function defaultSafeRegion(width, height) {
   return { x: width * 0.08, y: height * 0.12, width: width * 0.5, height: height * 0.62 };
+}
+
+function defaultTitleRegion(width, height) {
+  return { x: width * 0.05, y: height * 0.08, width: width * 0.9, height: height * 0.34 };
 }
 
 function clamp(value, min, max) {
