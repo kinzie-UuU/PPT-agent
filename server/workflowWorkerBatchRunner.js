@@ -52,7 +52,8 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
     ),
     offlineTextHintsReason: preflight.startBody?.offlineTextHintsReason || options.offlineTextHintsReason || "",
     autoFinalize: Boolean(preflight.startBody?.autoFinalize || options.autoFinalize || options.finalizeOnComplete),
-    stopOnError: mode === "model" ? options.stopOnError !== false : Boolean(options.stopOnError)
+    stopOnError: mode === "model" ? options.stopOnError !== false : Boolean(options.stopOnError),
+    useSourceFidelityBackground: Boolean(preflight.startBody?.useSourceFidelityBackground || options.useSourceFidelityBackground)
   };
   const runId = makeRunnerId();
   const logsDir = path.join(job.dirs.logs, "worker-runs");
@@ -76,6 +77,7 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
     acceptOfflineTextHints: Boolean(runnerOptions.acceptOfflineTextHints || runnerOptions.confirmOfflineTextHints || runnerOptions.paddleOcrDeclined),
     experimentalLocalBatch: mode === "local" && Boolean(runnerOptions.allowExperimentalLocalBatch),
     nonProductDelivery: mode === "local" && Boolean(runnerOptions.allowExperimentalLocalBatch),
+    useSourceFidelityBackground: Boolean(runnerOptions.useSourceFidelityBackground),
     autoFinalize: Boolean(runnerOptions.autoFinalize || runnerOptions.finalizeOnComplete),
     stopOnError: Boolean(runnerOptions.stopOnError),
     args,
@@ -100,6 +102,7 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
     env: {
       ...process.env,
       PPT_TOOL_BASE_URL: options.baseUrl || process.env.PPT_TOOL_BASE_URL || `http://127.0.0.1:${process.env.PORT || 4180}`,
+      PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND: runnerOptions.useSourceFidelityBackground ? "1" : process.env.PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND || "",
       PYTHONIOENCODING: "utf-8"
     }
   });

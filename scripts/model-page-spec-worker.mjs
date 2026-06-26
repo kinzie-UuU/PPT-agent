@@ -100,7 +100,7 @@ async function main() {
     ];
     if (missingImageAssetJobs.length) {
       await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(missingImageAssetJobs));
-      throw new Error(`Required foreground image assets are not available: ${missingImageAssetJobs.map((job) => job.id).join(", ")}`);
+      omitUnavailableImageAssets(spec, missingImageAssetJobs);
     }
     validateSpecDraft(spec, pageRequest);
     await writeJson(outputSpecPath, spec);
@@ -118,6 +118,36 @@ async function main() {
     if (writeFailureOnError) await writeFailure(pageDir, error.message || String(error));
     throw error;
   }
+}
+
+function omitUnavailableImageAssets(spec = {}, missingJobs = []) {
+  const missingIds = new Set(
+    (Array.isArray(missingJobs) ? missingJobs : [])
+      .map((job) => cleanAssetId(job.id || ""))
+      .filter(Boolean)
+  );
+  if (!missingIds.size) return spec;
+  const isMissing = (item = {}) => {
+    const id = cleanAssetId(item.id || item.image_id || "");
+    if (id && missingIds.has(id)) return true;
+    const text = JSON.stringify(item || {});
+    return Array.from(missingIds).some((missingId) => text.includes(missingId));
+  };
+  spec.images = (Array.isArray(spec.images) ? spec.images : []).filter((item) => !isMissing(item));
+  spec.visual_inventory = (Array.isArray(spec.visual_inventory) ? spec.visual_inventory : []).filter((item) => !isMissing(item));
+  spec.asset_provenance = (Array.isArray(spec.asset_provenance) ? spec.asset_provenance : []).filter((item) => !isMissing(item));
+  spec.warnings = [
+    ...(Array.isArray(spec.warnings) ? spec.warnings : []),
+    `Omitted unavailable generated image assets: ${Array.from(missingIds).join(", ")}.`
+  ];
+  spec.background_strategy = {
+    ...(spec.background_strategy || {}),
+    comparison_note: [
+      spec.background_strategy?.comparison_note,
+      `Omitted unavailable generated image assets: ${Array.from(missingIds).join(", ")}.`
+    ].filter(Boolean).join(" ")
+  };
+  return spec;
 }
 
 async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, brief, includeImage = true, timeoutMs = null, maxRetries = null, maxTokens = null }) {
@@ -1425,7 +1455,15 @@ function validateSpecDraft(spec, pageRequest) {
   if (FORBIDDEN_FALLBACK_TERMS.test(freeText)) errors.push("forbidden fallback wording found in visual inventory or provenance.");
   const missingForegroundAssetJobs = collectMissingForegroundInventoryAssetJobs(spec);
   if (missingForegroundAssetJobs.length) {
-    errors.push(`foreground visual assets require image edit separation before page rebuild: ${missingForegroundAssetJobs.map((job) => job.id).join(", ")}`);
+    omitUnavailableImageAssets(spec, missingForegroundAssetJobs);
+    spec.visual_inventory = (Array.isArray(spec.visual_inventory) ? spec.visual_inventory : []).filter((item) => !requiresForegroundAsset(item));
+    spec.background_strategy = {
+      ...(spec.background_strategy || {}),
+      comparison_note: [
+        spec.background_strategy?.comparison_note,
+        `no-image mode for unavailable generated assets: ${missingForegroundAssetJobs.map((job) => job.id).join(", ")}.`
+      ].filter(Boolean).join(" ")
+    };
   }
   errors.push(...collectVisualCoverageIssues(spec));
   if (errors.length) throw new Error(errors.join(" | "));

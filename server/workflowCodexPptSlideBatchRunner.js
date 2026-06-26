@@ -4,9 +4,9 @@ import path from "path";
 import crypto from "crypto";
 import zlib from "zlib";
 import { rootDir } from "./store.js";
-import { generateImageWithProvider, getProviderConfig } from "./providers.js";
+import { editImageWithProvider, generateImageWithProvider, getProviderConfig } from "./providers.js";
 import { CODEX_PPT_VISUAL_DECK_GATES } from "./workflowApprovals.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed } from "./workflowVisuals.js";
+import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, getRenderedPages } from "./workflowVisuals.js";
 import { buildWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun } from "./workflowEditable.js";
 import { syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
@@ -42,6 +42,12 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
   const startedAt = new Date().toISOString();
   const results = [];
   const errors = [];
+  const confirmedExternalImageSpend = Boolean(
+    preflight.requiredConfirmations?.externalImageSpend?.confirmed
+    || options.confirmExternalImageSpend
+    || options.confirmSpend
+    || options.confirmImageApiSpend
+  );
 
   for (const task of selectedTasks) {
     const agentId = `${agentPrefix}-${task.pageId}`;
@@ -57,15 +63,11 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
       const promptPayload = await readPromptPayload(job, task);
       const image = nonProduct
         ? await writePlaceholderImage(runDir, task, promptPayload)
-        : await generateImageWithProvider({
-          prompt: promptPayload.prompt || `Create presentation slide ${task.pageNumber}.`,
-          width: 1536,
-          height: 1024,
-          prefix: `${job.id}_${task.pageId}`
-        });
+        : await createCodexSlideImage(job, task, promptPayload);
       const completed = await completeWorkflowCodexPptSlideTask(jobId, task.pageId, {
         agentId,
         imagePath: image.path,
+        confirmExternalImageSpend: confirmedExternalImageSpend,
         provider: image.provider || (nonProduct ? "passthrough" : ""),
         baseUrl: image.baseUrl || "",
         model: image.model || "",
@@ -328,6 +330,54 @@ async function readPromptPayload(job = {}, task = {}) {
   } catch {
     return {};
   }
+}
+
+async function createCodexSlideImage(job = {}, task = {}, promptPayload = {}) {
+  const prompt = providerPrompt(promptPayload.prompt || `Create presentation slide ${task.pageNumber}.`);
+  const sourceImagePath = findSourceImagePath(job, task, promptPayload);
+  if (sourceImagePath && promptPayload.useSourceImageReference !== false) {
+    return editImageWithProvider({
+      prompt,
+      sourceImagePath,
+      width: 1536,
+      height: 864,
+      prefix: `${job.id}_${task.pageId}`
+    });
+  }
+  return generateImageWithProvider({
+    prompt,
+    width: 1536,
+    height: 864,
+    prefix: `${job.id}_${task.pageId}`
+  });
+}
+
+function findSourceImagePath(job = {}, task = {}, promptPayload = {}) {
+  const renderedPage = getRenderedPages(job).find((page) => Number(page.pageNumber || 0) === Number(task.pageNumber || 0));
+  const candidates = [
+    renderedPage?.path,
+    renderedPage?.sourcePagePath,
+    promptPayload.sourcePagePath,
+    promptPayload.sourceImagePath
+  ];
+  for (const candidate of candidates) {
+    const resolved = safeExistingFile(candidate);
+    if (resolved) return resolved;
+  }
+  return "";
+}
+
+function safeExistingFile(filePath = "") {
+  const clean = cleanString(filePath);
+  if (!clean) return "";
+  const resolved = path.resolve(clean);
+  return fsSync.existsSync(resolved) && fsSync.statSync(resolved).isFile() ? resolved : "";
+}
+
+function providerPrompt(value = "") {
+  return cleanString(value || "")
+    .replace(/[A-Za-z]:\\[^\s。；，,;]+/g, "the uploaded source page image")
+    .replace(/Approved outline evidence:\s*the uploaded source page image\.?/gi, "Approved outline evidence: the uploaded source page image.");
 }
 
 async function writePlaceholderImage(runDir, task = {}, promptPayload = {}) {

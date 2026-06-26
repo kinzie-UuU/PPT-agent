@@ -14,6 +14,22 @@ const MANUAL_ACTION_RE = /approve|approval|review\/approve|codex slide worker|sl
 export async function runWorkflowNextAction(jobId, options = {}) {
   const compliance = await getWorkflowComplianceStatus(jobId);
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
+  if (!action) {
+    const job = await readWorkflowJob(jobId);
+    const partialFinal = buildPartialFinalContinuation(job);
+    if (partialFinal) {
+      return {
+        ok: true,
+        didRun: false,
+        manualRequired: true,
+        action: "partial-final-review-or-continue",
+        reason: partialFinal.reason,
+        compliance,
+        job,
+        ...partialFinal
+      };
+    }
+  }
   if (!action) return makeIdleResult(jobId, compliance, "当前没有可运行的工作流动作。");
   if (MANUAL_ACTION_RE.test(action) && !/sync codex/i.test(action)) {
     return makeManualResult(jobId, compliance, action, manualReason(action));
@@ -88,6 +104,30 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
   const job = await readWorkflowJob(jobId);
   const body = { ...options, requestedBy: options.requestedBy || "workflow-next-action-preflight" };
+  if (!action) {
+    const partialFinal = buildPartialFinalContinuation(job);
+    if (partialFinal) {
+      return {
+        ok: true,
+        preview: true,
+        didRun: false,
+        jobId,
+        action: "partial-final-review-or-continue",
+        title: "当前测试范围已生成",
+        summary: "当前最终 PPT 已生成但只覆盖部分源页。",
+        startReady: false,
+        manualRequired: true,
+        requiredConfirmation: "",
+        externalImageCalls: 0,
+        mutatesWorkflow: false,
+        blockingIssues: [],
+        warnings: partialFinal.warnings,
+        compliance,
+        updatedAt: new Date().toISOString(),
+        ...partialFinal
+      };
+    }
+  }
   const base = {
     ok: true,
     preview: true,
@@ -252,6 +292,68 @@ function withExternalImageAuthorization(body = {}, authorization = {}) {
   body.confirmExternalImageSpend = true;
   body.authorizationSource = "authorization-ledger";
   return body;
+}
+
+function buildPartialFinalContinuation(job = {}) {
+  const artifacts = job.artifacts || {};
+  const final = artifacts.editableFinal || {};
+  const editability = final.pptxEditability || {};
+  const sourcePages = numberOrZero(job.sourceMeta?.pageCount)
+    || numberOrZero(artifacts.sourceMeta?.pageCount)
+    || countArray(artifacts.renderedPages);
+  const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || job.finalValidation?.slides);
+  const visualPages = countArray(artifacts.visualImages);
+  const hasFinal = Boolean(final.path);
+  if (!hasFinal || !sourcePages || !finalPages || finalPages >= sourcePages) return null;
+
+  const remainingPages = Math.max(0, sourcePages - finalPages);
+  const startPage = finalPages + 1;
+  const endPage = sourcePages;
+  const pageSelection = `page_${String(startPage).padStart(3, "0")}-page_${String(endPage).padStart(3, "0")}`;
+  const reason = `当前最终 PPT 只覆盖 ${finalPages}/${sourcePages} 页。请先复核当前 ${finalPages} 页样例，或确认额度后继续生成剩余 ${remainingPages} 页。`;
+  return {
+    partialFinal: {
+      sourcePages,
+      finalPages,
+      remainingPages,
+      visualPages,
+      pageSelection,
+      finalPath: final.path || "",
+      canReviewCurrentSample: true,
+      canContinueRemainingPages: remainingPages > 0
+    },
+    nextOptions: [
+      {
+        id: "review-current-sample",
+        label: `复核当前 ${finalPages} 页样例`,
+        detail: "逐页对比 codex-ppt 目标图、可编辑预览、页面校验和资产分离结果；通过后可解锁当前测试范围下载。",
+        targetPanel: "workflow-delivery-panel",
+        mutatesWorkflow: false,
+        externalImageCalls: 0
+      },
+      {
+        id: "continue-remaining-pages",
+        label: `继续生成剩余 ${remainingPages} 页`,
+        detail: `继续处理 ${pageSelection}。启动前必须再次确认 gpt-image-2 图片 API 和页面规格模型调用额度。`,
+        targetPanel: "codex-slide-worker-panel",
+        pageSelection,
+        mutatesWorkflow: true,
+        requiresExternalImageConfirmation: true,
+        externalImageCalls: remainingPages
+      }
+    ],
+    reason,
+    warnings: [`当前是 ${finalPages}/${sourcePages} 页小样本，不是完整产品级交付。`]
+  };
+}
+
+function countArray(value) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function numberOrZero(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
 }
 
 async function previewWithAssertions(base, run, fallback = {}) {

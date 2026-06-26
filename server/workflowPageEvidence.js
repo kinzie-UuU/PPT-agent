@@ -88,7 +88,7 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   if (!pageResultShapeOk) issues.push("page-result-shape-invalid");
 
   const pagePptxOpenability = outputEvidence.page_pptx.exists
-    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path)
+    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path, { page, openableRepairOk: options.openableRepairOk })
     : null;
   const pagePptxOpenable = pagePptxOpenability?.openable !== false;
   if (pagePptxOpenability?.openable === false) issues.push("page-pptx-powerpoint-open-failed");
@@ -136,7 +136,19 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   };
 }
 
-async function inspectPagePptxOpenability(filePath) {
+async function inspectPagePptxOpenability(filePath, options = {}) {
+  const repair = options.page?.result?.openable_repair || null;
+  if (options.openableRepairOk && repair?.pagePptx) {
+    return {
+      version: 1,
+      source: "page-openable-repair-cache",
+      available: process.platform === "win32",
+      openable: true,
+      slideCount: 1,
+      warnings: [],
+      error: ""
+    };
+  }
   const attempts = [];
   for (let index = 0; index < 3; index += 1) {
     const result = await inspectPowerPointOpenability(filePath).catch((error) => ({

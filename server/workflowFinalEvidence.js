@@ -82,7 +82,9 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
   const hashesMatch = rawHashesMatch || Boolean(openableRepairOk && finalHash && sourceOutputHash);
   if (finalHash && sourceOutputHash && !hashesMatch) issues.push("final-copy-hash-mismatch");
   if (finalFile.exists && sourceOutputFile.exists && finalFile.size !== sourceOutputFile.size && !openableRepairOk) issues.push("final-copy-size-mismatch");
-  const powerPointOpenability = final.powerPointOpenability || (finalFile.exists
+  const powerPointOpenability = isUsableCachedPowerPointOpenability(final.powerPointOpenability, finalFile, final)
+    ? final.powerPointOpenability
+    : (finalFile.exists
     ? await inspectPowerPointOpenability(finalPath).catch((error) => ({
         version: 1,
         source: "powerpoint-com-open",
@@ -243,6 +245,14 @@ function readPngDimensions(filePath = "") {
   }
 }
 
+function isUsableCachedPowerPointOpenability(cached = {}, finalFile = {}, final = {}) {
+  if (!cached || typeof cached !== "object") return false;
+  if (cached.openable !== true && cached.openable !== false) return false;
+  if (!finalFile.exists) return false;
+  if (Number(final.size || 0) && Number(final.size || 0) !== Number(finalFile.size || 0)) return false;
+  return true;
+}
+
 function isManualReviewCurrent(manualReview = {}, final = {}) {
   if (!final.path) return false;
   return manualReview?.status === "approved"
@@ -308,6 +318,7 @@ function collectMissingForegroundAssets(manifest = {}) {
 
 function requiresForegroundAsset(item = {}) {
   const text = JSON.stringify(item);
+  if (/^shape$/i.test(String(item.type || "")) && STRUCTURAL_TERMS.test(text)) return false;
   if (!FOREGROUND_TERMS.test(text) && !FOREGROUND_ASSET_TERMS.test(text)) return false;
   if (STRUCTURAL_TERMS.test(text) && !FOREGROUND_TERMS.test(text)) return false;
   return true;

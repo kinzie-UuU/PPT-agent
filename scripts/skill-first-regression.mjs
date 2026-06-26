@@ -8,7 +8,7 @@ async function main() {
   const files = await readProjectFiles();
   const checks = [
     checkReadme(files),
-    checkProductGoal(files),
+    checkProductGoalV2(files),
     checkFrontendMainFlow(files),
     checkApiSurface(files),
     checkDeliveryGate(files),
@@ -33,13 +33,16 @@ async function readProjectFiles() {
   return {
     readme: await readText("README.md"),
     productGoal: await readText("docs/product-goal.md"),
+    currentAgentPlan: await readText("docs/current-agent-plan.md"),
     frontend: await readText("src/main.jsx"),
     styles: await readText("src/styles.css"),
     apiClient: await readText("src/api/client.js"),
     serverIndex: await readText("server/index.js"),
     pptxEditability: await readText("server/pptxEditability.js"),
     workflowDelivery: await readText("server/workflowDelivery.js"),
+    workflowNextAction: await readText("server/workflowNextAction.js"),
     workflowEditable: await readText("server/workflowEditable.js"),
+    workflowCodexPptSlideBatchRunner: await readText("server/workflowCodexPptSlideBatchRunner.js"),
     workflowV1Readiness: await readText("server/workflowV1Readiness.js"),
     workflowWorkerBatchRunner: await readText("server/workflowWorkerBatchRunner.js"),
     workflowFinalEvidence: await readText("server/workflowFinalEvidence.js"),
@@ -84,11 +87,33 @@ function checkProductGoal(files) {
   });
 }
 
+function checkProductGoalV2(files) {
+  return named("Product goal documents current target", () => {
+    mustInclude(files.productGoal, "PPT Agent 产品目标");
+    mustInclude(files.productGoal, "codex-ppt");
+    mustInclude(files.productGoal, "image-to-editable-ppt");
+    mustInclude(files.productGoal, "gpt-image-2");
+    mustInclude(files.productGoal, "rapidocr-local");
+    mustInclude(files.productGoal, "editable-final.pptx");
+    mustInclude(files.productGoal, "acceptance.ready");
+    mustInclude(files.productGoal, "人工视觉复核");
+    mustInclude(files.productGoal, "旧模板");
+    mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
+    mustInclude(files.currentAgentPlan, "当前是 2/15 页小样本");
+    mustNotInclude(files.productGoal, "美学设计系统");
+    mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
+  });
+}
+
 function checkFrontendMainFlow(files) {
   return named("Frontend keeps Skill-first main flow", () => {
     mustInclude(files.frontend, "startSkillFirstWorkflow");
     mustInclude(files.frontend, "workflowDeliveryStatus");
     mustInclude(files.frontend, "WorkflowFinalReviewCallout");
+    mustInclude(files.frontend, "WorkflowFinalReviewCalloutV2");
+    mustInclude(files.frontend, "WorkflowPartialFinalNextPanel");
+    mustInclude(files.frontend, "最终 PPT 已生成，等待视觉复核");
+    mustInclude(files.frontend, "继续剩余");
     mustInclude(files.frontend, "最终 PPT 已生成，等待视觉复核");
     mustInclude(files.frontend, "标记复核通过");
     mustInclude(files.frontend, "approveWorkflowManualReview");
@@ -121,6 +146,10 @@ function checkApiSurface(files) {
     mustInclude(files.serverIndex, "/api/v1-acceptance/product-visual-sample/prompt-preview");
     mustInclude(files.serverIndex, "/api/v1-acceptance/product-visual-full-deck/approval/approve");
     mustInclude(files.serverIndex, "/api/workflow-jobs/:id/editable/finalize");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "confirmedExternalImageSpend");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "confirmExternalImageSpend: confirmedExternalImageSpend");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "editImageWithProvider");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "sourceImagePath");
   });
 }
 
@@ -153,6 +182,9 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowEditable, "options.pages || options.pageIds || options.pageId");
     mustInclude(files.providers, "plain-json-fallback");
     mustInclude(files.providers, "parsed.ok === true");
+    mustInclude(files.workflowNextAction, "partial-final-review-or-continue");
+    mustInclude(files.workflowNextAction, "review-current-sample");
+    mustInclude(files.workflowNextAction, "continue-remaining-pages");
     mustInclude(files.pptxEditability, "rasterOnly");
     mustInclude(files.pptxEditability, "rasterBackground");
     mustInclude(files.pptxEditability, "full-slide-background-picture");
