@@ -1510,26 +1510,32 @@ function App() {
                     ))}
                   </div>
                 )}
-                <SkillFirstProductConsole
-                  approvalSummary={noCostApprovalSummary}
-                  busy={workflowBusy || generationProgress.active}
-                  fileCount={fileIds.length}
-                  hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                  job={workflowJob}
-                  jobCount={workflowJobs.length}
-                  onApproveNoCostGates={approveNoCostCodexGates}
-                  onCreate={startSkillFirstWorkflow}
-                  onOpenWorkflow={() => setActiveStep("generate")}
-                  onRefresh={() => loadWorkflowJobs({ activeId: workflowJob?.id || "", restoreLatest: !workflowJob?.id })}
-                  status={deriveWorkflowDeliveryStatus(workflowJob, [])}
-                />
-                <ProductReadinessPanel
-                  connection={connection}
-                  doctor={doctor}
-                  job={workflowJob}
-                  localImage={localImage}
-                  status={deriveWorkflowDeliveryStatus(workflowJob, [])}
-                />
+                <details className="workflow-advanced-panel workflow-agent-advanced">
+                  <summary>
+                    <span>高级详情 / 环境与工作流</span>
+                    <small>查看服务、模型、OCR、关卡和当前任务状态。</small>
+                  </summary>
+                  <SkillFirstProductConsole
+                    approvalSummary={noCostApprovalSummary}
+                    busy={workflowBusy || generationProgress.active}
+                    fileCount={fileIds.length}
+                    hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                    job={workflowJob}
+                    jobCount={workflowJobs.length}
+                    onApproveNoCostGates={approveNoCostCodexGates}
+                    onCreate={startSkillFirstWorkflow}
+                    onOpenWorkflow={() => setActiveStep("generate")}
+                    onRefresh={() => loadWorkflowJobs({ activeId: workflowJob?.id || "", restoreLatest: !workflowJob?.id })}
+                    status={deriveWorkflowDeliveryStatus(workflowJob, [])}
+                  />
+                  <ProductReadinessPanel
+                    connection={connection}
+                    doctor={doctor}
+                    job={workflowJob}
+                    localImage={localImage}
+                    status={deriveWorkflowDeliveryStatus(workflowJob, [])}
+                  />
+                </details>
               </div>
             </SectionCard>
           )}
@@ -1596,7 +1602,7 @@ function App() {
 
           {activeStep === "generate" && (
             <SectionCard title="生成可编辑 PPT" desc="确认大纲、视觉方向和生成方式后，创建 PPT 重制任务并重建可编辑 PPTX。">
-              <WorkflowAgentMainGuidePanel
+              <WorkflowUserGuidePanel
                 busy={workflowBusy || generationProgress.active}
                 hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
                 job={workflowJob}
@@ -1623,22 +1629,28 @@ function App() {
                   </button>
                 )}
               </div>
-              <WorkflowRebuildPanel
-                busy={workflowBusy}
-                files={files}
-                hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                job={workflowJob}
-                jobs={workflowJobs}
-                onRefresh={refreshWorkflowJob}
-                onRefreshList={() => loadWorkflowJobs({ activeId: workflowJob?.id || "" })}
-                onRunPipeline={startSkillFirstWorkflow}
-                onRunNextAction={runWorkflowNextAction}
-                onRunStep={runWorkflowStep}
-                onSelectJob={selectWorkflowJob}
-                onToggleArchive={toggleWorkflowArchive}
-                onToggleArchivedVisibility={setWorkflowArchiveVisibility}
-                showArchived={workflowShowArchived}
-              />
+              <details className="workflow-advanced-panel workflow-agent-advanced">
+                <summary>
+                  <span>高级详情 / 任务与证据</span>
+                  <small>查看 worker、页面任务、产物、校验和恢复动作。</small>
+                </summary>
+                <WorkflowRebuildPanel
+                  busy={workflowBusy}
+                  files={files}
+                  hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                  job={workflowJob}
+                  jobs={workflowJobs}
+                  onRefresh={refreshWorkflowJob}
+                  onRefreshList={() => loadWorkflowJobs({ activeId: workflowJob?.id || "" })}
+                  onRunPipeline={startSkillFirstWorkflow}
+                  onRunNextAction={runWorkflowNextAction}
+                  onRunStep={runWorkflowStep}
+                  onSelectJob={selectWorkflowJob}
+                  onToggleArchive={toggleWorkflowArchive}
+                  onToggleArchivedVisibility={setWorkflowArchiveVisibility}
+                  showArchived={workflowShowArchived}
+                />
+              </details>
             </SectionCard>
           )}
 
