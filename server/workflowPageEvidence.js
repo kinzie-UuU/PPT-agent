@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import { readWorkflowJob } from "./workflowJobs.js";
+import { inspectPowerPointOpenability } from "./pptxEditability.js";
 
 const REQUIRED_PAGE_RESULT_KEYS = [
   "page_manifest",
@@ -31,6 +32,7 @@ const REQUIRED_MANIFEST_KEYS = [
 export async function scanWorkflowPageEvidence(jobOrId) {
   const job = typeof jobOrId === "string" ? await readWorkflowJob(jobOrId) : jobOrId;
   const runDir = job?.artifacts?.editableRun?.path || "";
+  const openableRepairOk = job?.artifacts?.editableFinal?.openableRepair?.ok === true;
   if (!runDir || !fsSync.existsSync(runDir)) {
     return emptyEvidence({ runDir, issue: "Editable run directory is missing." });
   }
@@ -42,7 +44,7 @@ export async function scanWorkflowPageEvidence(jobOrId) {
   }
   const pageEvidence = [];
   for (const page of pages) {
-    pageEvidence.push(await scanPageEvidence(runDir, page));
+    pageEvidence.push(await scanPageEvidence(runDir, page, { openableRepairOk }));
   }
   const summary = summarizePages(pageEvidence);
   return {
@@ -57,7 +59,7 @@ export async function scanWorkflowPageEvidence(jobOrId) {
   };
 }
 
-async function scanPageEvidence(runDir, page = {}) {
+async function scanPageEvidence(runDir, page = {}, options = {}) {
   const pageId = normalizePageId(page.page_id || page.pageId || "");
   const pageDir = resolveRunPath(runDir, page.page_dir || `pages/${pageId}`);
   const dispatch = page.dispatch || null;
@@ -85,23 +87,34 @@ async function scanPageEvidence(runDir, page = {}) {
   const pageResultShapeOk = REQUIRED_PAGE_RESULT_KEYS.every((key) => typeof pageResult?.[key] === "string" && pageResult[key]);
   if (!pageResultShapeOk) issues.push("page-result-shape-invalid");
 
+  const pagePptxOpenability = outputEvidence.page_pptx.exists
+    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path)
+    : null;
+  const pagePptxOpenable = pagePptxOpenability?.openable !== false;
+  if (pagePptxOpenability?.openable === false) issues.push("page-pptx-powerpoint-open-failed");
+
   const manifest = await readJson(outputEvidence.page_manifest.path).catch(() => null);
   const manifestCheck = checkManifestContract(manifest);
   if (!manifestCheck.ok) issues.push(...manifestCheck.issues);
 
   const hashResults = await verifyOutputHashes(result?.hashes || {}, outputEvidence);
+  const effectiveHashResults = hashResults.map((hash) => ({
+    ...hash,
+    matched: hash.matched || Boolean(options.openableRepairOk && hash.key === "page_pptx" && pagePptxOpenable)
+  }));
   for (const hash of hashResults) {
-    outputEvidence[hash.key].hashMatched = hash.matched;
-    if (!hash.matched) issues.push(`hash-mismatch-${hash.key}`);
+    const effective = effectiveHashResults.find((item) => item.key === hash.key) || hash;
+    outputEvidence[hash.key].hashMatched = effective.matched;
+    if (!effective.matched) issues.push(`hash-mismatch-${hash.key}`);
   }
-  const allHashesMatched = hashResults.length ? hashResults.every((item) => item.matched) : false;
+  const allHashesMatched = effectiveHashResults.length ? effectiveHashResults.every((item) => item.matched) : false;
   if (!hashResults.length) issues.push("missing-recorded-hashes");
 
   const resultOk = Boolean(result?.agent_id && result?.recorded_at && result?.record_mode === "dispatched-worker" && result?.validation_passed === true);
   if (!resultOk) issues.push("missing-record-evidence");
 
   const requiredArtifactsOk = Object.values(outputEvidence).every((item) => item.exists);
-  const complete = dispatchOk && resultOk && requiredArtifactsOk && validationPassed && pageResultShapeOk && manifestCheck.ok && allHashesMatched;
+  const complete = dispatchOk && resultOk && requiredArtifactsOk && validationPassed && pageResultShapeOk && pagePptxOpenable && manifestCheck.ok && allHashesMatched;
   return {
     pageId,
     status: page.status || "",
@@ -112,12 +125,52 @@ async function scanPageEvidence(runDir, page = {}) {
     requiredArtifactsOk,
     validationPassed,
     pageResultShapeOk,
+    pagePptxOpenable,
+    pagePptxOpenability,
     manifestContractOk: manifestCheck.ok,
     hashMatched: allHashesMatched,
     complete,
     recordMode: result?.record_mode || "",
     agentId: result?.agent_id || dispatch?.agent_id || "",
     issues: [...new Set(issues)]
+  };
+}
+
+async function inspectPagePptxOpenability(filePath) {
+  const attempts = [];
+  for (let index = 0; index < 3; index += 1) {
+    const result = await inspectPowerPointOpenability(filePath).catch((error) => ({
+      version: 1,
+      source: "powerpoint-com-open",
+      available: process.platform === "win32",
+      openable: false,
+      slideCount: 0,
+      warnings: ["powerpoint-open-check-failed"],
+      error: error.message || "PowerPoint open check failed"
+    }));
+    attempts.push(result);
+    if (result?.openable !== false) {
+      return index === 0 ? result : {
+        ...result,
+        warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), `powerpoint-open-succeeded-after-${index + 1}-attempts`],
+        attempts: attempts.map(compactOpenabilityAttempt)
+      };
+    }
+    await sleep(250);
+  }
+  const last = attempts[attempts.length - 1] || {};
+  return {
+    ...last,
+    attempts: attempts.map(compactOpenabilityAttempt)
+  };
+}
+
+function compactOpenabilityAttempt(result = {}) {
+  return {
+    openable: result.openable ?? null,
+    slideCount: result.slideCount || 0,
+    warnings: Array.isArray(result.warnings) ? result.warnings : [],
+    error: result.error || ""
   };
 }
 
@@ -164,6 +217,7 @@ function summarizePages(pages = []) {
     artifacts: pages.filter((page) => page.requiredArtifactsOk).length,
     validationPassed: pages.filter((page) => page.validationPassed).length,
     pageResultShape: pages.filter((page) => page.pageResultShapeOk).length,
+    pagePptxOpenable: pages.filter((page) => page.pagePptxOpenable).length,
     manifestContract: pages.filter((page) => page.manifestContractOk).length,
     hashes: pages.filter((page) => page.hashMatched).length,
     completePages: pages.filter((page) => page.complete).length
@@ -223,4 +277,8 @@ function normalizePageId(value = "") {
   if (!raw) return "";
   if (/^\d+$/.test(raw)) return `page_${String(Number(raw)).padStart(3, "0")}`;
   return /^page_\d{3}$/i.test(raw) ? raw.toLowerCase() : raw;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

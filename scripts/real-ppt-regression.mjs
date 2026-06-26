@@ -210,7 +210,8 @@ async function main() {
       editableFinal = {
         path: job.artifacts?.editableFinal?.path || "",
         editable: job.artifacts?.editableFinal?.pptxEditability?.editable ?? null,
-        validation: job.artifacts?.editableFinal?.validation?.path || ""
+        validation: job.artifacts?.editableFinal?.validation?.path || "",
+        createdAt: job.artifacts?.editableFinal?.createdAt || ""
       };
     } else if (visualCount > 1 && !skipOcr && !skipWorkerBatch) {
       const preflight = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/worker-runs/preflight`, {
@@ -219,6 +220,7 @@ async function main() {
           mode: "local",
           maxPages: visualCount,
           acceptOfflineTextHints: true,
+          allowExperimentalLocalBatch: true,
           autoFinalize: true,
           agentPrefix: "real-ppt-local-worker"
         }
@@ -235,6 +237,7 @@ async function main() {
           mode: "local",
           maxPages: visualCount,
           acceptOfflineTextHints: true,
+          allowExperimentalLocalBatch: true,
           autoFinalize: true,
           agentPrefix: "real-ppt-local-worker"
         }
@@ -251,6 +254,8 @@ async function main() {
         runId,
         mode: completed.mode || "local",
         status: completed.status,
+        experimentalLocalBatch: completed.experimentalLocalBatch === true,
+        nonProductDelivery: completed.nonProductDelivery === true,
         succeeded: completed.succeeded ?? null,
         failed: completed.failed ?? null,
         taskSummary: completed.taskSummary || completed.summary?.taskSummary || null,
@@ -263,7 +268,8 @@ async function main() {
       editableFinal = {
         path: job.artifacts?.editableFinal?.path || "",
         editable: job.artifacts?.editableFinal?.pptxEditability?.editable ?? null,
-        validation: job.artifacts?.editableFinal?.validation?.path || ""
+        validation: job.artifacts?.editableFinal?.validation?.path || "",
+        createdAt: job.artifacts?.editableFinal?.createdAt || ""
       };
     }
   }
@@ -297,13 +303,28 @@ async function main() {
       visualImages: visualCount,
       slideState,
       provenancePreserved,
+      latestImageCreatedAt: latestCreatedAt(visualImages),
+      images: visualImages.map((image) => ({
+        pageId: image.pageId || "",
+        pageNumber: image.pageNumber || null,
+        provider: image.provider || "",
+        model: image.model || "",
+        dryRun: Boolean(image.dryRun),
+        sha256: image.sha256 || "",
+        createdAt: image.createdAt || ""
+      })),
       nextRunbookStep: postImageDeckCompliance.runbook?.currentStep || "",
       visualManifest: job.artifacts?.visualManifest?.path || "",
-      imageDeck: job.artifacts?.imageDeck?.path || ""
+      visualManifestCreatedAt: job.artifacts?.visualManifest?.createdAt || "",
+      visualQualityCreatedAt: job.artifacts?.visualQuality?.createdAt || "",
+      imageDeck: job.artifacts?.imageDeck?.path || "",
+      imageDeckCreatedAt: job.artifacts?.imageDeck?.createdAt || ""
     },
     ocr: summarizeOcr(job),
     editable: editableStatus ? {
       runDir: editableStatus.runDir,
+      runCreatedAt: job.artifacts?.editableRun?.createdAt || "",
+      hintsCreatedAt: job.artifacts?.editableHints?.createdAt || "",
       nextStage: editableStatus.next?.stage || "",
       tasks: taskBundle?.summary || null,
       workerBatch,
@@ -463,6 +484,13 @@ function cleanPageSelection(value) {
   return String(value || "").replace(/[^\d,\-\s]/g, "").replace(/\s+/g, "").replace(/^,+|,+$/g, "") || "1";
 }
 
+function latestCreatedAt(items = []) {
+  const times = (Array.isArray(items) ? items : [])
+    .map((item) => Date.parse(String(item?.createdAt || "")))
+    .filter((time) => Number.isFinite(time));
+  return times.length ? new Date(Math.max(...times)).toISOString() : "";
+}
+
 async function resolveSourcePath(args = {}) {
   const explicit = args.source || args.s || DEFAULT_SOURCE;
   if (explicit && explicit !== true) return path.resolve(String(explicit));
@@ -534,11 +562,12 @@ What it does:
   7. Runs local RapidOCR unless --skip-ocr is set.
   8. Prepares editppt and page worker prompts unless --skip-editable is set.
   9. For one-page runs, executes local rebuild and finalize.
-  10. For multi-page runs, starts the product local worker batch and waits for auto-finalize unless --skip-worker-batch is set.
+  10. For multi-page runs, starts an explicit experimental local worker batch and waits for auto-finalize unless --skip-worker-batch is set.
   11. Reports the next runbook step from the compliance API.
 
 The visual half remains regression passthrough. The editable finalize proves the
-v0.3 page-worker state machine and artifact contract, not final visual quality.
+v0.3 page-worker state machine and artifact contract, not final visual quality
+or product-ready editable reconstruction.
 `);
 }
 

@@ -4,13 +4,20 @@ import path from "path";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import { rootDir } from "./store.js";
-import { getProviderConfig } from "./providers.js";
+import { getProviderConfig, testPageSpecProvider } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
 import { finalizeWorkflowEditableRun } from "./workflowEditable.js";
+import { listWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
 
 const RUNNER_STATUSES = new Set(["running", "complete", "failed", "unknown"]);
+const MODEL_WORKER_DEFAULT_MAX_PAGES = 2;
+const LOCAL_WORKER_DEFAULT_MAX_PAGES = 20;
+const MODEL_WORKER_DEFAULT_TIMEOUT_MS = 300000;
+const LOCAL_WORKER_DEFAULT_TIMEOUT_MS = 600000;
+const MODEL_PAGE_SPEC_TIMEOUT_MS = 120000;
+const MODEL_PAGE_SPEC_MAX_TOKENS = 3500;
 
 export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
   const mode = normalizeMode(options.mode || "model");
@@ -36,8 +43,16 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
       || options.confirmOfflineTextHints
       || options.paddleOcrDeclined
     ),
+    allowExperimentalLocalBatch: Boolean(
+      preflight.startBody?.allowExperimentalLocalBatch
+      || options.allowExperimentalLocalBatch
+      || options.allowLocalTextOnlyBatch
+      || options.regression
+      || options.labMode
+    ),
     offlineTextHintsReason: preflight.startBody?.offlineTextHintsReason || options.offlineTextHintsReason || "",
-    autoFinalize: Boolean(preflight.startBody?.autoFinalize || options.autoFinalize || options.finalizeOnComplete)
+    autoFinalize: Boolean(preflight.startBody?.autoFinalize || options.autoFinalize || options.finalizeOnComplete),
+    stopOnError: mode === "model" ? options.stopOnError !== false : Boolean(options.stopOnError)
   };
   const runId = makeRunnerId();
   const logsDir = path.join(job.dirs.logs, "worker-runs");
@@ -54,12 +69,15 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
     mode,
     pid: 0,
     pages: cleanString(runnerOptions.pages || ""),
-    maxPages: clampInteger(runnerOptions.maxPages, 1, 200, 20),
+    maxPages: clampInteger(runnerOptions.maxPages, 1, 200, defaultWorkerMaxPages(mode)),
     agentPrefix: cleanToken(runnerOptions.agentPrefix || "product-page-worker"),
     command,
     confirmExternalImageSpend: mode === "model" ? Boolean(runnerOptions.confirmExternalImageSpend || runnerOptions.confirmSpend) : false,
     acceptOfflineTextHints: Boolean(runnerOptions.acceptOfflineTextHints || runnerOptions.confirmOfflineTextHints || runnerOptions.paddleOcrDeclined),
+    experimentalLocalBatch: mode === "local" && Boolean(runnerOptions.allowExperimentalLocalBatch),
+    nonProductDelivery: mode === "local" && Boolean(runnerOptions.allowExperimentalLocalBatch),
     autoFinalize: Boolean(runnerOptions.autoFinalize || runnerOptions.finalizeOnComplete),
+    stopOnError: Boolean(runnerOptions.stopOnError),
     args,
     logPath,
     relativeLogPath: path.relative(rootDir, logPath),
@@ -140,16 +158,26 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   const job = await readWorkflowJob(jobId);
   const artifacts = job.artifacts || {};
   const mode = normalizeMode(options.mode || "model");
-  const maxPages = clampInteger(options.maxPages, 1, 200, 20);
+  const maxPagesProvided = hasExplicitMaxPages(options);
+  const maxPages = clampInteger(options.maxPages, 1, 200, defaultWorkerMaxPages(mode));
   const selectedPages = parsePageSelection(options.pages || options.page || "");
   const prompts = Array.isArray(artifacts.editableWorkerPrompts) ? artifacts.editableWorkerPrompts : [];
-  const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
+  const taskBundle = await listWorkflowEditableWorkerTasks(jobId, options).catch(() => null);
+  const tasks = Array.isArray(taskBundle?.tasks)
+    ? taskBundle.tasks
+    : Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const activeRunner = findActiveRunner(job);
   const runnableTasks = tasks
     .filter((task) => task.status === "ready" || task.status === "failed")
     .filter((task) => !selectedPages.size || selectedPages.has(normalizePageId(task.pageId)))
     .slice(0, maxPages);
+  const selectedPageIds = runnableTasks.map((task) => normalizePageId(task.pageId)).filter(Boolean);
+  const selectedPageNumbers = selectedPageIds
+    .map((pageId) => Number(pageId.replace(/^page_0*/, "")))
+    .filter((page) => Number.isInteger(page) && page > 0);
   const providers = getProviderConfig();
+  const providerFailure = inspectProviderFailure(runnableTasks, providers);
+  const recentProviderFailure = inspectRecentProviderFailure(job, providers);
   const cost = await getWorkflowCostEstimate(jobId).catch(() => null);
   const externalImageRequired = mode === "model";
   const textHints = getTextHintEvidence(artifacts);
@@ -163,12 +191,35 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
     || rapidOcrTextHintsAccepted
   );
   const authorization = externalImageRequired
-    ? getExternalImageAuthorizationStatus(job, { scope: "editable-workers", imageCalls: runnableTasks.length })
+    ? getExternalImageAuthorizationStatus(job, {
+      scope: "editable-workers",
+      imageCalls: runnableTasks.length,
+      pageSelection: selectedPageIds.join(","),
+      pageNumbers: selectedPageNumbers
+    })
     : null;
-  const externalImageConfirmed = Boolean(
-    options.confirmExternalImageSpend
-    || options.confirmSpend
-    || authorization?.persisted
+  const allowExperimentalLocalBatch = Boolean(
+    options.allowExperimentalLocalBatch
+    || options.allowLocalTextOnlyBatch
+    || options.regression
+    || options.labMode
+  );
+  const localMultiPageBatch = mode === "local" && runnableTasks.length > 1;
+  const externalImageConfirmed = Boolean(authorization?.persisted);
+  const requestOnlyExternalImageConfirmation = Boolean(options.confirmExternalImageSpend || options.confirmSpend);
+  const explicitLlmRecoveryRequired = Boolean(
+    options.requireLlmProviderRecovery
+    || options.requiresLlmProviderRecovery
+    || options.forceLlmProviderRecovery
+  );
+  const llmProviderRecoveryRequired = mode === "model"
+    && !providerFailure.blocked
+    && (recentProviderFailure.found || explicitLlmRecoveryRequired);
+  const llmProviderRecovered = Boolean(
+    options.confirmLlmProviderRecovered
+    || options.confirmLLMProviderRecovered
+    || options.llmProviderRecovered
+    || options.confirmProviderRecovered
   );
   const blockingIssues = [];
   const warnings = [];
@@ -178,14 +229,39 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   if (!prompts.length) blockingIssues.push("No editable page worker prompts are available.");
   if (!tasks.length) blockingIssues.push("No editable worker tasks are synced.");
   if (tasks.length && !runnableTasks.length) blockingIssues.push("No ready or failed editable worker task matches this batch.");
+  if (mode === "model" && !providers.llm.configured) {
+    blockingIssues.push("对话模型服务商未配置，image-to-editable-ppt 模型页面任务无法生成可编辑页面规格。");
+  }
   if (externalImageRequired && (!providers.image.configured || providers.image.enabled === false)) {
     blockingIssues.push("External image provider is not configured or enabled.");
   }
+  if (mode === "model" && providerFailure.blocked) {
+    blockingIssues.push(providerFailure.message);
+  }
+  if (mode === "model" && !providerFailure.blocked && recentProviderFailure.found) {
+    warnings.push(recentProviderFailure.message);
+  }
   if (externalImageRequired && !externalImageConfirmed) {
-    warnings.push("External image API credit confirmation is required before starting model page workers.");
+    warnings.push(requestOnlyExternalImageConfirmation
+      ? "Persisted page-scoped external image API authorization is required before starting model page workers; request-only confirmation is ignored for product safety."
+      : "External image API credit confirmation is required before starting model page workers.");
   }
   if (offlineTextHintsRequired && !offlineHintsAccepted) {
     warnings.push("Offline builtin-ink text hints must be accepted or PaddleOCR must be configured before dispatch.");
+  }
+  if (localMultiPageBatch && !allowExperimentalLocalBatch) {
+    blockingIssues.push("Local text-only worker batch is not allowed for multi-page product delivery. Use mode=model, or pass allowExperimentalLocalBatch=true only for lab/regression verification.");
+  }
+  if (localMultiPageBatch && allowExperimentalLocalBatch) {
+    warnings.push("Local text-only multi-page worker is experimental and cannot produce product-ready delivery.");
+  }
+  const modelPageWorkers = inspectModelPageWorkers(job, runnableTasks, { required: mode === "model" });
+  if (mode === "model" && modelPageWorkers.missingCount) {
+    blockingIssues.push(`Model page worker preflight failed on ${modelPageWorkers.missingCount} page(s): ${modelPageWorkers.missingSummary}.`);
+  }
+  const pageSpecProviderProbe = inspectPersistedPageSpecProviderProbe(job, providers);
+  if (mode === "model" && runnableTasks.length && !pageSpecProviderProbe.ready) {
+    blockingIssues.push(pageSpecProviderProbe.message);
   }
 
   const requiredConfirmations = {
@@ -193,7 +269,8 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
       required: externalImageRequired,
       confirmed: externalImageRequired ? externalImageConfirmed : true,
       persisted: Boolean(authorization?.persisted),
-      source: authorization?.persisted ? "authorization-ledger" : externalImageConfirmed ? "request-confirmation" : "missing"
+      requestConfirmed: requestOnlyExternalImageConfirmation,
+      source: authorization?.persisted ? "authorization-ledger" : requestOnlyExternalImageConfirmation ? "request-confirmation-ignored" : "missing"
     },
     offlineTextHints: {
       required: offlineTextHintsRequired || rapidOcrTextHintsAccepted,
@@ -201,13 +278,28 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
       acceptedByWorkflow: Boolean(artifacts.editableTextHintsAcknowledgement?.accepted),
       reason: rapidOcrTextHintsAccepted ? "rapidocr-local" : offlineTextHintsRequired ? "builtin-ink" : textHints.backend || "not-required",
       state: rapidOcrTextHintsAccepted ? "ocr-ready" : offlineTextHintsRequired ? "offline-ack-required" : "not-required"
+    },
+    llmProviderRecovered: {
+      required: llmProviderRecoveryRequired,
+      confirmed: llmProviderRecoveryRequired ? llmProviderRecovered : true,
+      reason: llmProviderRecoveryRequired ? recentProviderFailure.kind || "v1-acceptance-requires-provider-recovery" : "not-required",
+      state: llmProviderRecoveryRequired
+        ? llmProviderRecovered ? "confirmed-after-provider-recovery" : "confirmation-required-after-provider-recovery"
+        : "not-required"
+    },
+    localTextOnlyBatch: {
+      required: localMultiPageBatch,
+      confirmed: localMultiPageBatch ? allowExperimentalLocalBatch : true,
+      state: localMultiPageBatch
+        ? allowExperimentalLocalBatch ? "experimental-lab-confirmed" : "blocked-for-product"
+        : "not-required"
     }
   };
   const ready = blockingIssues.length === 0;
   const startReady = ready
     && (!requiredConfirmations.externalImageSpend.required || requiredConfirmations.externalImageSpend.confirmed)
-    && (!requiredConfirmations.offlineTextHints.required || requiredConfirmations.offlineTextHints.confirmed);
-  const selectedPageIds = runnableTasks.map((task) => normalizePageId(task.pageId)).filter(Boolean);
+    && (!requiredConfirmations.offlineTextHints.required || requiredConfirmations.offlineTextHints.confirmed)
+    && (!requiredConfirmations.llmProviderRecovered.required || requiredConfirmations.llmProviderRecovered.confirmed);
   const batchCost = buildWorkerBatchCostSummary(cost, {
     selectedCount: runnableTasks.length,
     selectedPageIds,
@@ -223,17 +315,29 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
     selectedCount: runnableTasks.length,
     selectedPageIds,
     maxPages,
+    pageLimitPolicy: {
+      source: maxPagesProvided ? "request" : "product-default",
+      defaultMaxPages: defaultWorkerMaxPages(mode),
+      productSampleFirst: mode === "model"
+    },
     pages: cleanString(options.pages || ""),
     counts: {
       prompts: prompts.length,
       total: tasks.length,
-      ready: tasks.filter((task) => task.status === "ready").length,
-      failed: tasks.filter((task) => task.status === "failed").length,
+      ready: tasks.filter((task) => task.status === "ready" && !isFailedWorkerTask(task)).length,
+      failed: tasks.filter(isFailedWorkerTask).length,
       running: tasks.filter((task) => task.status === "running" || task.status === "claimed").length,
       recorded: tasks.filter((task) => task.status === "recorded").length
     },
     provider: publicProvider(providers.image),
+    llmProvider: publicProvider(providers.llm),
+    pageSpecProvider: publicPageSpecProvider(providers.llm),
+    pageSpecProviderProbe,
+    imageProvider: publicProvider(providers.image),
+    providerFailure,
+    recentProviderFailure,
     textHints,
+    modelPageWorkers,
     cost: batchCost,
     authorization,
     requiredConfirmations,
@@ -246,12 +350,168 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
       pages: selectedPageIds.join(","),
       agentPrefix: cleanToken(options.agentPrefix || "product-page-worker"),
       confirmExternalImageSpend: externalImageRequired ? externalImageConfirmed : false,
+      confirmLlmProviderRecovered: Boolean(llmProviderRecoveryRequired && llmProviderRecovered),
+      requireLlmProviderRecovery: Boolean(llmProviderRecoveryRequired),
       acceptOfflineTextHints: Boolean(offlineHintsAccepted && (offlineTextHintsRequired || rapidOcrTextHintsAccepted)),
+      allowExperimentalLocalBatch: Boolean(localMultiPageBatch && allowExperimentalLocalBatch),
       offlineTextHintsReason: rapidOcrTextHintsAccepted ? "RapidOCR local text hints are available for this workflow." : cleanString(options.offlineTextHintsReason || ""),
       autoFinalize: Boolean(options.autoFinalize || options.finalizeOnComplete)
     },
     updatedAt: new Date().toISOString()
   };
+}
+
+export async function getWorkflowPageSpecProviderProbe(jobId, options = {}) {
+  const job = await readWorkflowJob(jobId);
+  const preflight = await getWorkflowEditableWorkerBatchPreflight(jobId, {
+    ...options,
+    mode: "model",
+    maxPages: options.maxPages || 1
+  });
+  const requestedPages = parsePageSelection(options.pages || options.page || "");
+  const probeTaskBundle = await listWorkflowEditableWorkerTasks(jobId, options).catch(() => null);
+  const allModelPages = inspectModelPageWorkers(job, Array.isArray(probeTaskBundle?.tasks) ? probeTaskBundle.tasks : [], {
+    required: false
+  }).pages || [];
+  const probePages = [
+    ...(preflight.modelPageWorkers?.pages || []),
+    ...allModelPages
+  ];
+  const page = selectPageForProviderProbe(probePages, requestedPages);
+  const sourceImage = page?.pageDir ? path.join(page.pageDir, "source.png") : "";
+  const probe = await testPageSpecProvider({
+    model: options.model,
+    baseUrl: options.baseUrl,
+    timeoutMs: options.timeoutMs || MODEL_PAGE_SPEC_TIMEOUT_MS,
+    maxRetries: options.maxRetries ?? 0,
+    imagePath: sourceImage,
+    visionProbe: options.visionProbe !== false
+  });
+  const result = {
+    ok: Boolean(probe.ok),
+    jobId,
+    pageId: page?.pageId || "",
+    pageDir: page?.pageDir || "",
+    sourceImage,
+    provider: probe.provider,
+    checks: probe.checks,
+    message: probe.ok
+      ? "页面重建模型检测通过：支持非空 JSON 输出，并通过当前页面图片的视觉 JSON 检测。"
+      : translatePageSpecProbeMessage(probe.message || ""),
+    rawMessage: probe.message || "",
+    preflight: {
+      selectedPageIds: preflight.selectedPageIds || [],
+      startReady: Boolean(preflight.startReady),
+      providerFailure: preflight.providerFailure || null,
+      recentProviderFailure: preflight.recentProviderFailure || null,
+      probeSource: page?.source || ""
+    },
+    updatedAt: new Date().toISOString()
+  };
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    pageSpecProviderProbe: {
+      kind: "page_spec_provider_probe",
+      ok: result.ok,
+      pageId: result.pageId,
+      provider: result.provider,
+      checks: result.checks,
+      message: result.message,
+      rawMessage: result.rawMessage,
+      sourceImage: result.sourceImage,
+      updatedAt: result.updatedAt
+    }
+  };
+  job.events = appendEvent(job.events, result.ok ? "page_spec_provider.probe_passed" : "page_spec_provider.probe_failed", result.message, {
+    pageId: result.pageId,
+    provider: result.provider,
+    checks: result.checks
+  });
+  await saveWorkflowJob(job);
+  return result;
+}
+
+function selectPageForProviderProbe(pages = [], requestedPages = new Set()) {
+  const seen = new Set();
+  const unique = [];
+  for (const page of pages) {
+    const pageId = normalizePageId(page?.pageId || "");
+    if (!pageId || seen.has(pageId)) continue;
+    seen.add(pageId);
+    unique.push({ ...page, pageId, source: page.source || "worker-task" });
+  }
+  const requested = requestedPages?.size
+    ? unique.find((page) => requestedPages.has(page.pageId) && page.ready && page.pageDir)
+      || unique.find((page) => requestedPages.has(page.pageId) && page.pageDir)
+    : null;
+  return requested
+    || unique.find((page) => page.ready && page.pageDir)
+    || unique.find((page) => page.pageDir)
+    || null;
+}
+
+function inspectModelPageWorkers(job = {}, tasks = [], { required = false } = {}) {
+  const jobRoot = path.resolve(job.rootDir || rootDir);
+  const workflowRoot = path.dirname(jobRoot);
+  const pages = tasks.map((task) => inspectModelPageWorkerTask(job, task, { workflowRoot }));
+  const missingPages = pages.filter((page) => !page.ready);
+  return {
+    required: Boolean(required),
+    ready: missingPages.length === 0,
+    total: pages.length,
+    readyCount: pages.filter((page) => page.ready).length,
+    missingCount: missingPages.length,
+    missingSummary: summarizeMissingModelPageWorkerFiles(missingPages),
+    pages: pages.slice(0, 80),
+    checkedFiles: ["source.png", "page_request.json", "worker-prompt.md", "worker-brief.json"]
+  };
+}
+
+function inspectModelPageWorkerTask(job = {}, task = {}, { workflowRoot = "" } = {}) {
+  const pageId = normalizePageId(task.pageId || task.page || "");
+  const editableRunDir = job.artifacts?.editableRun?.path || "";
+  const pageDirRaw = task.pageDir || (editableRunDir && pageId ? path.join(editableRunDir, "pages", pageId) : "");
+  const pageDir = pageDirRaw ? path.resolve(pageDirRaw) : "";
+  const promptPath = path.resolve(task.promptFile || path.join(pageDir, "worker-prompt.md"));
+  const briefPath = path.resolve(workflowRoot || path.dirname(path.resolve(job.rootDir || rootDir)), job.id || "", "worker-briefs", pageId, "worker-brief.json");
+  const checks = [
+    fileCheck("pageDir", pageDir, "directory"),
+    fileCheck("source.png", path.join(pageDir, "source.png"), "file"),
+    fileCheck("page_request.json", path.join(pageDir, "page_request.json"), "file"),
+    fileCheck("worker-prompt.md", promptPath, "file"),
+    fileCheck("worker-brief.json", briefPath, "file")
+  ];
+  const missing = checks.filter((item) => !item.ok).map((item) => item.name);
+  return {
+    pageId,
+    status: task.status || "",
+    ready: missing.length === 0,
+    missing,
+    checks,
+    pageDir,
+    promptPath,
+    briefPath,
+    nextCommand: missing.length
+      ? ""
+      : `npm.cmd run lab:model-preflight -- --job-id ${job.id || "<workflow_id>"} --page ${pageId || "<page_id>"} --page-dir "${pageDir}"`
+  };
+}
+
+function fileCheck(name, filePath, kind = "file") {
+  const exists = Boolean(filePath && fsSync.existsSync(filePath));
+  const ok = exists && (kind === "directory" ? fsSync.statSync(filePath).isDirectory() : fsSync.statSync(filePath).isFile());
+  return {
+    name,
+    kind,
+    ok,
+    path: filePath || ""
+  };
+}
+
+function summarizeMissingModelPageWorkerFiles(pages = []) {
+  const summary = pages.slice(0, 4).map((page) => `${page.pageId || "unknown"} missing ${page.missing.join(", ")}`);
+  const extra = pages.length > summary.length ? `; +${pages.length - summary.length} more` : "";
+  return `${summary.join("; ")}${extra}`;
 }
 
 function buildWorkerBatchCostSummary(cost, { selectedCount = 0, selectedPageIds = [], selectedPages = new Set(), totalTasks = 0 } = {}) {
@@ -338,12 +598,173 @@ function roundMoney(value) {
   return Math.round((Number(value || 0) + Number.EPSILON) * 10000) / 10000;
 }
 
+function isFailedWorkerTask(task = {}) {
+  return task.status === "failed"
+    || task.validationStatus === "failed"
+    || (task.status === "recorded" && task.evidence?.validationPassed === false)
+    || Boolean(task.evidence?.validationError);
+}
+
+function inspectProviderFailure(tasks = [], providers = {}) {
+  const failed = tasks.filter(isFailedWorkerTask);
+  const errors = failed.map((task) => [
+    task.error,
+    task.evidence?.validationError
+  ].filter(Boolean).join(" ")).join("\n");
+  const pages = failed.map((task) => normalizePageId(task.pageId)).filter(Boolean);
+  const pageText = pages.length ? pages.join(",") : "";
+  const failedProvider = firstProviderSnapshot(failed);
+  const currentProvider = {
+    llm: publicProvider(providers.llm),
+    image: publicProvider(providers.image)
+  };
+  if (/额度已用尽|余额|insufficient[_\s-]?quota|quota|credit|billing/i.test(errors)) {
+    return {
+      blocked: true,
+      kind: "provider-quota-exhausted",
+      pages,
+      failedProvider,
+      currentProvider,
+      message: `失败页面${pageText ? `（${pageText}）` : ""}的对话模型服务商额度或余额不足。请充值或切换服务商，重置失败页后再重跑可编辑页面任务。`
+    };
+  }
+  if (/HTTP\s*401|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(errors)) {
+    return {
+      blocked: true,
+      kind: "provider-auth-failed",
+      pages,
+      failedProvider,
+      currentProvider,
+      message: `失败页面${pageText ? `（${pageText}）` : ""}的对话模型服务商鉴权失败。请检查 API Key / Base URL，重置失败页后再重跑可编辑页面任务。`
+    };
+  }
+  if (/operation was aborted|aborted|timeout|timed out|ETIMEDOUT|AbortError/i.test(errors)) {
+    return {
+      blocked: true,
+      kind: "provider-timeout",
+      pages,
+      failedProvider,
+      currentProvider,
+      message: `失败页面${pageText ? `（${pageText}）` : ""}的页面重建模型请求超时或被中止。请切换更稳定的页面重建模型，或降低页面规格生成复杂度后再重跑。`
+    };
+  }
+  if (/Model response did not contain parseable JSON|content was empty|completion_tokens["':\s]+0|finishReason["':\s]+stop/i.test(errors)) {
+    return {
+      blocked: true,
+      kind: "provider-empty-response",
+      pages,
+      failedProvider,
+      currentProvider,
+      message: `失败页面${pageText ? `（${pageText}）` : ""}的对话模型返回空内容或不可解析 JSON。请切换支持视觉输入和 JSON 输出的对话模型，或调整模型规格生成方式后再重跑。`
+    };
+  }
+  return {
+    blocked: false,
+    kind: "",
+    pages: [],
+    failedProvider: null,
+    currentProvider,
+    message: ""
+  };
+}
+
+function firstProviderSnapshot(tasks = []) {
+  for (const task of tasks) {
+    const snapshot = task?.evidence?.providerSnapshot;
+    if (snapshot && typeof snapshot === "object") return snapshot;
+  }
+  return null;
+}
+
+function inspectRecentProviderFailure(job = {}, providers = {}) {
+  const runs = Array.isArray(job.artifacts?.editableWorkerBatchRuns) ? job.artifacts.editableWorkerBatchRuns : [];
+  const currentProvider = {
+    llm: publicProvider(providers.llm),
+    image: publicProvider(providers.image)
+  };
+  for (const run of runs) {
+    const text = collectRunFailureText(run);
+    const kind = classifyRecentProviderFailureText(text);
+    if (!kind) continue;
+    const pages = collectRunFailurePages(run);
+    const pageText = pages.length ? `（${pages.join(",")}）` : "";
+    const quota = kind === "provider-quota-exhausted";
+    const empty = kind === "provider-empty-response";
+    const timeout = kind === "provider-timeout";
+    return {
+      found: true,
+      kind,
+      pages,
+      runId: run.id || "",
+      startedAt: run.startedAt || "",
+      finishedAt: run.finishedAt || "",
+      failedProvider: null,
+      currentProvider,
+      message: quota
+        ? `最近一次可编辑重建失败是对话模型服务商额度或余额不足${pageText}；确认启动前请先充值或切换对话模型服务商。`
+        : empty
+        ? `最近一次可编辑重建失败是对话模型返回空内容或不可解析 JSON${pageText}；确认启动前请先切换支持视觉输入和 JSON 输出的对话模型，或调整模型规格生成方式。`
+        : timeout
+        ? `最近一次可编辑重建失败是页面重建模型请求超时或被中止${pageText}；确认启动前请先切换更稳定的页面重建模型，或降低页面规格生成复杂度。`
+        : `最近一次可编辑重建失败是对话模型服务商鉴权失败${pageText}；确认启动前请先检查 API Key、Base URL 或切换对话模型服务商。`
+    };
+  }
+  return {
+    found: false,
+    kind: "",
+    pages: [],
+    runId: "",
+    startedAt: "",
+    finishedAt: "",
+    failedProvider: null,
+    currentProvider,
+    message: ""
+  };
+}
+
+function classifyRecentProviderFailureText(value = "") {
+  const text = String(value || "");
+  if (/额度已用尽|余额|insufficient[_\s-]?quota|quota|credit|billing/i.test(text)) return "provider-quota-exhausted";
+  if (/HTTP\s*401|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(text)) return "provider-auth-failed";
+  if (/operation was aborted|aborted|timeout|timed out|ETIMEDOUT|AbortError/i.test(text)) return "provider-timeout";
+  if (/Model response did not contain parseable JSON|content was empty|completion_tokens["':\s]+0|finishReason["':\s]+stop/i.test(text)) return "provider-empty-response";
+  return "";
+}
+
+function collectRunFailureText(run = {}) {
+  const parts = [
+    run.error,
+    run.summary?.error,
+    ...(Array.isArray(run.summary?.results) ? run.summary.results.map((item) => item?.error) : []),
+    ...(Array.isArray(run.errors) ? run.errors.map((item) => item?.error || item) : [])
+  ];
+  return parts.filter(Boolean).join("\n");
+}
+
+function collectRunFailurePages(run = {}) {
+  const pages = new Set();
+  for (const item of Array.isArray(run.summary?.results) ? run.summary.results : []) {
+    if (item?.ok !== false) continue;
+    const pageId = normalizePageId(item.pageId);
+    if (pageId) pages.add(pageId);
+  }
+  for (const item of Array.isArray(run.errors) ? run.errors : []) {
+    const pageId = normalizePageId(item?.pageId);
+    if (pageId) pages.add(pageId);
+  }
+  return Array.from(pages).sort();
+}
+
 function enforceEditableWorkerBatchPreflight(preflight = {}, mode = "model") {
   const issues = Array.isArray(preflight.blockingIssues) ? preflight.blockingIssues : [];
   const warnings = Array.isArray(preflight.warnings) ? preflight.warnings : [];
   const externalConfirmation = preflight.requiredConfirmations?.externalImageSpend;
   if (mode === "model" && externalConfirmation?.required && !externalConfirmation.confirmed) {
-    throw new Error("confirmExternalImageSpend=true is required before running image-to-editable-ppt model page workers. Editable worker batch preflight failed: external image API credit confirmation is missing.");
+    throw new Error("A persisted page-scoped external image spend authorization is required before running image-to-editable-ppt model page workers. Editable worker batch preflight failed: authorization ledger entry is missing.");
+  }
+  const llmProviderRecovered = preflight.requiredConfirmations?.llmProviderRecovered;
+  if (mode === "model" && llmProviderRecovered?.required && !llmProviderRecovered.confirmed) {
+    throw new Error("最近一次 image-to-editable-ppt 页面重建卡在对话模型服务商额度/鉴权；重新启动前必须传入 confirmLlmProviderRecovered=true。");
   }
   if (!preflight.ready || !preflight.startReady) {
     const reasons = [...issues, ...warnings].filter(Boolean);
@@ -444,6 +865,7 @@ async function readRunnerSummary(logPath) {
 }
 
 function buildBatchArgs({ jobId, command, options }) {
+  const mode = normalizeMode(options.mode || "model");
   const args = [
     path.join(rootDir, "scripts", "page-worker-batch.mjs"),
     "--job-id",
@@ -453,9 +875,9 @@ function buildBatchArgs({ jobId, command, options }) {
     "--agent-prefix",
     cleanToken(options.agentPrefix || "product-page-worker"),
     "--max-pages",
-    String(clampInteger(options.maxPages, 1, 200, 20)),
+    String(clampInteger(options.maxPages, 1, 200, defaultWorkerMaxPages(mode))),
     "--timeout-ms",
-    String(clampInteger(options.timeoutMs, 30000, 1800000, 600000)),
+    String(clampInteger(options.timeoutMs, 30000, 1800000, defaultWorkerTimeoutMs(mode))),
     "--command",
     command
   ];
@@ -477,7 +899,15 @@ function isAllTasksRecorded(summary = null) {
 function buildWorkerCommand(mode, options = {}) {
   if (options.command) return cleanString(options.command);
   if (mode === "local") return quoteCommand(process.execPath, path.join(rootDir, "scripts", "local-page-worker.mjs"));
-  return quoteCommand(process.execPath, path.join(rootDir, "scripts", "model-page-worker-pipeline.mjs"));
+  return [
+    quoteCommand(process.execPath, path.join(rootDir, "scripts", "model-page-worker-pipeline.mjs")),
+    "--timeout-ms",
+    String(clampInteger(options.modelSpecTimeoutMs || options.specTimeoutMs, 30000, 600000, MODEL_PAGE_SPEC_TIMEOUT_MS)),
+    "--max-retries",
+    String(clampInteger(options.modelSpecMaxRetries || options.maxRetries, 0, 8, 0)),
+    "--max-tokens",
+    String(clampInteger(options.modelSpecMaxTokens || options.maxTokens, 256, 12000, MODEL_PAGE_SPEC_MAX_TOKENS))
+  ].join(" ");
 }
 
 function quoteCommand(...parts) {
@@ -487,6 +917,18 @@ function quoteCommand(...parts) {
 function normalizeMode(value) {
   const mode = cleanToken(value || "model");
   return mode === "local" ? "local" : "model";
+}
+
+function defaultWorkerMaxPages(mode = "model") {
+  return normalizeMode(mode) === "model" ? MODEL_WORKER_DEFAULT_MAX_PAGES : LOCAL_WORKER_DEFAULT_MAX_PAGES;
+}
+
+function defaultWorkerTimeoutMs(mode = "model") {
+  return normalizeMode(mode) === "model" ? MODEL_WORKER_DEFAULT_TIMEOUT_MS : LOCAL_WORKER_DEFAULT_TIMEOUT_MS;
+}
+
+function hasExplicitMaxPages(options = {}) {
+  return options.maxPages !== undefined && options.maxPages !== null && String(options.maxPages).trim() !== "";
 }
 
 function parsePageSelection(value = "") {
@@ -525,6 +967,74 @@ function publicProvider(provider = {}) {
     model: provider.model || "",
     concurrency: provider.concurrency || 1
   };
+}
+
+function publicPageSpecProvider(provider = {}) {
+  return {
+    configured: Boolean(provider.configured),
+    enabled: provider.enabled !== false,
+    baseUrl: provider.baseUrl || "",
+    model: provider.pageSpecModel || provider.model || "",
+    source: provider.pageSpecModel && provider.pageSpecModel !== provider.model ? "PAGE_SPEC_MODEL" : "LLM_MODEL",
+    concurrency: provider.concurrency || 1
+  };
+}
+
+function inspectPersistedPageSpecProviderProbe(job = {}, providers = {}) {
+  const current = publicPageSpecProvider(providers.llm || {});
+  const probe = job.artifacts?.pageSpecProviderProbe || null;
+  if (!probe) {
+    return {
+      required: true,
+      ready: false,
+      ok: false,
+      stale: false,
+      provider: current,
+      checkedAt: "",
+      message: "页面重建模型尚未完成能力检测。请先点击“检测页面重建模型”，确认它支持图片输入、JSON 输出和非空响应。"
+    };
+  }
+  const checkedProvider = probe.provider || {};
+  const modelMatches = cleanString(checkedProvider.model) === cleanString(current.model);
+  const baseUrlMatches = normalizeProviderKey(checkedProvider.baseUrl) === normalizeProviderKey(current.baseUrl);
+  const checks = probe.checks || {};
+  const textOk = Boolean(checks.textJson?.ok);
+  const visionOk = checks.visionJson === null || checks.visionJson === undefined ? false : Boolean(checks.visionJson?.ok);
+  const nonEmpty = Boolean(checks.nonEmpty);
+  const ready = Boolean(probe.ok && modelMatches && baseUrlMatches && textOk && visionOk && nonEmpty);
+  const stale = Boolean(probe.ok && (!modelMatches || !baseUrlMatches));
+  const message = ready
+    ? "页面重建模型能力检测已通过。"
+    : stale
+      ? "页面重建模型配置已变化，请重新检测 PAGE_SPEC_MODEL / Base URL 后再启动 image-to-editable-ppt 页面 worker。"
+      : probe.message || "页面重建模型能力检测未通过，请切换支持视觉输入和 JSON 输出的模型后重新检测。";
+  return {
+    required: true,
+    ready,
+    ok: Boolean(probe.ok),
+    stale,
+    provider: current,
+    checkedProvider,
+    modelMatches,
+    baseUrlMatches,
+    checks,
+    checkedAt: probe.updatedAt || "",
+    pageId: probe.pageId || "",
+    message
+  };
+}
+
+function normalizeProviderKey(value = "") {
+  return String(value || "").trim().replace(/\/+$/, "").replace(/\/v\d+$/i, "");
+}
+
+function translatePageSpecProbeMessage(message = "") {
+  const text = String(message || "");
+  if (/empty content/i.test(text)) return "页面重建模型返回空内容。请切换支持视觉输入和 JSON 输出的对话模型，或调整 PAGE_SPEC_MODEL 后再重跑。";
+  if (/image input|vision/i.test(text)) return "页面重建模型没有通过图片输入 + JSON 输出检测。请为 image-to-editable-ppt 配置支持视觉理解的页面重建模型。";
+  if (/parseable JSON|JSON/i.test(text)) return "页面重建模型没有返回可解析 JSON。请切换模型或关闭不兼容的 response_format 路径。";
+  if (/API key|Missing/i.test(text)) return "页面重建模型 API Key 未配置。";
+  return text || "页面重建模型检测未通过。";
 }
 
 function makeRunnerId() {
@@ -588,6 +1098,8 @@ function publicRunner(run = {}, jobId = "") {
     agentPrefix: run.agentPrefix || "",
     confirmExternalImageSpend: Boolean(run.confirmExternalImageSpend),
     acceptOfflineTextHints: Boolean(run.acceptOfflineTextHints),
+    experimentalLocalBatch: Boolean(run.experimentalLocalBatch),
+    nonProductDelivery: Boolean(run.nonProductDelivery),
     autoFinalize: Boolean(run.autoFinalize),
     logPath: run.logPath || "",
     relativeLogPath: run.relativeLogPath || "",
@@ -634,10 +1146,12 @@ function sanitizeRunner(run = {}) {
     mode: normalizeMode(run.mode),
     pid: Number(run.pid || 0),
     pages: cleanString(run.pages || ""),
-    maxPages: clampInteger(run.maxPages, 1, 200, 20),
+    maxPages: clampInteger(run.maxPages, 1, 200, defaultWorkerMaxPages(run.mode)),
     agentPrefix: cleanToken(run.agentPrefix || "product-page-worker"),
     confirmExternalImageSpend: Boolean(run.confirmExternalImageSpend),
     acceptOfflineTextHints: Boolean(run.acceptOfflineTextHints),
+    experimentalLocalBatch: Boolean(run.experimentalLocalBatch),
+    nonProductDelivery: Boolean(run.nonProductDelivery),
     autoFinalize: Boolean(run.autoFinalize),
     command: cleanString(run.command || ""),
     args: Array.isArray(run.args) ? run.args.map(cleanString) : [],

@@ -17,10 +17,13 @@ export async function listWorkflowAuthorizations(jobId) {
 export function getExternalImageAuthorizationStatus(job = {}, options = {}) {
   const scope = normalizeScope(options.scope || "visual-sample");
   const requiredCalls = normalizeImageCalls(options.imageCalls || defaultImageCallsForScope(scope));
+  const requestedPages = normalizeAuthorizationPages(options.pages || options.pageNumbers || options.pageSelection || options.pageIds || "");
+  const requestedPageSelection = cleanString(options.pageSelection || options.pageIds || options.pages || options.pageNumbers || "");
   const provider = getProviderConfig().image || {};
   const records = getExternalImageAuthorizations(job)
     .filter((record) => normalizeScope(record.scope) === scope)
     .filter((record) => normalizeImageCalls(record.imageCalls) >= requiredCalls)
+    .filter((record) => authorizationCoversPages(record, requestedPages))
     .filter((record) => providerMatches(record, provider));
   const latest = records.at(-1) || null;
   return {
@@ -28,6 +31,8 @@ export function getExternalImageAuthorizationStatus(job = {}, options = {}) {
     persisted: Boolean(latest),
     scope,
     imageCalls: requiredCalls,
+    pageSelection: requestedPageSelection,
+    pages: requestedPages,
     latest,
     provider: {
       configured: Boolean(provider.configured),
@@ -35,7 +40,7 @@ export function getExternalImageAuthorizationStatus(job = {}, options = {}) {
       baseUrl: provider.baseUrl || "",
       model: provider.model || ""
     },
-    warning: latest ? "" : `No persisted external image spend authorization found for ${scope}.`
+    warning: latest ? "" : `No persisted external image spend authorization found for ${scope}${requestedPages.length ? ` pages ${requestedPages.join(",")}` : ""}.`
   };
 }
 
@@ -54,6 +59,8 @@ export async function authorizeExternalImageSpend(jobId, options = {}) {
       authorizationId: record.id,
       scope: record.scope,
       imageCalls: record.imageCalls,
+      pageSelection: record.pageSelection,
+      pages: record.pages,
       provider: record.provider,
       baseUrl: record.baseUrl,
       model: record.model,
@@ -78,6 +85,10 @@ function buildExternalImageSpendAuthorization(options = {}) {
     kind: "external_image_spend_authorization",
     scope,
     imageCalls: normalizeImageCalls(options.imageCalls || defaultImageCallsForScope(scope)),
+    pageSelection: cleanString(options.pageSelection || options.pages || ""),
+    pages: normalizeAuthorizationPages(options.pages || options.pageNumbers || options.pageSelection || ""),
+    targetPages: normalizeImageCalls(options.targetPages || options.imageCalls || defaultImageCallsForScope(scope)),
+    mode: cleanString(options.mode || options.targetMode || ""),
     provider: provider.provider || "openai-compatible-image",
     baseUrl: provider.baseUrl || "",
     model: provider.model || "",
@@ -121,6 +132,77 @@ function normalizeImageCalls(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number)) return 0;
   return Math.max(0, Math.min(500, Math.round(number)));
+}
+
+function normalizePages(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item > 0)
+      .slice(0, 50);
+  }
+  const raw = cleanString(value || "");
+  if (!raw) return [];
+  const pages = [];
+  for (const token of raw.split(/[,\s，、;；]+/).map((item) => item.trim()).filter(Boolean)) {
+    const range = token.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+        for (let page = start; page <= end && pages.length < 50; page += 1) pages.push(page);
+      }
+      continue;
+    }
+    const page = Number(token);
+    if (Number.isInteger(page) && page > 0) pages.push(page);
+  }
+  return [...new Set(pages)].slice(0, 50);
+}
+
+function normalizeAuthorizationPages(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.flatMap((item) => normalizeAuthorizationPages(item)))].slice(0, 50);
+  }
+  const raw = cleanString(value || "");
+  if (!raw) return [];
+  const pages = [];
+  for (const token of raw.split(/[,;\s]+/).map((item) => item.trim()).filter(Boolean)) {
+    const range = token.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+        for (let page = start; page <= end && pages.length < 50; page += 1) pages.push(page);
+      }
+      continue;
+    }
+    const page = parsePageReference(token);
+    if (page) pages.push(page);
+  }
+  return [...new Set(pages)].slice(0, 50);
+}
+
+function parsePageReference(value = "") {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 ? value : 0;
+  }
+  const raw = cleanString(value || "").toLowerCase();
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const pageId = raw.match(/^page[_-]?0*(\d+)$/);
+  if (pageId) return Number(pageId[1]);
+  return 0;
+}
+
+function authorizationCoversPages(record = {}, requestedPages = []) {
+  const requested = Array.isArray(requestedPages)
+    ? requestedPages.filter((page) => Number.isInteger(page) && page > 0)
+    : [];
+  if (!requested.length) return true;
+  const authorized = normalizeAuthorizationPages(record.pages || record.pageNumbers || record.pageSelection || "");
+  if (!authorized.length) return false;
+  const authorizedSet = new Set(authorized);
+  return requested.every((page) => authorizedSet.has(page));
 }
 
 function providerMatches(record = {}, provider = {}) {

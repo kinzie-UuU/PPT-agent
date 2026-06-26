@@ -4,6 +4,35 @@ import fsSync from "fs";
 import path from "path";
 
 const TASK_STATUSES = ["ready", "claimed", "running", "recorded", "failed"];
+const REQUIRED_PAGE_RESULT = {
+  page_manifest: "manifest.json",
+  imagegen_jobs: "imagegen-jobs.json",
+  page_pptx: "page.pptx",
+  preview: "preview.png",
+  contact_sheet: "split_assets_contact.png",
+  validation: "validation.json",
+  page_result: "page_result.json"
+};
+const REQUIRED_MANIFEST_KEYS = [
+  "slide",
+  "content_box",
+  "source",
+  "text_inventory",
+  "visual_inventory",
+  "background_strategy",
+  "quality_checks",
+  "text_boxes",
+  "shapes",
+  "images",
+  "asset_provenance",
+  "page_strategy"
+];
+const REQUIRED_QUALITY_CHECKS = [
+  "font_size_calibrated",
+  "visual_inventory_matched",
+  "background_strategy_checked",
+  "shape_corner_geometry_checked"
+];
 
 export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
@@ -204,6 +233,9 @@ export async function resetWorkflowEditableWorkerTask(jobId, pageId, options = {
       job = await readWorkflowJob(jobId);
     }
   }
+  const archivedArtifacts = options.clearGeneratedArtifacts || options.archiveGeneratedArtifacts
+    ? archiveGeneratedPageArtifacts(pageTask.pageDir, { reason: options.reason || "" })
+    : null;
   const tasks = updateTask(job, pageTask.pageId, {
     status: "ready",
     agentId: "",
@@ -223,10 +255,55 @@ export async function resetWorkflowEditableWorkerTask(jobId, pageId, options = {
     pageId: pageTask.pageId,
     previousStatus: pageTask.status,
     reason: cleanString(options.reason || ""),
-    editpptReset
+    editpptReset,
+    archivedArtifacts
   });
   const saved = await saveWorkflowJob(job);
   return listWorkflowEditableWorkerTasks(saved.id, options);
+}
+
+function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
+  const root = path.resolve(String(pageDir || ""));
+  if (!root || !fsSync.existsSync(root) || !fsSync.statSync(root).isDirectory()) {
+    return { ok: false, archived: 0, reason: "page directory not found" };
+  }
+  const names = [
+    "manifest.json",
+    "imagegen-jobs.json",
+    "page.pptx",
+    "preview.png",
+    "split_assets_contact.png",
+    "validation.json",
+    "page_result.json",
+    "page-rebuild-spec.json"
+  ];
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archiveDir = path.join(root, ".retry-archive", stamp);
+  const moved = [];
+  fsSync.mkdirSync(archiveDir, { recursive: true });
+  for (const name of names) {
+    const source = path.join(root, name);
+    if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
+    const target = path.join(archiveDir, name);
+    fsSync.renameSync(source, target);
+    moved.push(name);
+  }
+  if (!moved.length) {
+    try { fsSync.rmdirSync(archiveDir); } catch {}
+  } else {
+    fsSync.writeFileSync(path.join(archiveDir, "archive_reason.txt"), cleanString(options.reason || "reset for retry"), "utf8");
+  }
+  return {
+    ok: true,
+    archived: moved.length,
+    archiveDir: moved.length ? archiveDir : "",
+    files: moved
+  };
+}
+
+function isInsidePath(candidate, parent) {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function ensureTasks(jobId, options = {}) {
@@ -297,7 +374,7 @@ function enrichTaskEvidence(task = {}) {
   const normalized = normalizeTask(task);
   const evidence = inspectPageEvidence(normalized.pageDir);
   const validationStatus = evidence.validationExists
-    ? evidence.validationPassed
+    ? evidence.validationPassed && evidence.outputContractOk
       ? "passed"
       : "failed"
     : "missing";
@@ -325,7 +402,10 @@ function inspectPageEvidence(pageDir = "") {
     validationExists: false,
     pageResultExists: false,
     validationPassed: false,
-    validationError: ""
+    validationError: "",
+    providerSnapshot: null,
+    outputContractOk: false,
+    outputContractIssues: []
   };
   if (!pageDir || !fsSync.existsSync(pageDir)) return result;
   result.pagePptxExists = fsSync.existsSync(path.join(pageDir, "page.pptx"));
@@ -338,11 +418,75 @@ function inspectPageEvidence(pageDir = "") {
       const validation = JSON.parse(fsSync.readFileSync(path.join(pageDir, "validation.json"), "utf8"));
       result.validationPassed = validation.passed === true;
       result.validationError = validation.reason || validation.error || "";
+      result.providerSnapshot = validation.provider_snapshot || validation.providerSnapshot || null;
     } catch (error) {
       result.validationError = error.message || "validation read failed";
     }
   }
+  result.outputContractIssues = inspectPageOutputContract(pageDir);
+  result.outputContractOk = result.outputContractIssues.length === 0;
+  if (!result.validationError && result.outputContractIssues.length) {
+    result.validationError = result.outputContractIssues.slice(0, 3).join(" | ");
+  }
   return result;
+}
+
+function inspectPageOutputContract(pageDir = "") {
+  const issues = [];
+  const validation = readJsonIfExists(path.join(pageDir, "validation.json"));
+  if (validation && validation.passed !== true) issues.push("validation.json missing top-level passed=true");
+
+  const pageResult = readJsonIfExists(path.join(pageDir, "page_result.json"));
+  if (pageResult) {
+    for (const [key, expected] of Object.entries(REQUIRED_PAGE_RESULT)) {
+      if (pageResult[key] !== expected) issues.push(`page_result.${key} must be ${expected}`);
+      if (!fsSync.existsSync(path.join(pageDir, expected))) issues.push(`page_result target missing: ${expected}`);
+    }
+  } else if (fsSync.existsSync(path.join(pageDir, "page_result.json"))) {
+    issues.push("page_result.json is not readable JSON");
+  }
+
+  const manifest = readJsonIfExists(path.join(pageDir, "manifest.json"));
+  if (manifest) {
+    for (const key of REQUIRED_MANIFEST_KEYS) {
+      if (!(key in manifest)) issues.push(`manifest missing ${key}`);
+    }
+    for (const key of REQUIRED_QUALITY_CHECKS) {
+      if (manifest.quality_checks?.[key] !== true) issues.push(`manifest quality_checks.${key} must be true`);
+    }
+    if (!manifest.background_strategy?.mode) issues.push("manifest background_strategy.mode missing");
+    if (!manifest.background_strategy?.source_consistency_contract) issues.push("manifest background_strategy.source_consistency_contract missing");
+    if (!manifest.background_strategy?.comparison_note) issues.push("manifest background_strategy.comparison_note missing");
+    for (const item of Array.isArray(manifest.text_boxes) ? manifest.text_boxes : []) {
+      if (!isValidBox(item?.box_px)) issues.push(`manifest text box ${item?.id || item?.text || ""} missing box_px`);
+    }
+    for (const item of Array.isArray(manifest.images) ? manifest.images : []) {
+      if (!isValidBox(item?.box_px)) issues.push(`manifest image ${item?.id || item?.path || ""} missing box_px`);
+    }
+    for (const item of Array.isArray(manifest.shapes) ? manifest.shapes : []) {
+      if (item?.type === "line") {
+        if (!Array.isArray(item.points_px) || item.points_px.length !== 4) issues.push(`manifest line ${item?.id || ""} missing points_px`);
+      } else if (!isValidBox(item?.box_px)) {
+        issues.push(`manifest shape ${item?.id || ""} missing box_px`);
+      }
+    }
+  } else if (fsSync.existsSync(path.join(pageDir, "manifest.json"))) {
+    issues.push("manifest.json is not readable JSON");
+  }
+  return [...new Set(issues)].slice(0, 30);
+}
+
+function readJsonIfExists(filePath) {
+  if (!fsSync.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
+}
+
+function isValidBox(value) {
+  return Array.isArray(value) && value.length === 4 && value.every((item) => Number.isFinite(Number(item))) && Number(value[2]) > 0 && Number(value[3]) > 0;
 }
 
 function workerStatusLabel(status = "") {

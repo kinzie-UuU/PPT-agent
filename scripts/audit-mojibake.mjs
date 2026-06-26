@@ -2,14 +2,34 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = process.cwd();
-const targets = collectSourceFiles(path.join(root, "src"))
+
+const explicitTextTargets = [
+  "README.md",
+  "docs/product-goal.md",
+  "server/index.js",
+  "server/smoke-tests.js",
+  "server/workflowDelivery.js",
+  "server/workflowV1AcceptanceReport.js",
+  "server/workflowV1Readiness.js"
+].filter((target) => fs.existsSync(path.join(root, target)));
+
+const targets = explicitTextTargets
+  .concat(collectSourceFiles(path.join(root, "src")))
   .concat(collectSourceFiles(path.join(root, "shared")))
   .map((filePath) => path.relative(root, filePath));
 
-const mojibakePattern = /[\uE000-\uF8FF\uFFFD]|姝|鐢|鏈|鏃|瑙|绯|閿|闇|寮|鍚|瀹|鍥|淇|璇|鏂|绔|璧|澶|鍘|彶|缂|緫|鈫|脳|浠诲姟鎬绘暟|杈圭晫|椤甸潰/;
+const mojibakePatterns = [
+  /[\uE000-\uF8FF\uFFFD]/,
+  /閿|鈧|燂拷/,
+  /濮潀|閻|閺|闁|閸|鐎|娣|婢|缂|娴|妞|鑴|绱|顦|縷|绮|鍨|嘲/,
+  /鏉|妤|闂|閳|浜у搧|宸ュ叿|鍓嶇|鍚庣|鐢熸垚|鍥剧|涓绘|褰撳|瀹屾|闂|鎵€|杈撳|涓嬭|鏂囦欢|妯℃|鍙|鐪熷/
+];
 
 const allowedLinePatterns = [
-  /function isMojibake/
+  /function isMojibake/,
+  /scoreDecodedName/,
+  /score -=/,
+  /mojibakePatterns/
 ];
 
 const findings = [];
@@ -19,7 +39,7 @@ for (const target of targets) {
   const content = fs.readFileSync(filePath, "utf8");
   const lines = content.split(/\r?\n/);
   lines.forEach((line, index) => {
-    if (!mojibakePattern.test(line)) return;
+    if (!mojibakePatterns.some((pattern) => pattern.test(line))) return;
     if (allowedLinePatterns.some((pattern) => pattern.test(line))) return;
     findings.push(`${target}:${index + 1}: ${line.trim()}`);
   });

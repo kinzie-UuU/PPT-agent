@@ -3,7 +3,7 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import { execFile, spawnSync } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 
@@ -12,7 +12,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
 const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt");
 const DEFAULT_EDITPPT_PYTHON = path.join(PROJECT_ROOT, "outputs", "skill-duo-test", "ocr-venv", "Scripts", "python.exe");
-const EDITPPT_PYTHON = process.env.EDITPPT_PYTHON_PATH || process.env.OCR_PYTHON_PATH || (fsSync.existsSync(DEFAULT_EDITPPT_PYTHON) ? DEFAULT_EDITPPT_PYTHON : "python");
+const EDITPPT_PYTHON = chooseEditpptPython();
 const CLI_PATH = path.join(SKILL_ROOT, "cli");
 const REQUIRED_QUALITY_CHECKS = [
   "font_size_calibrated",
@@ -30,7 +30,8 @@ const ALLOWED_SOURCE_TYPES = new Set(["asset-sheet-separated", "imagegen", "late
 const FOREGROUND_ASSET_TERMS = /(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|visual object)/i;
 const FORBIDDEN_FALLBACK_TERMS = /\b(crop|approximation|fallback|emoji)\b|裁剪|近似|降级/i;
 const FOREGROUND_TERMS = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|brand mark|brand block)\b|图标|照片|徽标|截图|贴纸|标记/i;
-const SEPARATION_TERMS = /asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|editable|native-shape|native shape|native vector|native structural|分离|background|formula|结构/i;
+const ASSET_SEPARATION_TERMS = /asset-sheet-separated|asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|imagegen|分离/i;
+const STRUCTURAL_TERMS = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background/i;
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -54,6 +55,9 @@ async function main() {
     await runEditppt(["page", "build", pageDir]);
     await runEditppt(["page", "contact-sheet", pageDir]);
     await runEditppt(["page", "validate", pageDir, "--report", "validation.json"]);
+    if (envTruthy(process.env.PPT_TOOL_REWRITE_PAGE_PPTX_FOR_POWERPOINT)) {
+      await rewritePagePptxForPowerPoint(pageDir);
+    }
     const validation = await readJson(path.join(pageDir, "validation.json"));
     await writePageResult(pageDir);
     if (validation.passed !== true) {
@@ -104,6 +108,15 @@ function buildManifest({ pageDir, pageRequest, spec }) {
   const width = Number(pageRequest.source_size_px?.width || pageRequest.source?.width_px || spec.source?.width_px || 0);
   const height = Number(pageRequest.source_size_px?.height || pageRequest.source?.height_px || spec.source?.height_px || 0);
   if (!width || !height) throw new Error("page_request.json must provide source_size_px width and height.");
+  const hydratedSpec = materializeComplexDecorationAssets({ pageDir, spec, width, height });
+  const images = normalizeImages(hydratedSpec.images || [], width, height, pageDir)
+    .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
+  const textBoxes = filterTextBoxesCoveredByImages(normalizeTextBoxes(spec.text_boxes || [], width, height), images, { width, height });
+  const shapes = avoidThinHorizontalLineTextOverlap(normalizeShapes(hydratedSpec.shapes || [], width, height), textBoxes, height);
+  const requiredText = normalizeRequiredTextForRemainingBoxes(
+    Array.isArray(spec.required_text) ? spec.required_text.map(normalizeTextContent).filter(Boolean) : collectRequiredText(spec.text_boxes || []),
+    textBoxes
+  );
 
   return {
     schema_version: 1,
@@ -118,14 +131,14 @@ function buildManifest({ pageDir, pageRequest, spec }) {
       height_px: height
     },
     text_inventory: normalizeTextInventory(spec.text_inventory),
-    visual_inventory: normalizeVisualInventory(spec.visual_inventory, spec.images),
+    visual_inventory: normalizeVisualInventory(hydratedSpec.visual_inventory, hydratedSpec.images),
     background_strategy: spec.background_strategy || {},
     quality_checks: spec.quality_checks || {},
-    required_text: Array.isArray(spec.required_text) ? spec.required_text.map(normalizeTextContent).filter(Boolean) : collectRequiredText(spec.text_boxes || []),
-    text_boxes: normalizeTextBoxes(spec.text_boxes || [], width, height),
-    shapes: normalizeShapes(spec.shapes || [], width, height),
-    images: normalizeImages(spec.images || [], width, height, pageDir),
-    asset_provenance: Array.isArray(spec.asset_provenance) ? spec.asset_provenance.map(normalizeProvenance) : [],
+    required_text: requiredText,
+    text_boxes: textBoxes,
+    shapes,
+    images,
+    asset_provenance: Array.isArray(hydratedSpec.asset_provenance) ? hydratedSpec.asset_provenance.map(normalizeProvenance).filter(hasUsableProvenance) : [],
     formula_inventory: Array.isArray(spec.formula_inventory) ? spec.formula_inventory : [],
     notes: cleanString(spec.notes || "Generated by page-rebuild-assembler.mjs from worker-authored page-rebuild-spec.json."),
     page_dir: pageDir
@@ -182,12 +195,54 @@ function validateManifestDraft({ pageDir, manifest }) {
   ];
   for (const text of scanTexts) {
     if (FORBIDDEN_FALLBACK_TERMS.test(text)) errors.push(`Forbidden fallback wording found: ${text.slice(0, 120)}`);
-    if (FOREGROUND_TERMS.test(text) && !SEPARATION_TERMS.test(text)) {
+    if (FOREGROUND_TERMS.test(text) && !ASSET_SEPARATION_TERMS.test(text) && !STRUCTURAL_TERMS.test(text)) {
       errors.push(`Foreground inventory/provenance must state asset-sheet separation or image edit: ${text.slice(0, 120)}`);
     }
   }
+  const missingForegroundAssets = collectMissingForegroundAssets(manifest);
+  if (missingForegroundAssets.length) {
+    errors.push(`Foreground visual inventory requires real image assets/provenance: ${missingForegroundAssets.join(", ")}`);
+  }
+  errors.push(...collectVisualCoverageIssues(manifest));
 
   if (errors.length) throw new Error(errors.join(" | "));
+}
+
+function collectVisualCoverageIssues(manifest = {}) {
+  const issues = [];
+  const visualInventory = Array.isArray(manifest.visual_inventory) ? manifest.visual_inventory : [];
+  const shapes = Array.isArray(manifest.shapes) ? manifest.shapes : [];
+  const images = Array.isArray(manifest.images) ? manifest.images : [];
+  const backgroundText = [
+    manifest.background_strategy?.mode,
+    manifest.background_strategy?.source_consistency_contract,
+    manifest.background_strategy?.comparison_note,
+    manifest.notes
+  ].filter(Boolean).join(" ");
+  const noImageMode = /text-only|ocr-only|no-image/i.test(backgroundText);
+  if (noImageMode) return issues;
+
+  const preservationClaim = /preserv|match|consistent|intact|source composition|background|visual elements/i.test(backgroundText);
+  const renderableVisuals = shapes.length + images.length;
+  const meaningfulShapes = shapes.filter(isMeaningfulVisualShape).length;
+
+  if (visualInventory.length > 0 && renderableVisuals === 0) {
+    issues.push("visual_inventory lists visible non-text objects but manifest shapes/images are empty.");
+  }
+  if (preservationClaim && visualInventory.length === 0) {
+    issues.push("background_strategy claims source visual preservation but manifest visual_inventory is empty.");
+  }
+  if (preservationClaim && images.length === 0 && meaningfulShapes < 3 && visualInventory.length < 3) {
+    issues.push("background_strategy claims preserved or matched source visuals but manifest has too few meaningful shapes/images.");
+  }
+  return issues;
+}
+
+function isMeaningfulVisualShape(shape = {}) {
+  if (shape.type === "line") return Array.isArray(shape.points_px) && shape.points_px.length >= 4;
+  const box = Array.isArray(shape.box_px) ? shape.box_px.map(Number) : [];
+  if (box.length !== 4 || !box.every(Number.isFinite)) return false;
+  return Math.max(0, box[2]) * Math.max(0, box[3]) >= 6000;
 }
 
 function validateProvenance(pageDir, provenance, errors) {
@@ -208,24 +263,117 @@ function normalizeTextBoxes(items, width, height) {
   return items.map((item, index) => {
     const text = normalizeTextContent(item.text || item.required_text || "");
     const fontSpec = normalizeFontSpec(item);
-    const optional = copyOptional(item, ["bold", "italic", "align", "valign", "line_height", "min_font_size", "max_font_size", "text_fit_safety", "runs", "paragraphs"]);
+    const optional = copyOptional(item, ["bold", "italic", "line_height", "min_font_size", "max_font_size", "text_fit_safety", "runs", "paragraphs"]);
     if (optional.bold === undefined && fontSpec.bold !== undefined) optional.bold = fontSpec.bold;
+    const boxPx = normalizeBox(item.box_px, width, height);
+    const fontSize = clampNumber(item.font_size || fontSpec.size, 4, 120, 18);
+    const wrap = item.wrap === false ? "none" : "square";
+    const fitSafety = normalizeTextFitSafety(item, text, boxPx, fontSize, wrap);
     return {
       id: cleanId(item.id || `text_${index + 1}`),
       text,
-      box_px: normalizeBox(item.box_px, width, height),
-      font_size: clampNumber(item.font_size || fontSpec.size, 4, 120, 18),
+      box_px: boxPx,
+      font_size: fontSize,
       font_size_source: cleanString(item.font_size_source || fontSpec.sizeSource || "worker-spec"),
       font_face: cleanString(item.font_face || fontSpec.family || "Microsoft YaHei"),
       font: cleanString(item.font_face || fontSpec.family || "Microsoft YaHei"),
       preview_font: cleanString(item.preview_font || DEFAULT_PREVIEW_FONT || ""),
       color: cleanString(item.color || fontSpec.color || "#111111"),
-      wrap: item.wrap !== false,
+      wrap,
+      align: normalizeTextAlign(item.align || item.alignment),
+      valign: normalizeTextAnchor(item.valign || item.vertical_alignment),
       fit_text: item.fit_text !== false,
       z_index: clampNumber(item.z_index, 0, 10000, 100 + index),
+      ...(fitSafety ? { text_fit_safety: fitSafety } : {}),
       ...normalizeTextRuns(optional, text)
     };
   }).filter((item) => item.text);
+}
+
+function filterTextBoxesCoveredByImages(textBoxes = [], images = [], context = {}) {
+  if (!Array.isArray(textBoxes) || !Array.isArray(images) || !images.length) return textBoxes;
+  const suppressingImages = images
+    .filter((image) => shouldSuppressTextCoveredByImage(image, context))
+    .map((image) => image.box_px)
+    .filter((box) => Array.isArray(box) && box.length === 4);
+  if (!suppressingImages.length) return textBoxes;
+  return textBoxes.filter((box) => {
+    const textBox = box.box_px;
+    if (!Array.isArray(textBox) || textBox.length !== 4) return true;
+    const area = boxArea(textBox);
+    if (!area) return true;
+    return !suppressingImages.some((imageBox) => {
+      const covered = intersectArea(textBox, imageBox) / area;
+      return covered >= 0.65;
+    });
+  });
+}
+
+function shouldSuppressTextCoveredByImage(image = {}, { width = 0, height = 0 } = {}) {
+  const box = Array.isArray(image.box_px) ? image.box_px.map(Number) : [];
+  if (box.length !== 4 || !box.every(Number.isFinite)) return false;
+  const slideArea = Math.max(1, Number(width || 0) * Number(height || 0));
+  const areaRatio = boxArea(box) / slideArea;
+  const text = `${image.id || ""} ${image.path || ""} ${image.alt || ""} ${image.description || ""}`.toLowerCase();
+  if (/logo|brand|mark/.test(text) && areaRatio <= 0.12) return true;
+  if (/asset_\d+$|brand_logo_asset_\d+/.test(text) && areaRatio <= 0.08) return true;
+  return false;
+}
+
+function normalizeRequiredTextForRemainingBoxes(requiredText = [], textBoxes = []) {
+  const remaining = new Set((Array.isArray(textBoxes) ? textBoxes : []).map((box) => normalizeComparableText(box.text)).filter(Boolean));
+  return (Array.isArray(requiredText) ? requiredText : [])
+    .map(normalizeTextContent)
+    .filter(Boolean)
+    .filter((text) => remaining.has(normalizeComparableText(text)));
+}
+
+function boxArea(box = []) {
+  return Math.max(0, Number(box[2] || 0)) * Math.max(0, Number(box[3] || 0));
+}
+
+function intersectArea(a = [], b = []) {
+  const left = Math.max(Number(a[0] || 0), Number(b[0] || 0));
+  const top = Math.max(Number(a[1] || 0), Number(b[1] || 0));
+  const right = Math.min(Number(a[0] || 0) + Number(a[2] || 0), Number(b[0] || 0) + Number(b[2] || 0));
+  const bottom = Math.min(Number(a[1] || 0) + Number(a[3] || 0), Number(b[1] || 0) + Number(b[3] || 0));
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+function normalizeTextFitSafety(item = {}, text = "", boxPx = [], fontSize = 18, wrap = "square") {
+  const explicit = Number(item.text_fit_safety);
+  if (Number.isFinite(explicit)) return clampNumber(explicit, 0.5, 1, explicit);
+  if (wrap !== "none") return null;
+  const compact = normalizeComparableText(text);
+  if (compact.length < 20) return null;
+  if (compact.length >= 30) return 0.78;
+  const boxWidth = Number(boxPx?.[2] || 0);
+  const estimatedWidth = estimateTextWidthPx(compact, fontSize);
+  if (!boxWidth || estimatedWidth <= boxWidth * 0.88) return null;
+  return 0.78;
+}
+
+function estimateTextWidthPx(text = "", fontSize = 18) {
+  let units = 0;
+  for (const char of String(text || "")) {
+    units += /[\u4e00-\u9fff]/.test(char) ? 1 : /[A-Z0-9]/.test(char) ? 0.68 : /[a-z]/.test(char) ? 0.55 : 0.38;
+  }
+  return units * Number(fontSize || 18);
+}
+
+function normalizeTextAlign(value) {
+  const text = cleanString(value || "").toLowerCase();
+  if (["center", "middle", "centre", "ctr"].includes(text)) return "ctr";
+  if (["right", "r"].includes(text)) return "r";
+  if (["justify", "just", "justified"].includes(text)) return "just";
+  return "l";
+}
+
+function normalizeTextAnchor(value) {
+  const text = cleanString(value || "").toLowerCase();
+  if (["center", "middle", "mid", "ctr"].includes(text)) return "ctr";
+  if (["bottom", "b"].includes(text)) return "b";
+  return "t";
 }
 
 function normalizeFontSpec(item = {}) {
@@ -242,8 +390,8 @@ function normalizeFontSpec(item = {}) {
 
 function normalizeShapes(items, width, height) {
   if (!Array.isArray(items)) return [];
-  return items.map((item, index) => {
-    const normalized = normalizeShapePaint(stripNonLinePoints(item));
+  return items.flatMap((item) => expandGridDecorationShape(item, width, height)).map((item, index) => {
+    const normalized = coerceAxisAlignedLineShape(normalizeShapePaint(stripNonLinePoints(item)), width, height);
     return {
       ...normalized,
       id: cleanId(normalized.id || `shape_${index + 1}`),
@@ -256,20 +404,532 @@ function normalizeShapes(items, width, height) {
   });
 }
 
+function avoidThinHorizontalLineTextOverlap(shapes = [], textBoxes = [], height = 0) {
+  if (!Array.isArray(shapes) || !Array.isArray(textBoxes) || !textBoxes.length) return shapes;
+  return shapes.map((shape) => {
+    if (!shape || shape.type !== "rect") return shape;
+    const box = Array.isArray(shape.box_px) ? shape.box_px.map(Number) : [];
+    if (box.length !== 4 || !box.every(Number.isFinite)) return shape;
+    const [x, y, w, h] = box;
+    if (h > 5 || w < 200 || y > height * 0.25) return shape;
+    const overlappingText = textBoxes
+      .map((text) => Array.isArray(text.box_px) ? text.box_px.map(Number) : [])
+      .filter((textBox) => textBox.length === 4 && textBox.every(Number.isFinite))
+      .filter((textBox) => intersectArea(box, textBox) / Math.max(1, boxArea(textBox)) > 0.01);
+    if (!overlappingText.length) return shape;
+    const bottom = Math.max(...overlappingText.map((textBox) => textBox[1] + textBox[3]));
+    const nextY = Math.min(Math.round(height * 0.24), Math.round(bottom + Math.max(14, h * 4)));
+    return {
+      ...shape,
+      box_px: [x, nextY, w, h],
+      inferred_adjustment: "thin horizontal rule moved below overlapping title text"
+    };
+  });
+}
+
+function materializeComplexDecorationAssets({ pageDir, spec = {}, width, height }) {
+  const shapes = annotateShapesWithVisualInventory(Array.isArray(spec.shapes) ? spec.shapes : [], spec.visual_inventory, width, height);
+  const images = Array.isArray(spec.images) ? [...spec.images] : [];
+  const assetProvenance = Array.isArray(spec.asset_provenance) ? [...spec.asset_provenance] : [];
+  const visualInventory = Array.isArray(spec.visual_inventory) ? spec.visual_inventory.map((item) => item && typeof item === "object" && !Array.isArray(item) ? { ...item } : item) : [];
+  const keptShapes = [];
+  let generated = 0;
+
+  for (const shape of shapes) {
+    if (shouldOmitFullSlideBackgroundPattern(shape, width, height)) {
+      continue;
+    }
+    if (!shouldRasterizeComplexDecoration(shape, width, height)) {
+      keptShapes.push(shape);
+      continue;
+    }
+    const box = normalizeBox(shape.box_px, width, height);
+    const assetId = cleanId(shape.id || `decoration_${generated + 1}`);
+    const imagePath = normalizeAssetPath(path.join("assets", "generated", `${assetId}_region.png`));
+    const written = ensureLocalRegionAsset(pageDir, box, imagePath, { cleanupText: shouldCleanTextFromDecoration(shape) });
+    if (!written) {
+      keptShapes.push(shape);
+      continue;
+    }
+    generated += 1;
+    images.push({
+      id: `${assetId}_region`,
+      path: imagePath,
+      box_px: box,
+      alt: cleanString(shape.description || shape.type || "source-faithful background decoration"),
+      z_index: clampNumber(Number(shape.z_index) || 0, 0, 10000, 5 + generated)
+    });
+    assetProvenance.push({
+      path: imagePath,
+      source: imagePath,
+      source_type: "asset-sheet-separated",
+      provenance_note: "Source-faithful asset-sheet separation for a complex background decoration that cannot be rebuilt faithfully as primitive editable shapes."
+    });
+    markVisualInventoryRasterized(visualInventory, shape, imagePath, box);
+  }
+  addInferredCoverBackgroundStrips({ pageDir, spec, width, height, images, assetProvenance, visualInventory });
+  expandInferredLowerInfoPanel({ pageDir, width, height, images, assetProvenance, visualInventory });
+  addInferredGeneralBackgroundDecorations({ pageDir, spec, width, height, images, assetProvenance, visualInventory });
+
+  return {
+    ...spec,
+    shapes: keptShapes,
+    images,
+    asset_provenance: assetProvenance,
+    visual_inventory: visualInventory
+  };
+}
+
+function annotateShapesWithVisualInventory(shapes = [], visualInventory = [], width, height) {
+  if (!Array.isArray(shapes) || !Array.isArray(visualInventory) || !visualInventory.length) return shapes;
+  const inventory = visualInventory
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .map((item) => ({ item, box: normalizeBox(item.box_px, width, height) }))
+    .filter(({ box }) => validBox(box));
+  if (!inventory.length) return shapes;
+  return shapes.map((shape) => {
+    if (!shape || typeof shape !== "object" || Array.isArray(shape)) return shape;
+    const box = normalizeBox(shape.box_px, width, height);
+    const match = inventory.find(({ box: itemBox }) => itemBox.map(Number).join(",") === box.join(","));
+    if (!match) return shape;
+    return {
+      ...shape,
+      description: [shape.description, match.item.description].filter(Boolean).join("; "),
+      role: shape.role || match.item.role,
+      kind: shape.kind || match.item.kind
+    };
+  });
+}
+
+function shouldRasterizeComplexDecoration(shape = {}, width, height) {
+  if (!shape || typeof shape !== "object" || Array.isArray(shape)) return false;
+  const type = cleanString(shape.type || "").toLowerCase();
+  const text = `${shape.id || ""} ${shape.type || ""} ${shape.kind || ""} ${shape.role || ""} ${shape.description || ""} ${shape.decision || ""}`.toLowerCase();
+  if (/logo|brand|photo|screenshot|device|icon/.test(text)) return false;
+  if (isGridDecorationShape(shape)) return false;
+  if (!/world[-_ ]?map|map[-_ ]?pattern|grid|floor|mosaic|texture|pattern|halftone|square/.test(`${type} ${text}`)) return false;
+  const box = normalizeBox(shape.box_px, width, height);
+  const area = boxArea(box);
+  const slideArea = Math.max(1, Number(width || 0) * Number(height || 0));
+  if (area <= 0 || area / slideArea > 0.72) return false;
+  return true;
+}
+
+function shouldOmitFullSlideBackgroundPattern(shape = {}, width, height) {
+  const text = `${shape.id || ""} ${shape.type || ""} ${shape.kind || ""} ${shape.role || ""} ${shape.description || ""}`.toLowerCase();
+  if (!/world[-_ ]?map|map[-_ ]?pattern|background/.test(text)) return false;
+  const box = normalizeBox(shape.box_px, width, height);
+  const area = boxArea(box);
+  const slideArea = Math.max(1, Number(width || 0) * Number(height || 0));
+  return area / slideArea >= 0.72;
+}
+
+function isGridDecorationShape(shape = {}) {
+  const text = `${shape.id || ""} ${shape.type || ""} ${shape.kind || ""} ${shape.role || ""} ${shape.description || ""}`.toLowerCase();
+  return /grid|mosaic|square/.test(text) && !/world[-_ ]?map|map[-_ ]?pattern/.test(text);
+}
+
+function expandGridDecorationShape(shape = {}, width, height) {
+  if (isFrameDecorationShape(shape)) return expandFrameDecorationShape(shape, width, height);
+  if (!isGridDecorationShape(shape)) return [shape];
+  const box = normalizeBox(shape.box_px, width, height);
+  const color = cleanString(shape.fill || shape.fill_color || shape.color || shape.style?.fill || shape.style?.color || "#D6D6D6");
+  const [x, y, w, h] = box;
+  const unit = Math.max(28, Math.round(Math.min(w, h) / 7));
+  const gap = Math.max(8, Math.round(unit * 0.18));
+  const cells = [
+    [1, 1, 0.72], [3, 1, 0.64], [4, 1, 0.58],
+    [0, 2, 0.44], [1, 2, 0.56], [2, 2, 0.48], [3, 2, 0.56], [4, 2, 0.48], [5, 2, 0.34],
+    [1, 3, 0.42], [2, 3, 0.38], [3, 3, 0.44], [4, 3, 0.38], [5, 3, 0.32],
+    [2, 4, 0.36], [3, 4, 0.34], [4, 4, 0.28],
+    [3, 5, 0.3], [4, 5, 0.24]
+  ];
+  const maxCol = Math.max(...cells.map(([col]) => col));
+  const maxRow = Math.max(...cells.map(([, row]) => row));
+  const patternWidth = (maxCol + 1) * unit + maxCol * gap;
+  const patternHeight = (maxRow + 1) * unit + maxRow * gap;
+  const offsetX = x + Math.max(0, Math.round((w - patternWidth) * 0.58));
+  const offsetY = y + Math.max(0, Math.round((h - patternHeight) * 0.12));
+  return cells.map(([col, row, opacity], index) => ({
+    id: `${cleanId(shape.id || "grid")}_${index + 1}`,
+    type: "rect",
+    box_px: [offsetX + col * (unit + gap), offsetY + row * (unit + gap), unit, unit],
+    fill: color,
+    stroke: "none",
+    opacity,
+    transparency: Math.round((1 - opacity) * 100),
+    z_index: clampNumber(Number(shape.z_index) || 0, 0, 10000, 10 + index)
+  }));
+}
+
+function isFrameDecorationShape(shape = {}) {
+  const text = `${shape.id || ""} ${shape.type || ""} ${shape.kind || ""} ${shape.role || ""} ${shape.description || ""}`.toLowerCase();
+  return /frame|corner|decorative border|border line/.test(text);
+}
+
+function expandFrameDecorationShape(shape = {}, width, height) {
+  if (!isFrameDecorationShape(shape)) return [shape];
+  const box = normalizeBox(shape.box_px, width, height);
+  const [rawX, rawY, rawW, rawH] = box;
+  const fullSlide = rawW >= width * 0.92 && rawH >= height * 0.86;
+  const x = fullSlide ? Math.round(width * 0.075) : rawX;
+  const y = fullSlide ? Math.round(height * 0.08) : rawY;
+  const w = fullSlide ? Math.round(width * 0.82) : rawW;
+  const h = fullSlide ? Math.round(height * 0.84) : rawH;
+  const thickness = Math.max(6, Math.round(Math.min(width, height) * 0.012));
+  const corner = Math.max(85, Math.round(Math.min(w, h) * 0.18));
+  const color = cleanString(shape.stroke || shape.stroke_color || shape.border_color || shape.color || shape.style?.stroke || shape.style?.color || "#004D40");
+  const id = cleanId(shape.id || "frame");
+  const z = clampNumber(Number(shape.z_index) || 0, 0, 10000, 10);
+  return [
+    [x, y, w, thickness],
+    [x, y, thickness, corner],
+    [x + w - thickness, y, thickness, corner],
+    [x, y + h - thickness, w, thickness],
+    [x, y + h - corner, thickness, corner],
+    [x + w - thickness, y + h - corner, thickness, corner]
+  ].map((rect, index) => ({
+    id: `${id}_${index + 1}`,
+    type: "rect",
+    box_px: rect,
+    fill: color,
+    stroke: "none",
+    z_index: z + index / 1000
+  }));
+}
+
+function addInferredCoverBackgroundStrips({ pageDir, spec = {}, width, height, images, assetProvenance, visualInventory }) {
+  const visualText = JSON.stringify(spec.visual_inventory || []).toLowerCase();
+  const hasFrame = /corner frame|frame decoration|dark green corner|frame/.test(visualText);
+  const hasBrand = /brand_logo_asset|benlai|logo/.test(`${visualText} ${JSON.stringify(spec.images || [])}`.toLowerCase());
+  if (!hasFrame || !hasBrand) return;
+  const existingText = JSON.stringify(images || []).toLowerCase();
+  const jobs = [
+    { id: "background_top_strip", box: [0, 0, width, Math.round(height * 0.26)], z: 2, description: "top source-faithful background map strip" },
+    { id: "background_bottom_strip", box: [0, Math.round(height * 0.86), width, Math.round(height * 0.14)], z: 2, description: "bottom source-faithful floor grid strip" }
+  ];
+  for (const job of jobs) {
+    if (existingText.includes(job.id)) continue;
+    const imagePath = normalizeAssetPath(path.join("assets", "generated", `${job.id}.png`));
+    if (!ensureLocalRegionAsset(pageDir, normalizeBox(job.box, width, height), imagePath)) continue;
+    images.push({
+      id: job.id,
+      path: imagePath,
+      box_px: normalizeBox(job.box, width, height),
+      alt: job.description,
+      z_index: job.z
+    });
+    assetProvenance.push({
+      path: imagePath,
+      source: imagePath,
+      source_type: "asset-sheet-separated",
+      provenance_note: "Source-faithful asset-sheet separation for bounded background decoration."
+    });
+    visualInventory.push({
+      id: job.id,
+      type: "image",
+      description: job.description,
+      path: imagePath,
+      box_px: normalizeBox(job.box, width, height),
+      decision: "source-faithful separated background decoration asset"
+    });
+  }
+}
+
+function expandInferredLowerInfoPanel({ pageDir, width, height, images, assetProvenance, visualInventory }) {
+  const candidates = (Array.isArray(images) ? images : [])
+    .map((image, index) => ({ image, index, box: normalizeBox(image.box_px, width, height) }))
+    .filter(({ box }) => {
+      const [x, y, w, h] = box;
+      return x <= width * 0.12
+        && y >= height * 0.42
+        && y <= height * 0.72
+        && w >= width * 0.5
+        && w <= width * 0.86
+        && h >= height * 0.1
+        && h <= height * 0.34;
+    })
+    .sort((a, b) => boxArea(b.box) - boxArea(a.box));
+  const candidate = candidates[0];
+  if (!candidate) return;
+  const [x, y, , h] = candidate.box;
+  const adjustedY = Math.max(y, Math.round(height * 0.53));
+  const expandedBox = normalizeBox([x, adjustedY, width - x - Math.round(width * 0.04), h], width, height);
+  if (expandedBox[2] <= candidate.box[2] * 1.08) return;
+  const imagePath = normalizeAssetPath(path.join("assets", "generated", "lower_info_panel.png"));
+  if (!ensureLocalRegionAsset(pageDir, expandedBox, imagePath)) return;
+  const previousPath = normalizeAssetPath(candidate.image.path || "");
+  candidate.image.id = cleanId(candidate.image.id || "lower_info_panel");
+  candidate.image.path = imagePath;
+  candidate.image.box_px = expandedBox;
+  candidate.image.alt = cleanString(candidate.image.alt || "lower source-faithful information panel");
+  candidate.image.z_index = clampNumber(candidate.image.z_index, 0, 10000, 202);
+  for (const item of visualInventory) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const itemPath = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
+    const samePath = previousPath && itemPath === previousPath;
+    const sameBox = Array.isArray(item.box_px) && item.box_px.map(Number).join(",") === candidate.box.join(",");
+    if (!samePath && !sameBox) continue;
+    item.id = item.id || "lower_info_panel";
+    item.path = imagePath;
+    item.box_px = expandedBox;
+    item.decision = [item.decision, "expanded to source-faithful lower information panel asset"].filter(Boolean).join("; ");
+    item.asset_provenance = {
+      ...(item.asset_provenance || {}),
+      path: imagePath,
+      source_type: "asset-sheet-separated"
+    };
+  }
+  assetProvenance.push({
+    path: imagePath,
+    source: imagePath,
+    source_type: "asset-sheet-separated",
+    provenance_note: "Source-faithful asset-sheet separation for bounded lower information panel."
+  });
+  visualInventory.push({
+    id: "lower_info_panel",
+    type: "image",
+    description: "lower source-faithful information panel",
+    path: imagePath,
+    box_px: expandedBox,
+    decision: "source-faithful separated information panel asset"
+  });
+}
+
+function addInferredGeneralBackgroundDecorations({ pageDir, spec = {}, width, height, images, assetProvenance, visualInventory }) {
+  const backgroundText = [
+    JSON.stringify(spec.visual_inventory || []),
+    spec.background_strategy?.source_consistency_contract,
+    spec.background_strategy?.comparison_note,
+    spec.notes
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (!/map|grid|mosaic|floor|decorative|background/.test(backgroundText)) return;
+  const existingText = JSON.stringify(images || []).toLowerCase();
+  const jobs = [
+    {
+      id: "background_left_map",
+      box: [0, 0, Math.round(width * 0.23), Math.round(height * 0.34)],
+      z: 2,
+      description: "left source-faithful background map decoration",
+      enabled: /map/.test(backgroundText)
+    },
+    {
+      id: "background_right_grid",
+      box: [Math.round(width * 0.77), Math.round(height * 0.25), Math.round(width * 0.23), Math.round(height * 0.4)],
+      z: 2,
+      description: "right source-faithful background grid decoration",
+      enabled: /grid|mosaic|square/.test(backgroundText)
+    },
+    {
+      id: "background_floor_strip",
+      box: [0, Math.round(height * 0.84), width, Math.round(height * 0.16)],
+      z: 2,
+      description: "bottom source-faithful floor background strip",
+      enabled: /floor|background/.test(backgroundText)
+    }
+  ];
+  for (const job of jobs) {
+    if (!job.enabled || existingText.includes(job.id)) continue;
+    const box = normalizeBox(job.box, width, height);
+    if (isMostlyCoveredByExistingImage(box, images)) continue;
+    const imagePath = normalizeAssetPath(path.join("assets", "generated", `${job.id}.png`));
+    if (!ensureLocalRegionAsset(pageDir, box, imagePath)) continue;
+    images.push({
+      id: job.id,
+      path: imagePath,
+      box_px: box,
+      alt: job.description,
+      z_index: job.z
+    });
+    assetProvenance.push({
+      path: imagePath,
+      source: imagePath,
+      source_type: "asset-sheet-separated",
+      provenance_note: "Source-faithful asset-sheet separation for bounded background decoration."
+    });
+    visualInventory.push({
+      id: job.id,
+      type: "image",
+      description: job.description,
+      path: imagePath,
+      box_px: box,
+      decision: "source-faithful separated background decoration asset"
+    });
+  }
+}
+
+function isMostlyCoveredByExistingImage(box = [], images = []) {
+  const area = boxArea(box);
+  if (!area) return false;
+  return (Array.isArray(images) ? images : []).some((image) => {
+    const imageBox = Array.isArray(image.box_px) ? image.box_px.map(Number) : [];
+    if (imageBox.length !== 4 || !imageBox.every(Number.isFinite)) return false;
+    return intersectArea(box, imageBox) / area >= 0.8;
+  });
+}
+
+function shouldCleanTextFromDecoration(shape = {}) {
+  const text = `${shape.id || ""} ${shape.type || ""} ${shape.kind || ""} ${shape.role || ""} ${shape.description || ""}`.toLowerCase();
+  return /grid|mosaic|square|texture|pattern/.test(text) && !/world[-_ ]?map|map[-_ ]?pattern/.test(text);
+}
+
+function ensureLocalRegionAsset(pageDir, box, imagePath, options = {}) {
+  const sourcePath = path.join(pageDir, "source.png");
+  const outputPath = path.join(pageDir, imagePath);
+  if (!fsSync.existsSync(sourcePath)) return false;
+  fsSync.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const cropScript = [
+    "import json, sys",
+    "from pathlib import Path",
+    "from PIL import Image",
+    "src = Path(sys.argv[1])",
+    "out = Path(sys.argv[2])",
+    "box = [int(round(float(x))) for x in json.loads(sys.argv[3])]",
+    "img = Image.open(src).convert('RGBA')",
+    "w, h = img.size",
+    "x, y, bw, bh = box",
+    "x = max(0, min(x, w - 1))",
+    "y = max(0, min(y, h - 1))",
+    "bw = max(1, min(bw, w - x))",
+    "bh = max(1, min(bh, h - y))",
+    "out.parent.mkdir(parents=True, exist_ok=True)",
+    "img.crop((x, y, x + bw, y + bh)).save(out)"
+  ].join("; ");
+  const cleanupScript = [
+    "import json, sys",
+    "from pathlib import Path",
+    "import cv2",
+    "import numpy as np",
+    "src = Path(sys.argv[1])",
+    "out = Path(sys.argv[2])",
+    "box = [int(round(float(x))) for x in json.loads(sys.argv[3])]",
+    "img = cv2.imread(str(src), cv2.IMREAD_COLOR)",
+    "if img is None: raise SystemExit('source image not readable')",
+    "h, w = img.shape[:2]",
+    "x, y, bw, bh = box",
+    "x = max(0, min(x, w - 1)); y = max(0, min(y, h - 1))",
+    "bw = max(1, min(bw, w - x)); bh = max(1, min(bh, h - y))",
+    "crop = img[y:y+bh, x:x+bw].copy()",
+    "gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)",
+    "mask = ((gray < 105).astype(np.uint8)) * 255",
+    "kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))",
+    "mask = cv2.dilate(mask, kernel, iterations=2)",
+    "clean = cv2.inpaint(crop, mask, 5, cv2.INPAINT_TELEA)",
+    "out.parent.mkdir(parents=True, exist_ok=True)",
+    "cv2.imwrite(str(out), clean)"
+  ].join("; ");
+  const script = options.cleanupText ? cleanupScript : cropScript;
+  const result = spawnSync(EDITPPT_PYTHON, ["-c", script, sourcePath, outputPath, JSON.stringify(box)], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 30000
+  });
+  return result.status === 0 && fsSync.existsSync(outputPath);
+}
+
+function markVisualInventoryRasterized(items, shape = {}, imagePath = "", box = []) {
+  const shapeId = cleanId(shape.id || "");
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const itemId = cleanId(item.id || "");
+    const sameId = shapeId && itemId === shapeId;
+    const sameBox = Array.isArray(item.box_px) && box.length === 4 && item.box_px.map(Number).join(",") === box.join(",");
+    if (!sameId && !sameBox) continue;
+    item.type = "image";
+    item.path = imagePath;
+    item.asset_provenance = {
+      source_type: "asset-sheet-separated",
+      path: imagePath
+    };
+    item.decision = [item.decision, "complex decoration materialized as source-faithful separated asset"].filter(Boolean).join("; ");
+  }
+}
+
+function coerceAxisAlignedLineShape(item = {}, width, height) {
+  if (item.type !== "line") return item;
+  const points = normalizePoints(item.points_px || pointsFromStartEnd(item), width, height);
+  const [x1, y1, x2, y2] = points;
+  if (x1 !== x2 && y1 !== y2) return { ...item, points_px: points };
+
+  const { points_px: _pointsPx, ...rest } = item;
+  const strokeWidth = clampNumber(item.stroke_width || item.line?.width, 1, 200, 1);
+  const thickness = Math.max(1, Math.round(strokeWidth));
+  const half = Math.floor(thickness / 2);
+  if (y1 === y2) {
+    const x = Math.min(x1, x2);
+    return {
+      ...rest,
+      type: "rect",
+      box_px: normalizeBox([x, y1 - half, Math.abs(x2 - x1) || thickness, thickness], width, height),
+      fill: item.stroke || item.line?.color || "#000000",
+      stroke: "none"
+    };
+  }
+
+  const y = Math.min(y1, y2);
+  return {
+    ...rest,
+    type: "rect",
+    box_px: normalizeBox([x1 - half, y, thickness, Math.abs(y2 - y1) || thickness], width, height),
+    fill: item.stroke || item.line?.color || "#000000",
+    stroke: "none"
+  };
+}
+
+function pointsFromStartEnd(item = {}) {
+  const start = Array.isArray(item.start_px) ? item.start_px : Array.isArray(item.start) ? item.start : null;
+  const end = Array.isArray(item.end_px) ? item.end_px : Array.isArray(item.end) ? item.end : null;
+  if (!start || !end) return null;
+  const points = [start[0], start[1], end[0], end[1]].map(Number);
+  return points.every(Number.isFinite) ? points : null;
+}
+
 function normalizeShapePaint(item = {}) {
   const normalized = { ...item };
-  normalized.fill = normalizeColorKeyword(normalized.fill);
-  normalized.stroke = normalizeColorKeyword(normalized.stroke);
+  const style = item.style && typeof item.style === "object" && !Array.isArray(item.style) ? item.style : {};
+  const shapeText = `${normalized.type || ""} ${normalized.kind || ""} ${normalized.role || ""} ${normalized.description || ""}`.toLowerCase();
+  const isFrameShape = /frame|corner|decorative border|border line/.test(shapeText);
+  normalized.fill = normalizeColorKeyword(
+    isFrameShape ? "none" : normalized.fill
+      || normalized.fill_color
+      || normalized.fillColor
+      || style.fill
+      || style.fill_color
+      || style.fillColor
+      || (!normalized.border_width && !normalized.borderWidth && !style.border_width && !style.borderWidth ? normalized.color || style.color : "")
+  );
+  normalized.stroke = normalizeColorKeyword(
+    normalized.stroke
+      || normalized.stroke_color
+      || normalized.strokeColor
+      || normalized.border_color
+      || normalized.borderColor
+      || style.stroke
+      || style.stroke_color
+      || style.strokeColor
+      || style.border_color
+      || style.borderColor
+      || normalized.color
+      || style.color
+  );
+  normalized.stroke_width = normalized.stroke_width
+    || normalized.strokeWidth
+    || style.stroke_width
+    || style.strokeWidth
+    || style.border_width
+    || style.borderWidth;
   if (normalized.line && typeof normalized.line === "object" && !Array.isArray(normalized.line)) {
     normalized.line = {
       ...normalized.line,
-      color: normalizeColorKeyword(normalized.line.color)
+      color: normalizeColorKeyword(normalized.line.color || normalized.stroke || style.stroke || style.stroke_color)
     };
   }
   return normalized;
 }
 
 function normalizeColorKeyword(value) {
+  if (typeof value === "string" && !value.trim()) return "none";
   if (typeof value === "string" && /^transparent$/i.test(value.trim())) return "none";
   return value;
 }
@@ -293,7 +953,7 @@ function normalizeImages(items, width, height, pageDir) {
 }
 
 function normalizeProvenance(item = {}) {
-  const imagePath = normalizeAssetPath(item.path || "");
+  const imagePath = normalizeAssetPath(item.path || item.source || "");
   const sourceType = cleanString(item.source_type || item.sourceType || "");
   const provenanceNote = cleanString(
     item.provenance_note
@@ -306,6 +966,7 @@ function normalizeProvenance(item = {}) {
       || item.visualMatch
       || item.note
       || item.description
+      || (imagePath ? "asset-sheet-separated foreground asset selected from available page assets" : "")
       || ""
   );
   return {
@@ -315,6 +976,10 @@ function normalizeProvenance(item = {}) {
     provenance_note: provenanceNote,
     ...(sourceType === "user-approved-rasterization" ? { approval_note: cleanString(item.approval_note || item.approvalNote || provenanceNote || "User approved page-image asset separation for this visual region.") } : {})
   };
+}
+
+function hasUsableProvenance(item = {}) {
+  return Boolean(normalizeAssetPath(item.path || item.source || ""));
 }
 
 function normalizeImageBox(item, width, height, pageDir) {
@@ -343,8 +1008,14 @@ function readPngDimensions(filePath) {
 function normalizeVisualInventory(items, images = []) {
   if (!Array.isArray(items)) return [];
   const imagePathById = new Map((Array.isArray(images) ? images : []).map((image) => [cleanId(image.id || ""), normalizeAssetPath(image.path || "")]));
+  const imagePaths = (Array.isArray(images) ? images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean);
+  const singleImagePath = imagePaths.length === 1 ? imagePaths[0] : "";
   return items.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const nestedPath = normalizeAssetPath(item.asset_provenance?.path || item.asset_provenance?.source || "");
+    if (nestedPath && !normalizeAssetPath(item.path || "")) {
+      item = { ...item, path: nestedPath };
+    }
     const text = JSON.stringify(item);
     if (isBackgroundDecorationInventory(item, text)) {
       return {
@@ -353,35 +1024,51 @@ function normalizeVisualInventory(items, images = []) {
         decision: [item.decision, "source-faithful native background decoration reconstruction; no foreground asset separation required"].filter(Boolean).join("; ")
       };
     }
-    if ((FOREGROUND_TERMS.test(text) || FOREGROUND_ASSET_TERMS.test(text)) && item.id) {
-      const imagePath = imagePathById.get(cleanId(item.id || ""));
+    if (/shape|native-shape|native shape/i.test(`${item.type || ""} ${item.kind || ""}`) && !/logo|photo|screenshot|brand|device/i.test(text)) {
       return {
         ...item,
-        ...(imagePath ? { path: item.path || imagePath } : {}),
-        decision: [item.decision, "source-faithful asset-sheet separated image edit for foreground asset reuse"].filter(Boolean).join("; ")
+        decision: [item.decision, "native structural shape reconstruction; no foreground asset separation required"].filter(Boolean).join("; ")
       };
     }
-    if (FOREGROUND_TERMS.test(text) && !/source-faithful|source faithful|asset-sheet|asset sheet|image edit|separated|user-approved|user approved|rasterization/i.test(text)) {
-      const kindText = `${item.type || ""} ${item.kind || ""} ${item.decision || ""}`;
-      if (/native|editable|vector|shape/i.test(kindText)) {
-        return {
-          ...item,
-          decision: [item.decision, "source-faithful asset-sheet separated image edit for foreground asset reuse"].filter(Boolean).join("; ")
-        };
-      }
-      if (/reuse-available-image-asset|photo|scene|raster/i.test(kindText)) {
-        return {
-          ...item,
-          decision: [item.decision, "user-approved source-faithful rasterization"].filter(Boolean).join("; ")
-        };
-      }
+    if ((FOREGROUND_TERMS.test(text) || FOREGROUND_ASSET_TERMS.test(text)) && item.id) {
+      const imagePath = imagePathById.get(cleanId(item.id || ""));
+      const fallbackImagePath = !normalizeAssetPath(item.path || "") && ASSET_SEPARATION_TERMS.test(text) ? singleImagePath : "";
       return {
         ...item,
-        decision: [item.decision, "source-faithful asset-sheet separated image edit for foreground asset reuse"].filter(Boolean).join("; ")
+        ...(imagePath || fallbackImagePath ? { path: item.path || imagePath || fallbackImagePath } : {})
       };
+    }
+    if (Array.isArray(item.image_ids) && item.image_ids.some((imageId) => imagePathById.has(cleanId(imageId || "")))) {
+      return item;
     }
     return item;
   });
+}
+
+function collectMissingForegroundAssets(manifest) {
+  const imageIds = new Set((Array.isArray(manifest.images) ? manifest.images : []).map((image) => cleanId(image.id || "")).filter(Boolean));
+  const imagePaths = new Set((Array.isArray(manifest.images) ? manifest.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const provenanceText = JSON.stringify(manifest.asset_provenance || []);
+  return (Array.isArray(manifest.visual_inventory) ? manifest.visual_inventory : [])
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => requiresForegroundAsset(item))
+    .map((item) => {
+      const id = cleanId(item.id || "");
+      const pathValue = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
+      const text = JSON.stringify(item);
+      const mentionsImagePath = Array.from(imagePaths).some((imagePath) => imagePath && text.includes(imagePath));
+      const hasImage = (id && imageIds.has(id)) || (pathValue && imagePaths.has(pathValue)) || mentionsImagePath;
+      return hasImage ? "" : (id || item.kind || "foreground_asset");
+    })
+    .filter(Boolean);
+}
+
+function requiresForegroundAsset(item = {}) {
+  const text = JSON.stringify(item);
+  if (!FOREGROUND_TERMS.test(text) && !FOREGROUND_ASSET_TERMS.test(text)) return false;
+  if (STRUCTURAL_TERMS.test(text) && !FOREGROUND_TERMS.test(text)) return false;
+  if (/shape|native-shape|native shape|native structural/i.test(`${item.type || ""} ${item.kind || ""} ${item.decision || ""}`) && !/logo|photo|screenshot|brand|device/i.test(text)) return false;
+  return true;
 }
 
 function isBackgroundDecorationInventory(item = {}, text = "") {
@@ -447,6 +1134,49 @@ async function runEditppt(args) {
   });
   if (stdout) process.stdout.write(stdout);
   if (stderr) process.stderr.write(stderr);
+}
+
+function chooseEditpptPython() {
+  const candidates = [
+    process.env.EDITPPT_PYTHON_PATH,
+    process.env.OCR_PYTHON_PATH,
+    fsSync.existsSync(DEFAULT_EDITPPT_PYTHON) ? DEFAULT_EDITPPT_PYTHON : "",
+    "python"
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (canImportEditppt(candidate)) return candidate;
+  }
+  return candidates[0] || "python";
+}
+
+function canImportEditppt(candidate) {
+  try {
+    const result = spawnSync(candidate, ["-c", "import editppt.cli"], {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function rewritePagePptxForPowerPoint(pageDir) {
+  const scriptPath = path.join(PROJECT_ROOT, "scripts", "openable-manifest-pptx.mjs");
+  if (!fsSync.existsSync(scriptPath)) return;
+  await execFileAsync(process.execPath, [
+    scriptPath,
+    "--manifest",
+    path.join(pageDir, "manifest.json"),
+    "--out",
+    path.join(pageDir, "page.pptx")
+  ], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8"
+  });
 }
 
 function resolveExistingDir(value) {
@@ -552,6 +1282,10 @@ function clampNumber(value, min, max, fallback) {
 
 function firstExistingPath(candidates) {
   return candidates.find((candidate) => candidate && fsSync.existsSync(candidate)) || "";
+}
+
+function envTruthy(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
 }
 
 async function readJson(file) {

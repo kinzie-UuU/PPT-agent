@@ -1,8 +1,10 @@
-import fs from "fs/promises";
+﻿import fs from "fs/promises";
+import fsSync from "fs";
 import path from "path";
 import { rootDir } from "./store.js";
 
 export const v1AcceptanceRootDir = path.join(rootDir, "workspace", "v1-acceptance");
+
 const latestReportPath = path.join(v1AcceptanceRootDir, "latest-real-ppt-regression.json");
 const MIN_REAL_PPT_PAGES = 15;
 const REQUIRED_CODEX_PPT_GATES = ["outline", "style", "backend", "sample", "fullDeck"];
@@ -14,6 +16,7 @@ export async function writeV1AcceptanceReport(report = {}, options = {}) {
   const acceptance = evaluateV1AcceptanceReport(report);
   const productVisualNext = buildProductVisualNext(report, acceptance);
   const phaseProgress = buildV1PhaseProgress(report, acceptance, productVisualNext);
+  const completionAudit = buildCompletionAudit(report, acceptance, productVisualNext, phaseProgress);
   const requiredForV1 = options.requiredForV1 ?? isV1ScopedReport({ ...report, acceptance });
   const safeReport = {
     ok: report.ok === true,
@@ -23,9 +26,10 @@ export async function writeV1AcceptanceReport(report = {}, options = {}) {
     requiredForV1,
     ...report,
     requiredForV1,
-    acceptance: { ...acceptance, productVisualNext, phaseProgress },
+    acceptance: { ...acceptance, productVisualNext, phaseProgress, completionAudit },
     productVisualNext,
-    phaseProgress
+    phaseProgress,
+    completionAudit
   };
   const fileName = `${kind}-${writtenAt.replace(/[:.]/g, "-")}.json`;
   const reportPath = path.join(v1AcceptanceRootDir, fileName);
@@ -55,32 +59,26 @@ export async function getLatestV1AcceptanceReport() {
       latestRepaired = true;
     }
   }
-  const acceptance = report ? report.acceptance || evaluateV1AcceptanceReport(report) : buildPendingV1Acceptance();
-  const rebuiltProductVisualNext = buildProductVisualNext(report, acceptance);
-  const storedProductVisualNext = report ? report.productVisualNext || acceptance.productVisualNext || {} : {};
-  const productVisualNext = report
-    ? {
-      ...rebuiltProductVisualNext,
-      ...storedProductVisualNext,
-      productActions: rebuiltProductVisualNext.productActions,
-      commands: rebuiltProductVisualNext.commands
-    }
-    : rebuiltProductVisualNext;
+  const acceptance = report ? evaluateV1AcceptanceReport(report) : buildPendingV1Acceptance();
+  const productVisualNext = buildProductVisualNext(report, acceptance);
   const phaseProgress = buildV1PhaseProgress(report, acceptance, productVisualNext);
+  const completionAudit = buildCompletionAudit(report, acceptance, productVisualNext, phaseProgress);
   const latest = report ? {
     ...report,
-    acceptance: { ...acceptance, productVisualNext, phaseProgress },
+    acceptance: { ...acceptance, productVisualNext, phaseProgress, completionAudit },
     productVisualNext,
-    phaseProgress
+    phaseProgress,
+    completionAudit
   } : null;
   const selectedReportPath = latest?.reportPath || (report ? latestReportPath : "");
   return {
     ok: true,
     exists: Boolean(report),
     requiredForV1: true,
-    acceptance: latest?.acceptance || { ...acceptance, productVisualNext, phaseProgress },
+    acceptance: latest?.acceptance || { ...acceptance, productVisualNext, phaseProgress, completionAudit },
     productVisualNext,
     phaseProgress,
+    completionAudit,
     latest,
     latestPath: selectedReportPath,
     latestRelativePath: selectedReportPath ? path.relative(rootDir, selectedReportPath) : "",
@@ -104,6 +102,12 @@ export function evaluateV1AcceptanceReport(report = {}) {
   const editableFinal = editable?.final || null;
   const finalPath = editableFinal?.path || report.artifacts?.editableFinal || "";
   const validationPath = editableFinal?.validation || "";
+  const editableVisualFreshness = inspectEditableVisualFreshness(report);
+  const editableProductRebuild = inspectEditableProductRebuild(report);
+  const editableFinalStructurallyReady = Boolean(finalPath && validationPath && !editableVisualFreshness.stale);
+  const editableFinalProductReady = Boolean(editableFinalStructurallyReady && editableProductRebuild.ready);
+  const deliveryArtifactsStructurallyReady = Boolean(report.artifacts?.imageDeck && report.artifacts?.editableFinal && report.artifacts?.state);
+  const deliveryArtifactsProductReady = Boolean(deliveryArtifactsStructurallyReady && editableProductRebuild.ready);
   const recordedGates = new Set(Array.isArray(report.approvals?.recorded) ? report.approvals.recorded : []);
   const missingGates = REQUIRED_CODEX_PPT_GATES.filter((gate) => !recordedGates.has(gate));
   const checks = [
@@ -203,30 +207,57 @@ export function evaluateV1AcceptanceReport(report = {}) {
       evidence: { runDir: editable?.runDir || "", nextStage: editable?.nextStage || "" }
     }),
     makeAcceptanceCheck({
+      id: "image-to-editable-product-rebuild",
+      label: "image-to-editable-ppt 产品级重建",
+      status: editableProductRebuild.ready ? "pass" : editableProductRebuild.hasEvidence ? "fail" : "pending",
+      detail: editableProductRebuild.ready
+        ? "可编辑 PPT 由模型页面 worker 重建，并包含产品级页面拆解证据。"
+        : editableProductRebuild.hasEvidence
+          ? editableProductRebuild.reason
+          : "还没有 image-to-editable-ppt 页面重建证据。",
+      required: true,
+      evidence: editableProductRebuild
+    }),
+    makeAcceptanceCheck({
       id: "editable-final",
       label: "可编辑最终 PPT",
-      status: finalPath && validationPath ? "pass" : finalPath ? "fail" : "pending",
-      detail: finalPath && validationPath
-        ? "最终 editable PPTX 和 validation 证据已记录。"
+      status: editableFinalProductReady ? "pass" : finalPath ? "fail" : "pending",
+      detail: editableFinalProductReady
+        ? "最终可编辑 PPTX 和 validation 证据已记录，并来自 image-to-editable-ppt 产品级重建。"
         : finalPath
-          ? "最终 PPTX 已记录，但缺少 validation 证据。"
+          ? editableVisualFreshness.stale
+            ? "最终 PPTX 早于当前 codex-ppt 图片页，需要重新运行 image-to-editable-ppt。"
+            : editableFinalStructurallyReady
+              ? "最终 PPTX 只证明本地工程链路存在；缺少 image-to-editable-ppt 产品级页面重建，不能作为 v1 最终交付。"
+              : "最终 PPTX 已记录，但缺少 validation 证据。"
           : "还没有最终可编辑 PPTX。",
       required: true,
-      evidence: { finalPath, validationPath, editable: editableFinal?.editable ?? null }
+      evidence: {
+        finalPath,
+        validationPath,
+        editable: editableFinal?.editable ?? null,
+        visualFreshness: editableVisualFreshness,
+        productRebuildReady: editableProductRebuild.ready,
+        structurallyReady: editableFinalStructurallyReady
+      }
     }),
     makeAcceptanceCheck({
       id: "download-artifacts",
       label: "交付产物",
-      status: report.artifacts?.imageDeck && report.artifacts?.editableFinal && report.artifacts?.state ? "pass" : "fail",
-      detail: report.artifacts?.imageDeck && report.artifacts?.editableFinal && report.artifacts?.state
-        ? "图片型 PPT、可编辑 PPT 和状态证据均可追踪。"
-        : "交付产物不完整，需要图片型 PPT、可编辑 PPT、state/log/validation 证据。",
+      status: deliveryArtifactsProductReady ? "pass" : "fail",
+      detail: deliveryArtifactsProductReady
+        ? "图片型 PPT、产品级可编辑 PPT 和状态证据均可追踪。"
+        : deliveryArtifactsStructurallyReady
+          ? "交付文件存在，但当前可编辑 PPT 不是 image-to-editable-ppt 产品级重建结果，下载交付必须继续阻断。"
+          : "交付产物不完整，需要图片型 PPT、可编辑 PPT、state/log/validation 证据。",
       required: true,
       evidence: {
         imageDeck: report.artifacts?.imageDeck || "",
         editableFinal: report.artifacts?.editableFinal || "",
         state: report.artifacts?.state || "",
-        ocrTextHints: report.artifacts?.ocrTextHints || ""
+        ocrTextHints: report.artifacts?.ocrTextHints || "",
+        productRebuildReady: editableProductRebuild.ready,
+        structurallyReady: deliveryArtifactsStructurallyReady
       }
     })
   ];
@@ -335,7 +366,7 @@ function buildProductVisualNext(report = null, acceptance = {}) {
     currentImages: toCount(visual.visualImages),
     missingCheckId: "codex-ppt-product-visuals",
     safeToRunAutomatically: false,
-    requiresExplicitSpendConfirmation: true,
+    requiresExplicitSpendConfirmation: Boolean(report),
     externalImageCalls: {
       sample: report ? 1 : 0,
       fullDeck: report ? maxPages : 0,
@@ -358,35 +389,43 @@ function buildV1PhaseProgress(report = null, acceptance = {}, productVisualNext 
   const visualImages = toCount(report?.visual?.visualImages);
   const visualMode = String(report?.visual?.mode || "");
   const productVisualReady = acceptanceCheckPassed(acceptance, "codex-ppt-product-visuals");
+  const productVisualDeckReady = productVisualReady
+    && acceptanceCheckPassed(acceptance, "codex-ppt-slide-records")
+    && acceptanceCheckPassed(acceptance, "image-deck");
   const ocrPages = toCount(report?.ocr?.pageCount);
   const ocrTextCount = toCount(report?.ocr?.textCount);
   const editableTasks = report?.editable?.tasks || report?.editable?.workerBatch?.taskSummary || {};
   const editableRecorded = toCount(editableTasks.recorded);
   const editableFailed = toCount(editableTasks.failed);
-  const editableFinalReady = acceptanceCheckPassed(acceptance, "editable-final") || Boolean(report?.editable?.final?.path);
+  const editableProductReady = acceptanceCheckPassed(acceptance, "image-to-editable-product-rebuild");
+  const editableFinalReady = acceptanceCheckPassed(acceptance, "editable-final");
   const downloadReady = acceptanceCheckPassed(acceptance, "download-artifacts");
   const realPptReady = sourcePages >= MIN_REAL_PPT_PAGES;
   const legacyRemoved = true;
   const doctorReady = true;
   const phases = [
-    buildPhase("phase-1-two-page-loop", "阶段 1：2 页闭环", sourcePages >= 2 && visualImages >= 2 && editableFinalReady, {
+    buildPhase("phase-1-two-page-loop", "阶段 1：2 页真实闭环", sourcePages >= 2 && visualImages >= 2 && editableFinalReady, {
       statusWhenNotDone: sourcePages >= 2 ? "working" : "pending",
       detail: sourcePages >= 2
         ? "已有至少 2 页源稿、图片页和最终可编辑 PPT 证据。"
-        : "还缺最小 2 页闭环证据。",
+        : "还缺至少 2 页闭环证据。",
       evidence: { sourcePages, visualImages, editableFinalReady }
     }),
-    buildPhase("phase-2-editable-page-stability", "阶段 2：可编辑页面任务稳定", editableRecorded >= 5 && editableFailed === 0 && editableFinalReady, {
+    buildPhase("phase-2-editable-page-stability", "阶段 2：可编辑页面任务稳定", editableRecorded >= 5 && editableFailed === 0 && editableFinalReady && editableProductReady, {
       statusWhenNotDone: editableRecorded ? "working" : "pending",
-      detail: editableRecorded >= 5 && editableFailed === 0
+      detail: editableRecorded >= 5 && editableFailed === 0 && editableProductReady
         ? `已记录 ${editableRecorded} 页可编辑重建，失败 ${editableFailed} 页。`
+        : editableRecorded >= 5 && editableFailed === 0
+          ? "当前有可编辑 PPT 证据，但仍是本地文本验证版，不是 image-to-editable-ppt 产品级重建。"
         : "还需要至少 5 页可编辑重建稳定证据。",
-      evidence: { editableRecorded, editableFailed, editableFinalReady }
+      evidence: { editableRecorded, editableFailed, editableFinalReady, editableProductReady }
     }),
-    buildPhase("phase-3-codex-ppt-product-visuals", "阶段 3：codex-ppt 产品级图片型 PPT", productVisualReady, {
+    buildPhase("phase-3-codex-ppt-product-visuals", "阶段 3：codex-ppt 产品级图片型 PPT", productVisualDeckReady, {
       statusWhenNotDone: productVisualNext?.status === "action-required" ? "blocked" : "pending",
-      detail: productVisualReady
-        ? "已有真实产品级视觉重绘证据。"
+      detail: productVisualDeckReady
+        ? "已有真实产品级视觉重绘和足量图片型 PPT 证据。"
+        : productVisualReady
+          ? "已有真实产品级视觉重绘证据，但图片页数量或页面任务记录还不足。"
         : "当前图片页仍是 dry-run/passthrough，需要真实 gpt-image-2 样张和全量图片页。",
       evidence: {
         visualMode,
@@ -433,19 +472,299 @@ function buildV1PhaseProgress(report = null, acceptance = {}, productVisualNext 
   ];
   const done = phases.filter((phase) => phase.status === "done").length;
   const blocked = phases.filter((phase) => phase.status === "blocked").length;
+  const currentPhase = phases.find((phase) => phase.status === "blocked" || phase.status === "working" || phase.status === "pending") || null;
   return {
     version: 1,
     done,
     total: phases.length,
     blocked,
     percent: Math.round((done / phases.length) * 100),
-    currentPhaseId: phases.find((phase) => phase.status === "blocked" || phase.status === "working" || phase.status === "pending")?.id || "complete",
+    currentPhaseId: currentPhase?.id || "complete",
     summary: blocked
-      ? `8 个阶段已完成 ${done} 个，当前阻断在产品级视觉重绘。`
+      ? `8 个阶段已完成 ${done} 个，当前阻断在${currentPhase?.label || "未完成阶段"}。`
       : done === phases.length
         ? "8 个阶段均已完成。"
         : `8 个阶段已完成 ${done} 个，继续补齐未完成阶段。`,
     phases
+  };
+}
+
+function buildCompletionAudit(report = null, acceptance = {}, productVisualNext = {}, phaseProgress = {}) {
+  const missing = Array.isArray(acceptance.missing) ? acceptance.missing : [];
+  const checks = Array.isArray(acceptance.checks) ? acceptance.checks : [];
+  const missingRequiredChecks = checks
+    .filter((check) => check.required && check.status !== "pass")
+    .map((check) => ({
+      id: check.id || "",
+      label: check.label || check.id || "",
+      status: check.status || "pending",
+      detail: check.detail || ""
+    }));
+  const productVisualMissing = missingRequiredChecks.some((check) => check.id === "codex-ppt-product-visuals")
+    || missing.some((item) => item.id === "codex-ppt-product-visuals");
+  const editableProductMissing = missingRequiredChecks.some((check) => check.id === "image-to-editable-product-rebuild")
+    || missing.some((item) => item.id === "image-to-editable-product-rebuild");
+  const externalImageCalls = productVisualNext?.externalImageCalls || {};
+  const visualRemainingImageCalls = productVisualMissing ? toCount(externalImageCalls.total) : 0;
+  const editableSampleImageCalls = editableProductMissing ? 2 : 0;
+  const sourcePages = toCount(report?.sourceRender?.renderedPages);
+  const visualImages = toCount(report?.visual?.visualImages);
+  const editableFinal = report?.editable?.final?.path || report?.artifacts?.editableFinal || "";
+  const ready = Boolean(acceptance.ready);
+  const blockerSummary = {
+    productVisualMissing,
+    editableProductMissing,
+    imageProviderReady: Boolean(productVisualNext?.status !== "blocked"),
+    llmProviderActionRequired: Boolean(editableProductMissing),
+    note: productVisualMissing && editableProductMissing
+      ? "视觉重绘和可编辑重建都缺产品级证据；gpt-image-2 只解决图片型 PPT，可编辑重建仍需要可用的对话模型服务商。"
+      : editableProductMissing
+        ? "当前主要缺口是 image-to-editable-ppt 产品级页面重建；请先确认对话模型服务商额度/鉴权已恢复。"
+        : productVisualMissing
+          ? "当前主要缺口是 codex-ppt 产品级视觉重绘；生成真实样张前必须确认外部图片 API 额度。"
+          : ready
+            ? "产品级验收已通过。"
+            : "仍有真实验收必需证据未通过。"
+  };
+  const summary = ready
+    ? "完整产品级验收已通过，可以声明 Agent v1 达到当前验收目标。"
+    : productVisualMissing && editableProductMissing
+      ? "尚未完整：当前同时缺少真实 gpt-image-2 产品级视觉重绘证据，以及 image-to-editable-ppt 产品级页面重建证据。"
+      : productVisualMissing
+      ? "尚未完整：当前只证明本地工程链路，缺少真实 gpt-image-2 产品级视觉重绘证据。"
+      : editableProductMissing
+        ? "尚未完整：当前可编辑 PPT 仍是本地文本验证版，缺少 image-to-editable-ppt 产品级页面重建证据。"
+      : "尚未完整：仍有真实验收必需证据未通过。";
+  const nextSteps = [];
+  if (ready) {
+    nextSteps.push({
+      id: "complete",
+      label: "可以交付",
+      detail: "真实 15 页验收、产品级视觉、可编辑 PPT 和交付证据均已通过。",
+      paidImageGeneration: false,
+      externalImageCalls: 0,
+      area: "delivery"
+    });
+  } else {
+    if (productVisualMissing) {
+      nextSteps.push({
+        id: "generate-product-visual-sample",
+        label: "生成 1 页真实产品级样张",
+        detail: "用户明确确认外部图片 API 后，调用 gpt-image-2 生成 1 页样张；人工复核样张后再授权全量图片型 PPT。",
+        paidImageGeneration: true,
+        externalImageCalls: 1,
+        area: "codex-ppt",
+        safePreflight: {
+          id: "product-visual-sample-preflight",
+          label: "先检查真实样张生成条件",
+          method: "POST",
+          path: "/api/v1-acceptance/product-visual-sample/preflight",
+          body: {},
+          paidImageGeneration: false,
+          externalImageCalls: 0,
+          safeToRunAutomatically: true
+        },
+        paidAction: {
+          id: "product-visual-sample-run",
+          label: "确认后生成真实样张",
+          method: "POST",
+          path: "/api/v1-acceptance/product-visual-sample/run",
+          body: {
+            confirmExternalImageSpend: true,
+            confirmProductVisualSample: true,
+            confirmPromptPreview: true
+          },
+          paidImageGeneration: true,
+          externalImageCalls: 1,
+          requiresExplicitSpendConfirmation: true,
+          safeToRunAutomatically: false
+        }
+      });
+    }
+    if (editableProductMissing) {
+      const jobId = report?.jobId || report?.id || "";
+      nextSteps.push({
+        id: "recover-llm-and-run-model-editable-workers",
+        label: "恢复 LLM 后重跑可编辑页面重建",
+        detail: "先确认对话模型服务商额度/鉴权已恢复，再重建 fresh editable run，并以 mode=model 跑 1-2 页 image-to-editable-ppt 页面 worker。",
+        paidImageGeneration: true,
+        externalImageCalls: editableSampleImageCalls,
+        area: "image-to-editable-ppt",
+        order: productVisualMissing ? 2 : 1,
+        dependsOn: productVisualMissing ? ["codex-ppt-product-visuals"] : [],
+        blockedUntil: productVisualMissing ? "先完成 codex-ppt 产品级视觉样张和图片型 PPT；否则可编辑重建只能验证旧视觉证据，不能作为 v1 闭环。" : "",
+        paidActionBlocked: Boolean(productVisualMissing),
+        requiresLlmProviderRecovery: true,
+        readinessPreflight: {
+          id: "editable-rebuild-readiness-preflight",
+          label: "检查可编辑重建总状态",
+          method: "POST",
+          path: "/api/v1-acceptance/editable-rebuild-readiness/preflight",
+          body: {},
+          paidImageGeneration: false,
+          externalImageCalls: 0,
+          llmApiCalls: 0,
+          safeToRunAutomatically: true
+        },
+        providerPreflight: {
+          id: "llm-provider-recovery-preflight",
+          label: "先检查 LLM 恢复状态",
+          method: "POST",
+          path: "/api/v1-acceptance/llm-provider-recovery/preflight",
+          body: {},
+          paidImageGeneration: false,
+          externalImageCalls: 0,
+          llmApiCalls: 0,
+          safeToRunAutomatically: true
+        },
+        localPreparation: jobId
+          ? [
+            {
+              id: "fresh-editable-run-recovery",
+              label: "重建 fresh editable run",
+              method: "POST",
+              path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/fresh-run-recovery`,
+              preflight: {
+                method: "POST",
+                path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/fresh-run-recovery/preflight`,
+                body: {},
+                paidImageGeneration: false,
+                externalImageCalls: 0,
+                safeToRunAutomatically: true
+              },
+              body: {
+                maxConcurrentPages: 6,
+                reason: "v1 product editable rebuild recovery"
+              },
+              paidImageGeneration: false,
+              externalImageCalls: 0,
+              safeToRunAutomatically: false,
+              requiresExplicitUserConfirmation: true,
+              sideEffect: "会清掉旧的可编辑重建证据，并重新准备 editppt 运行目录。"
+            },
+            {
+              id: "sync-editable-worker-tasks",
+              label: "同步可编辑页面任务",
+              method: "POST",
+              path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/worker-tasks/sync`,
+              preflight: {
+                method: "POST",
+                path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/worker-tasks/sync/preflight`,
+                body: {},
+                paidImageGeneration: false,
+                externalImageCalls: 0,
+                safeToRunAutomatically: true
+              },
+              body: {},
+              paidImageGeneration: false,
+              externalImageCalls: 0,
+              safeToRunAutomatically: false,
+              requiresExplicitUserConfirmation: true,
+              sideEffect: "会根据新的页面提示刷新可编辑页面任务队列。"
+            }
+          ]
+          : [],
+        safePreflight: jobId
+          ? {
+            id: "editable-worker-batch-preflight",
+            label: "先检查可编辑页面重建条件",
+            method: "POST",
+            path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/worker-runs/preflight`,
+            body: {
+              mode: "model",
+              maxPages: 2,
+              pages: "1-2",
+              requireLlmProviderRecovery: true
+            },
+            paidImageGeneration: false,
+            externalImageCalls: 0,
+            safeToRunAutomatically: true
+          }
+          : null,
+        paidAction: jobId
+          ? {
+            id: "editable-worker-batch-run",
+            label: "确认后重跑可编辑页面任务",
+            method: "POST",
+            path: `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/worker-runs`,
+            body: {
+              mode: "model",
+              maxPages: 2,
+              pages: "1-2",
+              confirmExternalImageSpend: true,
+              confirmLlmProviderRecovered: true,
+              requireLlmProviderRecovery: true
+            },
+            paidImageGeneration: true,
+            externalImageCalls: 2,
+            requiresExplicitSpendConfirmation: true,
+            requiresLlmProviderRecovery: true,
+            safeToRunAutomatically: false
+          }
+          : null
+      });
+    }
+    if (!nextSteps.length) {
+      nextSteps.push({
+        id: "fix-v1-acceptance-evidence",
+        label: "补齐真实验收缺口",
+        detail: missingRequiredChecks[0]?.detail || acceptance.summary || "请根据真实验收缺口继续处理。",
+        paidImageGeneration: false,
+        externalImageCalls: 0,
+        area: "acceptance"
+      });
+    }
+  }
+  const nextStep = nextSteps[0];
+  const nextStepExternalImageCalls = toCount(nextStep?.externalImageCalls);
+  const remainingExternalImageCalls = visualRemainingImageCalls + editableSampleImageCalls;
+  const executionPlan = buildCompletionExecutionPlan(nextSteps, {
+    ready,
+    productVisualMissing,
+    editableProductMissing
+  });
+  return {
+    version: 1,
+    ready,
+    level: ready ? "pass" : productVisualMissing ? "blocked" : (acceptance.level || "pending"),
+    title: ready ? "完整 Agent 验收已通过" : "还不能算完整 Agent",
+    summary,
+    sourcePages,
+    visualImages,
+    editableFinalReady: Boolean(editableFinal),
+    requiredScope: {
+      realPptPages: MIN_REAL_PPT_PAGES,
+      productVisuals: true,
+      editablePptx: true,
+      deliveryEvidence: true
+    },
+    proven: {
+      realPptReport: sourcePages >= MIN_REAL_PPT_PAGES,
+      engineeringChain: Boolean(sourcePages >= MIN_REAL_PPT_PAGES && visualImages >= MIN_REAL_PPT_PAGES && editableFinal),
+      productVisuals: !productVisualMissing && acceptanceCheckPassed(acceptance, "codex-ppt-product-visuals"),
+      editableProductRebuild: acceptanceCheckPassed(acceptance, "image-to-editable-product-rebuild"),
+      editableFinal: acceptanceCheckPassed(acceptance, "editable-final"),
+      deliveryArtifacts: acceptanceCheckPassed(acceptance, "download-artifacts")
+    },
+    missingRequiredChecks,
+    blockerSummary,
+    blockerIds: missingRequiredChecks.map((check) => check.id),
+    currentPhaseId: phaseProgress?.currentPhaseId || "",
+    phaseSummary: phaseProgress?.summary || "",
+    safeToRunAutomatically: false,
+    requiresExplicitSpendConfirmation: Boolean(!ready && productVisualNext?.requiresExplicitSpendConfirmation),
+    nextStepExternalImageCalls,
+    remainingExternalImageCalls,
+    costBreakdown: {
+      nextStepExternalImageCalls,
+      visualRemainingImageCalls,
+      editableSampleImageCalls,
+      totalRemainingExternalImageCalls: remainingExternalImageCalls,
+      note: "这里只统计图片 API 次数估算；LLM 对话模型仍需单独确认额度/鉴权。"
+    },
+    nextStep,
+    nextSteps,
+    executionPlan
   };
 }
 
@@ -460,8 +779,178 @@ function buildPhase(id, label, done, options = {}) {
   };
 }
 
+function buildCompletionExecutionPlan(nextSteps = [], options = {}) {
+  const steps = [];
+  const pushStep = (step = {}, extra = {}) => {
+    if (!step.id) return;
+    steps.push({
+      id: step.id,
+      order: extra.order || steps.length + 1,
+      area: step.area || extra.area || "",
+      label: step.label || step.id,
+      detail: extra.detail || step.detail || "",
+      status: extra.status || (step.blockedUntil ? "blocked" : "ready"),
+      noCostPreflight: Boolean(step.safePreflight?.path || step.readinessPreflight?.path || step.providerPreflight?.path),
+      paidImageGeneration: Boolean(step.paidImageGeneration),
+      externalImageCalls: toCount(step.externalImageCalls),
+      requiresExplicitSpendConfirmation: Boolean(step.paidAction?.requiresExplicitSpendConfirmation || step.paidImageGeneration),
+      requiresLlmProviderRecovery: Boolean(step.requiresLlmProviderRecovery || step.paidAction?.requiresLlmProviderRecovery),
+      dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn : [],
+      blockedUntil: step.blockedUntil || ""
+    });
+  };
+  if (options.ready) {
+    pushStep({ id: "complete", label: "可以交付", detail: "真实验收已经通过。", area: "delivery" }, { status: "done" });
+    return {
+      version: 1,
+      summary: "产品级验收已经完成。",
+      currentOrder: 1,
+      steps
+    };
+  }
+  for (const step of nextSteps) {
+    pushStep(step, {
+      order: step.order || steps.length + 1,
+      status: step.blockedUntil ? "blocked" : (step.paidImageGeneration ? "requires-confirmation" : "ready")
+    });
+  }
+  const firstOpen = steps.find((step) => step.status !== "blocked") || steps[0] || null;
+  const firstOpenSource = firstOpen ? nextSteps.find((step) => step.id === firstOpen.id) || {} : {};
+  const currentAction = firstOpen ? {
+    stepId: firstOpen.id,
+    order: firstOpen.order,
+    label: firstOpen.label,
+    area: firstOpen.area,
+    status: firstOpen.status,
+    noCostPreflight: firstOpenSource.safePreflight || firstOpenSource.readinessPreflight || firstOpenSource.providerPreflight || null,
+    paidAction: firstOpenSource.paidAction || null,
+    externalImageCalls: firstOpen.externalImageCalls,
+    requiresExplicitSpendConfirmation: firstOpen.requiresExplicitSpendConfirmation,
+    safeToRunAutomatically: false
+  } : null;
+  return {
+    version: 1,
+    summary: options.productVisualMissing
+      ? "先完成 codex-ppt 产品级视觉，再进入 image-to-editable-ppt 可编辑重建。"
+      : options.editableProductMissing
+        ? "视觉证据已就绪后，恢复 LLM 并运行 image-to-editable-ppt 页面重建。"
+        : "继续补齐真实验收缺口。",
+    currentOrder: firstOpen?.order || 0,
+    currentAction,
+    steps
+  };
+}
+
 function acceptanceCheckPassed(acceptance = {}, id = "") {
   return Array.isArray(acceptance.checks) && acceptance.checks.some((check) => check.id === id && check.status === "pass");
+}
+
+function inspectEditableProductRebuild(report = {}) {
+  const editable = report?.editable || {};
+  const tasks = editable.tasks || editable.workerBatch?.taskSummary || {};
+  const recordedPages = toCount(tasks.recorded);
+  const failedPages = toCount(tasks.failed);
+  const finalPath = editable.final?.path || report.artifacts?.editableFinal || "";
+  const runDir = editable.runDir || "";
+  const workerMode = String(editable.workerBatch?.mode || editable.mode || "").toLowerCase();
+  const nonProductDelivery = Boolean(editable.workerBatch?.nonProductDelivery || editable.workerBatch?.experimentalLocalBatch);
+  const localTextOnly = workerMode === "local" || nonProductDelivery;
+  const pageEvidence = inspectEditablePageEvidence(runDir);
+  const hasEvidence = Boolean(recordedPages || finalPath || runDir || workerMode || pageEvidence.pageCount);
+  const ready = Boolean(
+    hasEvidence
+    && !localTextOnly
+    && workerMode !== "passthrough"
+    && recordedPages > 0
+    && failedPages === 0
+    && finalPath
+    && pageEvidence.productPages > 0
+    && pageEvidence.localTextOnlyPages === 0
+  );
+  let reason = "";
+  if (localTextOnly) {
+    reason = "当前 image-to-editable-ppt 输出来自 local-ocr-text-rebuild / 本地文本 worker，只能证明工程链路，不能代表产品级图片转可编辑。";
+  } else if (!pageEvidence.productPages && pageEvidence.pageCount) {
+    reason = "页面目录缺少模型页面 worker 的产品级拆解证据，不能确认图片/视觉对象已被重建。";
+  } else if (!finalPath) {
+    reason = "缺少最终可编辑 PPT 文件。";
+  } else if (failedPages) {
+    reason = `仍有 ${failedPages} 页可编辑重建失败。`;
+  } else {
+    reason = "缺少可验证的 image-to-editable-ppt 产品级页面 worker 证据。";
+  }
+  return {
+    ready,
+    hasEvidence,
+    mode: workerMode || "",
+    nonProductDelivery,
+    localTextOnly,
+    recordedPages,
+    failedPages,
+    finalPath,
+    runDir,
+    ...pageEvidence,
+    reason
+  };
+}
+
+function inspectEditablePageEvidence(runDir = "") {
+  const evidence = {
+    pageCount: 0,
+    productPages: 0,
+    localTextOnlyPages: 0,
+    pagesWithRebuildSpec: 0,
+    pagesWithVisualInventory: 0,
+    sampleStrategies: []
+  };
+  if (!runDir || !fsSync.existsSync(runDir)) return evidence;
+  const pagesDir = path.join(runDir, "pages");
+  if (!fsSync.existsSync(pagesDir)) return evidence;
+  const entries = fsSync.readdirSync(pagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^page_\d+/i.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const pageDir = path.join(pagesDir, entry.name);
+    const manifest = readJsonSync(path.join(pageDir, "manifest.json")) || {};
+    const strategy = String(manifest.page_strategy || manifest.strategy || "").trim();
+    const hasRebuildSpec = fsSync.existsSync(path.join(pageDir, "page-rebuild-spec.json"));
+    const visualInventoryCount = Array.isArray(manifest.visual_inventory) ? manifest.visual_inventory.length : 0;
+    const imageCount = Array.isArray(manifest.images) ? manifest.images.length : 0;
+    const localTextOnly = /local-ocr-text-rebuild|local text worker|text-only/i.test(strategy || manifest.notes || "");
+    const productPage = !localTextOnly && (hasRebuildSpec || visualInventoryCount > 0 || imageCount > 0);
+    evidence.pageCount += 1;
+    if (hasRebuildSpec) evidence.pagesWithRebuildSpec += 1;
+    if (visualInventoryCount || imageCount) evidence.pagesWithVisualInventory += 1;
+    if (localTextOnly) evidence.localTextOnlyPages += 1;
+    if (productPage) evidence.productPages += 1;
+    if (strategy && evidence.sampleStrategies.length < 5 && !evidence.sampleStrategies.includes(strategy)) {
+      evidence.sampleStrategies.push(strategy);
+    }
+  }
+  return evidence;
+}
+
+function inspectEditableVisualFreshness(report = {}) {
+  const visualTimes = [
+    report.visual?.imageDeckCreatedAt,
+    report.visual?.visualManifestCreatedAt,
+    report.visual?.visualQualityCreatedAt,
+    report.visual?.latestImageCreatedAt,
+    ...(Array.isArray(report.visual?.images) ? report.visual.images.map((image) => image?.createdAt) : [])
+  ].map(toTime).filter((time) => time > 0);
+  const latestVisualAt = visualTimes.length ? Math.max(...visualTimes) : 0;
+  const editableTimes = [
+    report.editable?.runCreatedAt,
+    report.editable?.hintsCreatedAt,
+    report.editable?.final?.createdAt
+  ].map(toTime).filter((time) => time > 0);
+  const latestEditableAt = editableTimes.length ? Math.max(...editableTimes) : 0;
+  const stale = Boolean(latestVisualAt && latestEditableAt && latestVisualAt > latestEditableAt);
+  return {
+    stale,
+    latestVisualAt: latestVisualAt ? new Date(latestVisualAt).toISOString() : "",
+    latestEditableAt: latestEditableAt ? new Date(latestEditableAt).toISOString() : ""
+  };
 }
 
 function buildProductVisualSpendPlan({ report = null, maxPages = MIN_REAL_PPT_PAGES, productVisualReady = false } = {}) {
@@ -554,51 +1043,20 @@ function buildProductVisualProductActions({ maxPages = MIN_REAL_PPT_PAGES, sourc
   const pages = Math.max(1, toCount(maxPages) || MIN_REAL_PPT_PAGES);
   const testPages = Math.min(2, pages);
   return [
-    {
-      id: "product-visual-readiness",
-      label: "运行无费用产品视觉预检",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-readiness",
+    buildProductAction("product-visual-readiness", "运行无费用产品视觉预检", "/api/v1-acceptance/product-visual-readiness", {
       body: { maxPages: pages, ...(sourcePath ? { sourcePath } : {}) },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "只检查源文件、provider 和 codex-ppt 关卡，不生成图片。"
-    },
-    {
-      id: "product-visual-sample-preflight",
-      label: "检查真实样张生成条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-sample/preflight",
-      body: {},
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "确认是否已满足生成 1 页真实 codex-ppt 样张的条件。"
-    },
-    {
-      id: "product-visual-sample-prompt-preview",
-      label: "预览真实样张 prompt",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-sample/prompt-preview",
-      body: {},
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "只预览将用于真实样张生成的 prompt、源页和模型证据，不生成图片。"
-    },
-    {
-      id: "product-visual-sample-run",
-      label: "生成真实 codex-ppt 样张",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-sample/run",
+      description: "只检查源文件、provider 和 codex-ppt 关卡，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-sample-preflight", "检查真实样张生成条件", "/api/v1-acceptance/product-visual-sample/preflight", {
+      description: "确认是否已满足生成 1 页真实 codex-ppt 样张的条件。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-sample-prompt-preview", "预览真实样张 prompt", "/api/v1-acceptance/product-visual-sample/prompt-preview", {
+      description: "只预览将用于真实样张生成的 prompt、源页和模型证据，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-sample-run", "生成真实 codex-ppt 样张", "/api/v1-acceptance/product-visual-sample/run", {
       body: {
         confirmExternalImageSpend: true,
         confirmProductVisualSample: true,
@@ -608,80 +1066,31 @@ function buildProductVisualProductActions({ maxPages = MIN_REAL_PPT_PAGES, sourc
       paidImageGeneration: true,
       externalImageCalls: 1,
       requiresExplicitSpendConfirmation: true,
-      safeToRunAutomatically: false,
       description: "会调用外部图片 API 生成 1 页样张，必须由用户明确确认。"
-    },
-    {
-      id: "product-visual-sample-approval-preflight",
-      label: "检查样张确认条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-sample/approval/preflight",
-      body: {},
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "确认真实样张是否已具备人工复核和样张关卡确认条件，不生成图片。"
-    },
-    {
-      id: "product-visual-sample-approval-approve",
-      label: "确认样张关卡",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-sample/approval/approve",
+    }),
+    buildProductAction("product-visual-sample-approval-preflight", "检查样张确认条件", "/api/v1-acceptance/product-visual-sample/approval/preflight", {
+      description: "确认真实样张是否具备人工复核和样张关卡确认条件，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-sample-approval-approve", "确认样张关卡", "/api/v1-acceptance/product-visual-sample/approval/approve", {
       body: { maxPages: pages },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: false,
       description: "人工复核真实样张后记录 codex-ppt 样张关卡，并进入全量图片页预检。"
-    },
-    {
-      id: "product-visual-full-deck-approval-preflight",
-      label: "检查全量确认条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/approval/preflight",
+    }),
+    buildProductAction("product-visual-full-deck-approval-preflight", "检查全量确认条件", "/api/v1-acceptance/product-visual-full-deck/approval/preflight", {
       body: { maxPages: pages },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "确认真实样张是否已经具备全量生成关卡确认条件，不生成图片。"
-    },
-    {
-      id: "product-visual-full-deck-approval-approve",
-      label: "确认全量生成关卡",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/approval/approve",
+      description: "确认真实样张是否已经具备全量生成关卡确认条件，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-full-deck-approval-approve", "确认全量生成关卡", "/api/v1-acceptance/product-visual-full-deck/approval/approve", {
       body: { maxPages: pages },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: false,
       description: "人工确认样张可继续全量后记录 codex-ppt 全量生成关卡；该步骤不调用图片 API。"
-    },
-    {
-      id: "product-visual-test-deck-preflight",
-      label: "检查 2 页测试生成条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/preflight",
+    }),
+    buildProductAction("product-visual-test-deck-preflight", "检查 2 页测试生成条件", "/api/v1-acceptance/product-visual-full-deck/preflight", {
       body: { maxPages: testPages, pages: `1-${testPages}` },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "只检查 2 页产品级图片 PPT 试跑条件，不生成图片。"
-    },
-    {
-      id: "product-visual-test-deck-run",
-      label: "生成 2 页测试图片型 PPT",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/run",
+      description: "只检查 2 页产品级图片 PPT 试跑条件，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-test-deck-run", "生成 2 页测试图片型 PPT", "/api/v1-acceptance/product-visual-full-deck/run", {
       body: {
         maxPages: testPages,
         pages: `1-${testPages}`,
@@ -691,28 +1100,14 @@ function buildProductVisualProductActions({ maxPages = MIN_REAL_PPT_PAGES, sourc
       paidImageGeneration: true,
       externalImageCalls: testPages,
       requiresExplicitSpendConfirmation: true,
-      safeToRunAutomatically: false,
       description: `会调用外部图片 API ${testPages} 次生成 2 页测试图片型 PPT，必须由用户明确确认。`
-    },
-    {
-      id: "product-visual-custom-pages-preflight",
-      label: "检查指定页生成条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/preflight",
+    }),
+    buildProductAction("product-visual-custom-pages-preflight", "检查指定页生成条件", "/api/v1-acceptance/product-visual-full-deck/preflight", {
       body: { maxPages: testPages, pages: "1,2" },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "只检查指定页产品级图片 PPT 生成条件，不生成图片；调用方可替换 pages。"
-    },
-    {
-      id: "product-visual-custom-pages-run",
-      label: "生成指定页图片型 PPT",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/run",
+      description: "只检查指定页产品级图片 PPT 生成条件，不生成图片；调用方可替换 pages。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-custom-pages-run", "生成指定页图片型 PPT", "/api/v1-acceptance/product-visual-full-deck/run", {
       body: {
         maxPages: testPages,
         pages: "1,2",
@@ -722,28 +1117,14 @@ function buildProductVisualProductActions({ maxPages = MIN_REAL_PPT_PAGES, sourc
       paidImageGeneration: true,
       externalImageCalls: testPages,
       requiresExplicitSpendConfirmation: true,
-      safeToRunAutomatically: false,
       description: "会按 pages 调用外部图片 API 生成指定页图片型 PPT，必须由用户明确确认。"
-    },
-    {
-      id: "product-visual-full-deck-preflight",
-      label: "检查全量图片页生成条件",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/preflight",
+    }),
+    buildProductAction("product-visual-full-deck-preflight", "检查全量图片页生成条件", "/api/v1-acceptance/product-visual-full-deck/preflight", {
       body: { maxPages: pages },
-      paidImageGeneration: false,
-      externalImageCalls: 0,
-      requiresExplicitSpendConfirmation: false,
-      safeToRunAutomatically: true,
-      description: "确认真实样张和全量授权是否齐备，不生成图片。"
-    },
-    {
-      id: "product-visual-full-deck-run",
-      label: "生成全量图片型 PPT",
-      kind: "api",
-      method: "POST",
-      path: "/api/v1-acceptance/product-visual-full-deck/run",
+      description: "确认真实样张和全量授权是否齐备，不生成图片。",
+      safeToRunAutomatically: true
+    }),
+    buildProductAction("product-visual-full-deck-run", "生成全量图片型 PPT", "/api/v1-acceptance/product-visual-full-deck/run", {
       body: {
         maxPages: pages,
         confirmExternalImageSpend: true,
@@ -752,10 +1133,25 @@ function buildProductVisualProductActions({ maxPages = MIN_REAL_PPT_PAGES, sourc
       paidImageGeneration: true,
       externalImageCalls: pages,
       requiresExplicitSpendConfirmation: true,
-      safeToRunAutomatically: false,
       description: `会调用外部图片 API ${pages} 次生成全量 codex-ppt 图片页，必须由用户明确确认。`
-    }
+    })
   ];
+}
+
+function buildProductAction(id, label, apiPath, options = {}) {
+  return {
+    id,
+    label,
+    kind: "api",
+    method: "POST",
+    path: apiPath,
+    body: options.body || {},
+    paidImageGeneration: Boolean(options.paidImageGeneration),
+    externalImageCalls: toCount(options.externalImageCalls),
+    requiresExplicitSpendConfirmation: Boolean(options.requiresExplicitSpendConfirmation),
+    safeToRunAutomatically: Boolean(options.safeToRunAutomatically),
+    description: options.description || ""
+  };
 }
 
 async function findLatestV1ScopedReport() {
@@ -806,11 +1202,24 @@ function toCount(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function toTime(value = "") {
+  const time = Date.parse(String(value || ""));
+  return Number.isFinite(time) ? time : 0;
+}
+
 async function readJsonIfExists(filePath) {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
+  }
+}
+
+function readJsonSync(filePath = "") {
+  try {
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
   }
 }

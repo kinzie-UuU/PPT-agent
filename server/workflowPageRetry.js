@@ -6,6 +6,7 @@ import { listWorkflowCodexPptSlideTasks, resetWorkflowCodexPptSlideTask } from "
 import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 import { getWorkflowEditableWorkerBatchPreflight } from "./workflowWorkerBatchRunner.js";
 import { listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask } from "./workflowWorkerQueue.js";
+import { scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
 
 export async function retryWorkflowPage(jobId, pageId, options = {}) {
   const normalizedPageId = normalizePageId(pageId);
@@ -138,6 +139,167 @@ export async function getVisualQualityRetryPreflight(jobId, options = {}) {
   };
 }
 
+export async function getFinalVisualQaRetryPreflight(jobId, options = {}) {
+  const finalEvidence = await scanWorkflowFinalEvidence(jobId);
+  const visualQa = finalEvidence.summary?.visualQa || {};
+  const pages = Array.isArray(visualQa.pages) ? visualQa.pages : [];
+  const requestedPages = parsePageList(options.pages || options.pageIds || options.pageId || options.page || "");
+  const candidates = pages
+    .filter((page) => Array.isArray(page.issues) && page.issues.length)
+    .filter((page) => !requestedPages.length || requestedPages.includes(normalizePageId(page.pageId)))
+    .map((page) => ({
+      pageId: normalizePageId(page.pageId),
+      issues: Array.isArray(page.issues) ? page.issues : [],
+      targetSize: Number(page.targetSize || 0),
+      previewSize: Number(page.previewSize || 0),
+      previewToTargetBytes: Number(page.previewToTargetBytes || 0),
+      targetPath: page.targetPath || "",
+      previewPath: page.previewPath || ""
+    }))
+    .filter((page) => page.pageId);
+  const taskBundle = await listWorkflowEditableWorkerTasks(jobId).catch(() => ({ tasks: [], summary: {} }));
+  const taskByPage = new Map((taskBundle.tasks || []).map((task) => [normalizePageId(task.pageId), task]));
+  const candidateDetails = candidates.map((page) => {
+    const task = taskByPage.get(page.pageId) || null;
+    return {
+      ...page,
+      editableTask: task ? {
+        exists: true,
+        status: task.status || "",
+        agentId: task.agentId || "",
+        resettable: ["ready", "claimed", "running", "recorded", "failed"].includes(task.status || "")
+      } : { exists: false, resettable: false }
+    };
+  });
+  const resettablePages = candidateDetails
+    .filter((page) => page.editableTask?.resettable)
+    .map((page) => page.pageId);
+  const blockingIssues = [];
+  const warnings = [];
+  if (!visualQa || visualQa.status === "not_applicable") blockingIssues.push("Final visual QA evidence is missing.");
+  if (!candidateDetails.length) warnings.push("No failed final visual QA pages were found.");
+  const missingTasks = candidateDetails.filter((page) => !page.editableTask?.exists).map((page) => page.pageId);
+  if (missingTasks.length) blockingIssues.push(`Missing editable worker task(s): ${missingTasks.join(", ")}`);
+  if (candidateDetails.length && !resettablePages.length) blockingIssues.push("No editable worker task can be reset for the failed visual QA pages.");
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    localOnly: true,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    mutatesOnRun: true,
+    safeToRunAutomatically: false,
+    requiresExplicitUserConfirmation: true,
+    ready: blockingIssues.length === 0,
+    resetReady: blockingIssues.length === 0 && resettablePages.length > 0,
+    jobId,
+    visualQa: {
+      status: visualQa.status || "",
+      pageCount: visualQa.pageCount || pages.length,
+      failedPageCount: visualQa.failedPageCount || candidates.length,
+      blockingIssues: visualQa.blockingIssues || []
+    },
+    candidateCount: candidateDetails.length,
+    resettableCount: resettablePages.length,
+    candidates: candidateDetails,
+    resetPages: resettablePages,
+    resetBody: {
+      target: "image-to-editable-ppt",
+      forceRecorded: true,
+      forceEditpptReset: true,
+      clearGeneratedArtifacts: true,
+      reason: "final visual QA retry: editable preview is too simplified or mismatched"
+    },
+    nextAfterReset: {
+      targetPanel: "editable-page-worker-panel",
+      action: "start editable page workers",
+      pages: resettablePages.join(","),
+      requiresExternalImageSpendConfirmation: resettablePages.length > 0,
+      requiresLlmProviderReady: true
+    },
+    blockingIssues,
+    warnings,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export async function retryFinalVisualQaWorkflowPages(jobId, options = {}) {
+  const preflight = await getFinalVisualQaRetryPreflight(jobId, options);
+  const dryRun = options.dryRun !== false && options.apply !== true && options.confirm !== true;
+  const results = [];
+  if (!dryRun) {
+    if (!preflight.resetReady) {
+      const error = new Error(preflight.blockingIssues[0] || "Final visual QA retry preflight is not ready.");
+      error.preflight = preflight;
+      throw error;
+    }
+    for (const pageId of preflight.resetPages) {
+      const result = await retryWorkflowPage(jobId, pageId, {
+        ...options,
+        skillId: "image-to-editable-ppt",
+        forceRecorded: true,
+        forceEditpptReset: true,
+        allowQueueOnlyReset: true,
+        clearGeneratedArtifacts: true,
+        confirmLost: true,
+        reason: options.reason || "final visual QA retry: reset editable page worker"
+      }).then((value) => ({
+        pageId,
+        ok: true,
+        retried: value.retried || 0
+      })).catch((error) => ({
+        pageId,
+        ok: false,
+        retried: 0,
+        error: error.message || "final visual QA retry failed"
+      }));
+      results.push(result);
+    }
+  }
+  const resetPages = dryRun ? preflight.resetPages : results.filter((item) => item.ok && item.retried).map((item) => item.pageId);
+  const workerBatchPreview = resetPages.length
+    ? await getWorkflowEditableWorkerBatchPreflight(jobId, {
+      mode: "model",
+      maxPages: resetPages.length,
+      pages: resetPages.join(","),
+      agentPrefix: "product-page-worker",
+      confirmExternalImageSpend: false,
+      acceptOfflineTextHints: Boolean(options.acceptOfflineTextHints || options.confirmOfflineTextHints),
+      autoFinalize: true,
+      requireLlmProviderRecovery: true
+    }).catch((error) => ({
+      ok: false,
+      ready: false,
+      startReady: false,
+      error: error.message || "editable worker batch preflight failed"
+    }))
+    : null;
+  return {
+    ok: dryRun ? true : results.every((item) => item.ok),
+    jobId,
+    dryRun,
+    requested: preflight.resetPages.length,
+    retried: dryRun ? 0 : results.filter((item) => item.ok && item.retried).length,
+    failed: dryRun ? 0 : results.filter((item) => !item.ok).length,
+    candidates: preflight.candidates,
+    resetPages,
+    results,
+    preflight,
+    workerBatchPreview,
+    recovery: {
+      nextAction: resetPages.length ? "editable/worker-runs preflight + external spend confirmation + LLM provider ready" : "",
+      targetPanel: resetPages.length ? "editable-page-worker-panel" : "",
+      externalImageConfirmationRequired: resetPages.length > 0,
+      pages: resetPages,
+      message: resetPages.length
+        ? `${dryRun ? "检测到" : "已重置"} ${resetPages.length} 个视觉 QA 失败页：${resetPages.join(", ")}。下一步请启动这些 image-to-editable-ppt 页面 worker；启动前仍需要确认外部图片 API 额度，并确保 LLM provider 可用。`
+        : "没有发现需要重置的最终视觉 QA 失败页。"
+    },
+    job: await readWorkflowJob(jobId)
+  };
+}
+
 export async function retryFailedWorkflowPages(jobId, options = {}) {
   const target = normalizeTarget(options.skillId || options.skill || options.target || "auto");
   const reason = cleanString(options.reason || "product bulk retry failed pages");
@@ -146,10 +308,11 @@ export async function retryFailedWorkflowPages(jobId, options = {}) {
   if (target === "auto" || target === "image-to-editable-ppt") {
     const bundle = await listWorkflowEditableWorkerTasks(jobId).catch(() => null);
     for (const task of Array.isArray(bundle?.tasks) ? bundle.tasks : []) {
-      if (task.status === "failed") {
+      if (isFailedEditableRetryCandidate(task)) {
         failed.push({
           skillId: "image-to-editable-ppt",
-          pageId: normalizePageId(task.pageId || task.pageNumber)
+          pageId: normalizePageId(task.pageId || task.pageNumber),
+          reason: summarizeEditableRetryReason(task)
         });
       }
     }
@@ -174,6 +337,7 @@ export async function retryFailedWorkflowPages(jobId, options = {}) {
     const result = await retryWorkflowPage(jobId, task.pageId, {
       ...options,
       skillId: task.skillId,
+      clearGeneratedArtifacts: task.skillId === "image-to-editable-ppt",
       reason
     }).then((value) => ({
       skillId: task.skillId,
@@ -197,6 +361,7 @@ export async function retryFailedWorkflowPages(jobId, options = {}) {
     retried: results.filter((item) => item.ok && item.retried).length,
     failed: results.filter((item) => !item.ok).length,
     results,
+    candidates: uniqueFailed,
     job: await readWorkflowJob(jobId)
   };
 }
@@ -441,7 +606,8 @@ async function retryEditableTask(jobId, pageId, options = {}) {
     ...options,
     reason: options.reason || "product page retry",
     allowQueueOnlyReset: true,
-    confirmLost: true
+    confirmLost: true,
+    clearGeneratedArtifacts: Boolean(options.clearGeneratedArtifacts || isFailedEditableRetryCandidate(task))
   });
   return {
     skillId: "image-to-editable-ppt",
@@ -483,9 +649,36 @@ function dedupeFailedTasks(tasks = []) {
     const key = `${skillId}:${pageId}`;
     if (!pageId || seen.has(key)) continue;
     seen.add(key);
-    result.push({ skillId, pageId });
+    result.push({ skillId, pageId, reason: cleanString(task.reason || "") });
   }
   return result;
+}
+
+function isFailedEditableRetryCandidate(task = {}) {
+  if (!task) return false;
+  return task.status === "failed"
+    || task.validationStatus === "failed"
+    || task.evidence?.validationPassed === false
+    || Boolean(task.evidence?.validationError)
+    || (Array.isArray(task.evidence?.outputContractIssues) && task.evidence.outputContractIssues.length > 0);
+}
+
+function summarizeEditableRetryReason(task = {}) {
+  const errorText = [
+    task.error,
+    task.message,
+    task.evidence?.validationError,
+    ...(Array.isArray(task.evidence?.outputContractIssues) ? task.evidence.outputContractIssues : [])
+  ].filter(Boolean).join(" ");
+  if (/额度已用尽|余额|insufficient[_\s-]?quota|quota|credit|billing/i.test(errorText)) {
+    return "LLM provider quota or balance failure";
+  }
+  if (/HTTP\s*401|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(errorText)) {
+    return "LLM provider authentication failure";
+  }
+  if (task.evidence?.validationError) return cleanString(task.evidence.validationError);
+  if (task.validationStatus === "failed") return "validation failed";
+  return "failed editable page evidence";
 }
 
 function findStaleEvidencePages(evidence = {}) {

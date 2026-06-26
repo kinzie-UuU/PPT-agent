@@ -18,6 +18,21 @@ const REQUIRED_OUTPUTS = [
   "validation.json",
   "page_result.json"
 ];
+const REQUIRED_PAGE_RESULT = {
+  page_manifest: "manifest.json",
+  imagegen_jobs: "imagegen-jobs.json",
+  page_pptx: "page.pptx",
+  preview: "preview.png",
+  contact_sheet: "split_assets_contact.png",
+  validation: "validation.json",
+  page_result: "page_result.json"
+};
+const REQUIRED_QUALITY_CHECKS = [
+  "font_size_calibrated",
+  "visual_inventory_matched",
+  "background_strategy_checked",
+  "shape_corner_geometry_checked"
+];
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -52,6 +67,7 @@ async function main() {
   await runNodeScript("page-rebuild-assembler.mjs", ["--page-dir", pageDir, "--spec", rebuildSpec]);
   ran.push("assemble-page");
   verifyOutputs(pageDir);
+  verifyPageOutputContract(pageDir);
 
   console.log(JSON.stringify({
     ok: true,
@@ -107,6 +123,57 @@ async function runNodeScript(scriptName, args) {
 function verifyOutputs(pageDir) {
   const missing = REQUIRED_OUTPUTS.filter((name) => !fsSync.existsSync(path.join(pageDir, name)));
   if (missing.length) throw new Error(`Page pipeline did not create required output(s): ${missing.join(", ")}`);
+}
+
+function verifyPageOutputContract(pageDir) {
+  const issues = [];
+  const validation = readJsonSync(path.join(pageDir, "validation.json"));
+  if (validation?.passed !== true) issues.push("validation.json must contain top-level passed=true.");
+
+  const pageResult = readJsonSync(path.join(pageDir, "page_result.json"));
+  for (const [key, expected] of Object.entries(REQUIRED_PAGE_RESULT)) {
+    if (pageResult?.[key] !== expected) issues.push(`page_result.json ${key} must be ${expected}.`);
+    if (!fsSync.existsSync(path.join(pageDir, expected))) issues.push(`page_result.json ${key} target is missing: ${expected}.`);
+  }
+
+  const manifest = readJsonSync(path.join(pageDir, "manifest.json"));
+  for (const key of ["slide", "content_box", "source", "text_inventory", "visual_inventory", "background_strategy", "quality_checks", "text_boxes", "shapes", "images", "asset_provenance", "page_strategy"]) {
+    if (!(key in (manifest || {}))) issues.push(`manifest.json missing ${key}.`);
+  }
+  for (const key of REQUIRED_QUALITY_CHECKS) {
+    if (manifest?.quality_checks?.[key] !== true) issues.push(`manifest.json quality_checks.${key} must be true.`);
+  }
+  if (!manifest?.background_strategy?.mode) issues.push("manifest.json background_strategy.mode is required.");
+  if (!manifest?.background_strategy?.source_consistency_contract) issues.push("manifest.json background_strategy.source_consistency_contract is required.");
+  if (!manifest?.background_strategy?.comparison_note) issues.push("manifest.json background_strategy.comparison_note is required.");
+
+  for (const item of Array.isArray(manifest?.text_boxes) ? manifest.text_boxes : []) {
+    if (!isValidBox(item?.box_px)) issues.push(`manifest text box ${item?.id || item?.text || ""} missing valid box_px.`);
+  }
+  for (const item of Array.isArray(manifest?.images) ? manifest.images : []) {
+    if (!isValidBox(item?.box_px)) issues.push(`manifest image ${item?.id || item?.path || ""} missing valid box_px.`);
+  }
+  for (const item of Array.isArray(manifest?.shapes) ? manifest.shapes : []) {
+    if (item?.type === "line") {
+      if (!Array.isArray(item.points_px) || item.points_px.length !== 4) issues.push(`manifest line ${item?.id || ""} missing points_px.`);
+    } else if (!isValidBox(item?.box_px)) {
+      issues.push(`manifest shape ${item?.id || ""} missing valid box_px.`);
+    }
+  }
+
+  if (issues.length) throw new Error(`Page output contract failed: ${issues.join(" | ")}`);
+}
+
+function readJsonSync(filePath) {
+  try {
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error(`Failed to read JSON ${path.basename(filePath)}: ${error.message || error}`);
+  }
+}
+
+function isValidBox(value) {
+  return Array.isArray(value) && value.length === 4 && value.every((item) => Number.isFinite(Number(item))) && Number(value[2]) > 0 && Number(value[3]) > 0;
 }
 
 function visualAssetOutputsExist(pageDir, visualSpec) {
@@ -184,7 +251,8 @@ Behavior:
   2. Require page-rebuild-spec.json.
   3. Run lab:assemble-page.
   4. Verify manifest.json, page.pptx, preview.png, split_assets_contact.png,
-     validation.json, imagegen-jobs.json, and page_result.json exist.
+     validation.json, imagegen-jobs.json, and page_result.json exist and satisfy
+     the image-to-editable-ppt page output contract.
 
 This is intended as the external worker command for page-worker-runner:
   npm.cmd run worker:once -- --job-id <id> --agent-id <worker> --page page_001 --command "npm.cmd run lab:page-pipeline"

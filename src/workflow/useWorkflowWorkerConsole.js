@@ -94,10 +94,11 @@ export function useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunSte
     try {
       const bundle = await api.workflowWorkerBatchPreflight(id, {
         mode: options.mode || "model",
-        maxPages: options.maxPages || workerTaskBundle?.summary?.ready || promptCount || 20,
+        maxPages: options.maxPages || defaultModelWorkerPageLimit(workerTaskBundle?.summary?.ready || promptCount || 0),
         pages: options.pages || "",
         agentPrefix: options.agentPrefix || "product-page-worker",
         confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend),
+        confirmLlmProviderRecovered: Boolean(options.confirmLlmProviderRecovered),
         acceptOfflineTextHints: Boolean(options.acceptOfflineTextHints),
         offlineTextHintsReason: options.offlineTextHintsReason || "",
         autoFinalize: Boolean(options.autoFinalize)
@@ -117,10 +118,11 @@ export function useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunSte
     try {
       const bundle = await api.startWorkflowWorkerBatch(job.id, {
         mode: options.mode || "model",
-        maxPages: options.maxPages || 20,
+        maxPages: options.maxPages || defaultModelWorkerPageLimit(workerTaskBundle?.summary?.ready || promptCount || 0),
         pages: options.pages || "",
         agentPrefix: options.agentPrefix || "product-page-worker",
         confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend),
+        confirmLlmProviderRecovered: Boolean(options.confirmLlmProviderRecovered),
         acceptOfflineTextHints: Boolean(options.acceptOfflineTextHints),
         offlineTextHintsReason: options.offlineTextHintsReason || "",
         autoFinalize: Boolean(options.autoFinalize)
@@ -147,6 +149,8 @@ export function useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunSte
         agentId: agentId.trim() || "worker-001"
       });
       setWorkerBriefBundle(bundle);
+      await loadWorkerBriefs(job.id);
+      await loadWorkerBatchPreflight(job.id);
       await onRefresh?.();
     } catch (err) {
       setPromptError(getErrorMessage(err));
@@ -292,4 +296,10 @@ export function useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunSte
     workerRunBundle,
     workerTasks
   };
+}
+
+function defaultModelWorkerPageLimit(count = 0) {
+  const value = Number(count || 0);
+  if (!Number.isFinite(value) || value <= 0) return 2;
+  return Math.max(1, Math.min(2, Math.round(value)));
 }

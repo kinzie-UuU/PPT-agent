@@ -39,6 +39,7 @@ async function main() {
     specArgs.push("--timeout-ms", String(specTimeoutMs));
     if (args["max-retries"] !== undefined) specArgs.push("--max-retries", String(args["max-retries"]));
     if (args["max-tokens"]) specArgs.push("--max-tokens", String(args["max-tokens"]));
+    removeStaleVisualAssetSpec(visualSpecPath);
     await runModelSpecWithAssetRetry(specArgs, pageDir, visualSpecPath);
   }
 
@@ -54,14 +55,26 @@ async function main() {
 }
 
 async function runModelSpecWithAssetRetry(specArgs, pageDir, visualSpecPath) {
+  const startedAtMs = Date.now();
   try {
     await runNode(specArgs);
     return;
   } catch (error) {
-    if (!fsSync.existsSync(visualSpecPath)) throw error;
+    if (!isCurrentVisualAssetSpec(visualSpecPath, startedAtMs)) throw error;
     await runNode([path.join(SCRIPT_DIR, "visual-asset-helper.mjs"), "--page-dir", pageDir, "--spec", visualSpecPath]);
     await runNode(specArgs);
   }
+}
+
+function removeStaleVisualAssetSpec(visualSpecPath) {
+  if (!fsSync.existsSync(visualSpecPath)) return;
+  fsSync.rmSync(visualSpecPath, { force: true });
+}
+
+function isCurrentVisualAssetSpec(visualSpecPath, startedAtMs) {
+  if (!fsSync.existsSync(visualSpecPath)) return false;
+  const stat = fsSync.statSync(visualSpecPath);
+  return stat.mtimeMs >= startedAtMs - 1000;
 }
 
 async function runNode(args) {

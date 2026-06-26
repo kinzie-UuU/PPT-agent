@@ -2,10 +2,11 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import os from "os";
+import crypto from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
-import { inspectEditablePptx } from "./pptxEditability.js";
+import { inspectEditablePptx, inspectPowerPointOpenability } from "./pptxEditability.js";
 import { runWorkflowOcr } from "./workflowOcr.js";
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,15 @@ const DEFAULT_SKILL_ROOT = firstExistingPath([
 ]);
 const DEFAULT_TIMEOUT_MS = 180000;
 const DEFAULT_EDITABLE_RUN_ROOT = path.join(os.tmpdir(), "ppt-tool-editable-runs");
+const REPAIR_HASH_KEYS = [
+  "page_manifest",
+  "imagegen_jobs",
+  "page_pptx",
+  "preview",
+  "contact_sheet",
+  "validation",
+  "page_result"
+];
 
 export async function testEditableRuntime(overrides = {}) {
   const runtime = getEditableRuntimeConfig(overrides);
@@ -66,7 +76,7 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const runtime = getEditableRuntimeConfig(options);
   const artifacts = job.artifacts || {};
-  const inputs = getEditablePrepareInputs(job);
+  const inputs = getEditablePrepareInputs(job, options);
   const visualQuality = artifacts.visualQuality || {};
   const qualitySummary = normalizeVisualQualitySummary(visualQuality);
   const visualReviewCurrent = isVisualQualityReviewCurrent(artifacts);
@@ -167,7 +177,7 @@ export async function prepareWorkflowEditableRun(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
   const runtime = getEditableRuntimeConfig(options);
   assertVisualQualityGate(job, options);
-  let inputs = getEditablePrepareInputs(job);
+  let inputs = getEditablePrepareInputs(job, options);
   if (!inputs.length) throw new Error("No visual images available for editable prepare. Run visual/generate first.");
   if (!hasRapidOcrTextHints(job) && options.skipRapidOcr !== true && options.noTextHints !== true) {
     await runWorkflowOcr(jobId, {
@@ -177,7 +187,7 @@ export async function prepareWorkflowEditableRun(jobId, options = {}) {
       note: "auto-run local RapidOCR before image-to-editable-ppt prepare"
     });
     job = await readWorkflowJob(jobId);
-    inputs = getEditablePrepareInputs(job);
+    inputs = getEditablePrepareInputs(job, options);
   }
   await fs.mkdir(job.dirs.editableRun, { recursive: true });
   const layout = getEditableRunLayout(job, options);
@@ -602,6 +612,12 @@ export async function recordWorkflowEditablePage(jobId, options = {}) {
   if (allRecorded) {
     job.stages.finalizing = markStage(job.stages.finalizing, "pending", "Editable pages recorded; final assembly pending", { runDir });
   }
+  const recordCreatedAt = new Date().toISOString();
+  const editableWorkerTasks = syncEditableWorkerTaskAfterRecord(job.artifacts?.editableWorkerTasks, {
+    pageId,
+    agentId,
+    recordCreatedAt
+  });
   job.artifacts = {
     ...(job.artifacts || {}),
     editableRecords: [...(Array.isArray(job.artifacts?.editableRecords) ? job.artifacts.editableRecords : []), {
@@ -612,12 +628,51 @@ export async function recordWorkflowEditablePage(jobId, options = {}) {
       record: recordPayload,
       stdout: record.stdout,
       stderr: record.stderr,
-      createdAt: new Date().toISOString()
+      createdAt: recordCreatedAt
     }].slice(-200),
+    editableWorkerTasks,
     editableNext: { kind: "editable_next", runDir, next, checkedAt: new Date().toISOString() }
   };
   job.events = appendEvent(job.events, "editable.recorded", `Recorded ${pageId}`, { pageId, agentId, nextStage: next.stage });
   return saveWorkflowJob(job);
+}
+
+function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, recordCreatedAt } = {}) {
+  const normalizedPageId = normalizePageId(pageId);
+  if (!normalizedPageId) return Array.isArray(tasks) ? tasks : [];
+  const now = recordCreatedAt || new Date().toISOString();
+  const normalizedTasks = Array.isArray(tasks) ? tasks.map((task) => ({ ...task })) : [];
+  const index = normalizedTasks.findIndex((task) => normalizePageId(task.pageId || task.page) === normalizedPageId);
+  const update = {
+    pageId: normalizedPageId,
+    status: "recorded",
+    agentId: cleanString(agentId || ""),
+    heartbeatAt: now,
+    recordedAt: now,
+    error: "",
+    updatedAt: now
+  };
+  if (index >= 0) {
+    normalizedTasks[index] = {
+      ...normalizedTasks[index],
+      ...update,
+      agentId: update.agentId || cleanString(normalizedTasks[index].agentId || ""),
+      message: cleanString(normalizedTasks[index].message || "")
+    };
+    return normalizedTasks;
+  }
+  return [...normalizedTasks, {
+    ...update,
+    promptFile: "",
+    pageDir: "",
+    relativePath: "",
+    workerName: "",
+    attempts: 0,
+    claimedAt: "",
+    dispatchAt: "",
+    message: "",
+    createdAt: now
+  }];
 }
 
 export async function rebuildWorkflowEditableLocalPage(jobId, options = {}) {
@@ -740,7 +795,7 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     await fs.copyFile(validationSource, targetValidation);
     validationRecord = artifactRecord("editable_validation", targetValidation);
   }
-  const editability = await inspectEditablePptx(finalPath).catch((error) => ({
+  let editability = await inspectEditablePptx(finalPath).catch((error) => ({
     version: 1,
     source: "pptx-openxml-inspection",
     status: "warn",
@@ -748,12 +803,50 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     warnings: ["pptx-editability-inspection-failed"],
     error: error.message || "inspection failed"
   }));
+  let powerPointOpenability = await inspectPowerPointOpenability(finalPath).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-open",
+    available: process.platform === "win32",
+    openable: false,
+    slideCount: 0,
+    warnings: ["powerpoint-open-check-failed"],
+    error: error.message || "PowerPoint open check failed"
+  }));
+  const shouldRunOpenableRepair = options.disableOpenableRepair !== true
+    && (powerPointOpenability.openable === false || options.forceOpenableRepair === true || options.repairPagePptx === true);
+  const openableRepair = shouldRunOpenableRepair
+    ? await repairEditablePptxWithOpenableManifestWriter(runDir, finalPath, runtime).catch((error) => ({
+        ok: false,
+        error: error.message || "openable manifest repair failed"
+      }))
+    : null;
+  if (openableRepair?.ok) {
+    editability = await inspectEditablePptx(finalPath).catch((error) => ({
+      version: 1,
+      source: "pptx-openxml-inspection",
+      status: "warn",
+      editable: false,
+      warnings: ["pptx-editability-inspection-failed"],
+      error: error.message || "inspection failed"
+    }));
+    powerPointOpenability = await inspectPowerPointOpenability(finalPath).catch((error) => ({
+      version: 1,
+      source: "powerpoint-com-open",
+      available: process.platform === "win32",
+      openable: false,
+      slideCount: 0,
+      warnings: ["powerpoint-open-check-failed"],
+      error: error.message || "PowerPoint open check failed"
+    }));
+  }
   const finalRecord = artifactRecord("editable_final_pptx", finalPath, {
     runDir,
     sourceOutputPath: outputPath,
     summary,
     validation: validationRecord,
-    pptxEditability: editability
+    pptxEditability: editability,
+    powerPointOpenability,
+    openableRepair
   });
   job.artifacts = {
     ...(job.artifacts || {}),
@@ -763,9 +856,118 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
   job.status = "complete";
   job.stageStatus = "complete";
   job.stages.finalizing = markStage(job.stages.finalizing, "complete", "Final editable PPTX assembled", { finalPath, runDir });
-  job.stages.complete = markStage(job.stages.complete, "complete", "Workflow complete", { finalPath, editability });
-  job.events = appendEvent(job.events, "editable.finalized", "Final editable PPTX assembled", { finalPath, runDir, editable: editability.editable });
+  job.stages.complete = markStage(job.stages.complete, "complete", "Workflow complete", { finalPath, editability, powerPointOpenability });
+  job.events = appendEvent(job.events, "editable.finalized", "Final editable PPTX assembled", {
+    finalPath,
+    runDir,
+    editable: editability.editable,
+    powerPointOpenable: powerPointOpenability.openable
+  });
   return saveWorkflowJob(job);
+}
+
+async function repairEditablePptxWithOpenableManifestWriter(runDir, finalPath, runtime = {}) {
+  const scriptPath = path.join(process.cwd(), "scripts", "openable-manifest-pptx.mjs");
+  const deckManifest = path.join(runDir, "deck_manifest.json");
+  const pageJobsPath = path.join(runDir, "page_jobs.json");
+  if (!fsSync.existsSync(scriptPath)) throw new Error(`Openable manifest writer not found: ${scriptPath}`);
+  if (!fsSync.existsSync(deckManifest)) throw new Error(`deck_manifest.json not found: ${deckManifest}`);
+  const deck = await readJson(deckManifest);
+  const root = path.resolve(deck.job_dir || runDir);
+  const pageRepairs = [];
+  for (const page of Array.isArray(deck.pages) ? deck.pages : []) {
+    const manifestPath = path.resolve(root, page.manifest || "");
+    if (!fsSync.existsSync(manifestPath)) continue;
+    const pageDir = path.dirname(manifestPath);
+    const pageOut = path.join(pageDir, "page.pptx");
+    const result = await execFileAsync(process.execPath, [scriptPath, "--manifest", manifestPath, "--out", pageOut], {
+      cwd: process.cwd(),
+      timeout: runtime.timeoutMs || DEFAULT_TIMEOUT_MS,
+      windowsHide: true,
+      encoding: "utf8"
+    });
+    pageRepairs.push({
+      pageId: normalizePageId(page.page_id || path.basename(pageDir)),
+      manifestPath,
+      pageOut,
+      stdout: String(result.stdout || "").slice(-2000),
+      stderr: String(result.stderr || "").slice(-2000)
+    });
+  }
+  const hashRefresh = await refreshOpenableRepairPageJobHashes(runDir, pageJobsPath, pageRepairs).catch((error) => ({
+    ok: false,
+    error: error.message || "failed to refresh repaired page hashes"
+  }));
+  const finalResult = await execFileAsync(process.execPath, [scriptPath, "--deck-manifest", deckManifest, "--out", finalPath], {
+    cwd: process.cwd(),
+    timeout: runtime.timeoutMs || DEFAULT_TIMEOUT_MS,
+    windowsHide: true,
+    encoding: "utf8"
+  });
+  return {
+    ok: true,
+    source: "pptxgenjs-manifest-openable-repair",
+    pageRepairs: pageRepairs.length,
+    repairedPages: pageRepairs.map((item) => item.pageId).filter(Boolean),
+    pageJobHashRefresh: hashRefresh,
+    finalPath,
+    stdout: String(finalResult.stdout || "").slice(-2000),
+    stderr: String(finalResult.stderr || "").slice(-2000)
+  };
+}
+
+async function refreshOpenableRepairPageJobHashes(runDir, pageJobsPath, pageRepairs = []) {
+  if (!fsSync.existsSync(pageJobsPath)) return { ok: false, refreshed: 0, error: `page_jobs.json not found: ${pageJobsPath}` };
+  const pageJobs = await readJson(pageJobsPath);
+  const pages = Array.isArray(pageJobs.pages) ? pageJobs.pages : [];
+  const repairByPage = new Map(pageRepairs.map((repair) => [normalizePageId(repair.pageId || path.basename(path.dirname(repair.pageOut || ""))), repair]));
+  const refreshedPages = [];
+  const refreshedOutputs = [];
+  for (const page of pages) {
+    const pageId = normalizePageId(page.page_id || page.pageId || "");
+    const repair = repairByPage.get(pageId);
+    if (!repair?.pageOut || !fsSync.existsSync(repair.pageOut)) continue;
+    page.result = page.result && typeof page.result === "object" ? page.result : {};
+    page.result.hashes = page.result.hashes && typeof page.result.hashes === "object" ? page.result.hashes : {};
+    page.result.outputs = page.result.outputs && typeof page.result.outputs === "object" ? page.result.outputs : {};
+    page.result.outputs.page_pptx = page.result.outputs.page_pptx || path.join("pages", pageId, "page.pptx").replace(/\\/g, "/");
+    for (const key of REPAIR_HASH_KEYS) {
+      const relative = page.result.outputs[key] || fallbackEditableOutputPath(pageId, key);
+      const filePath = resolveEditableRunPath(runDir, relative);
+      if (!filePath || !fsSync.existsSync(filePath) || !fsSync.statSync(filePath).isFile()) continue;
+      page.result.outputs[key] = relative.replace(/\\/g, "/");
+      page.result.hashes[key] = await hashFile(filePath);
+      refreshedOutputs.push(`${pageId}:${key}`);
+    }
+    page.result.openable_repair = {
+      source: "pptxgenjs-manifest-openable-repair",
+      repairedAt: new Date().toISOString(),
+      pagePptx: page.result.outputs.page_pptx
+    };
+    refreshedPages.push(pageId);
+  }
+  pageJobs.updated_at = new Date().toISOString();
+  await fs.writeFile(pageJobsPath, JSON.stringify(pageJobs, null, 2), "utf8");
+  return { ok: true, refreshed: refreshedPages.length, pages: refreshedPages, outputs: refreshedOutputs };
+}
+
+function fallbackEditableOutputPath(pageId, key) {
+  const names = {
+    page_manifest: "manifest.json",
+    imagegen_jobs: "imagegen-jobs.json",
+    page_pptx: "page.pptx",
+    preview: "preview.png",
+    contact_sheet: "split_assets_contact.png",
+    validation: "validation.json",
+    page_result: "page_result.json"
+  };
+  return path.join("pages", pageId, names[key] || key).replace(/\\/g, "/");
+}
+
+function resolveEditableRunPath(runDir, value = "") {
+  const raw = String(value || "");
+  if (!raw) return "";
+  return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(runDir, raw);
 }
 
 function getEditableRuntimeConfig(overrides = {}) {
@@ -900,10 +1102,13 @@ async function getEditableNextForRun(runDir, runtime) {
   return parseJsonOutput(result.stdout) || { raw: result.stdout };
 }
 
-function getEditablePrepareInputs(job) {
+function getEditablePrepareInputs(job, options = {}) {
   const visualImages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [];
+  const selectedPages = normalizePages(options.pages || options.pageIds || options.pageId || []);
+  const selectedSet = new Set(selectedPages);
   return visualImages
     .filter((item) => item?.path && fsSync.existsSync(item.path))
+    .filter((item, index) => !selectedSet.size || selectedSet.has(normalizePageId(item.pageId || index + 1)))
     .map((item, index) => ({
       pageId: item.pageId || `page_${String(index + 1).padStart(3, "0")}`,
       pageNumber: Number(item.pageNumber || index + 1),
@@ -1233,7 +1438,23 @@ function parseJsonOutput(stdout = "") {
 
 function normalizePages(value) {
   const raw = Array.isArray(value) ? value : String(value || "").split(/[,\s]+/);
-  return raw.map((item) => normalizePageId(item)).filter(Boolean);
+  const pages = [];
+  for (const item of raw) {
+    const text = String(item || "").trim();
+    const range = text.match(/^(?:page_)?(\d{1,3})-(?:page_)?(\d{1,3})$/i);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (Number.isFinite(start) && Number.isFinite(end)) {
+        const low = Math.min(start, end);
+        const high = Math.max(start, end);
+        for (let page = low; page <= high; page += 1) pages.push(normalizePageId(page));
+      }
+      continue;
+    }
+    pages.push(normalizePageId(text));
+  }
+  return [...new Set(pages.filter(Boolean))];
 }
 
 function normalizePageId(value = "") {
@@ -1261,6 +1482,11 @@ function summarizeCommand(result) {
 
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, "utf8"));
+}
+
+async function hashFile(filePath) {
+  const buffer = await fs.readFile(filePath);
+  return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
 function clampInteger(value, min, max, fallback) {

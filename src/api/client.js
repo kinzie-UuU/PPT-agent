@@ -278,6 +278,9 @@ export const api = {
   async workflowWorkerBatchPreflight(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/editable/worker-runs/preflight`, body);
   },
+  async probeWorkflowPageSpecProvider(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/editable/page-spec-provider/probe`, body);
+  },
   async startWorkflowWorkerBatch(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/editable/worker-runs`, body);
   },
@@ -295,6 +298,12 @@ export const api = {
   },
   async visualQualityRetryPreflight(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/visual-quality/retry-preflight`, body);
+  },
+  async finalVisualQaRetryPreflight(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/final-visual-qa/retry-preflight`, body);
+  },
+  async retryFinalVisualQaPages(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/final-visual-qa/retry`, body);
   },
   async approveWorkflowVisualQualityReview(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/visual-quality/review/approve`, body);

@@ -29,6 +29,7 @@ export function getProviderConfig(env = globalThis.process?.env || {}) {
       maskedApiKey: maskSecret(apiKey),
       baseUrl,
       model: env.OPENAI_MODEL || env.LLM_MODEL || DEFAULT_LLM_MODEL,
+      pageSpecModel: env.PAGE_SPEC_MODEL || env.OPENAI_VISION_MODEL || env.OPENAI_MODEL || env.LLM_MODEL || DEFAULT_LLM_MODEL,
       timeoutMs,
       maxRetries,
       concurrency
@@ -106,6 +107,54 @@ export async function testLlmProvider(overrides = {}) {
   };
 }
 
+export async function testPageSpecProvider(overrides = {}) {
+  const config = mergeLlmConfig({
+    ...overrides,
+    model: overrides.model || process.env.PAGE_SPEC_MODEL || process.env.OPENAI_VISION_MODEL
+  });
+  const imagePath = String(overrides.imagePath || "").trim();
+  const runVisionProbe = overrides.visionProbe !== false && Boolean(imagePath && fsSync.existsSync(imagePath));
+  const result = {
+    ok: false,
+    configured: Boolean(config.apiKey),
+    provider: publicProviderConfig(config),
+    checks: {
+      apiKey: Boolean(config.apiKey),
+      model: Boolean(config.model),
+      textJson: null,
+      visionJson: null,
+      nonEmpty: false
+    },
+    imagePath: runVisionProbe ? imagePath : "",
+    message: ""
+  };
+  if (!config.apiKey) {
+    result.message = "Missing API key";
+    return result;
+  }
+  result.checks.textJson = await runPageSpecProbe({
+    config,
+    includeImage: false,
+    prompt: "Return JSON only: {\"ok\":true,\"mode\":\"text-json\"}",
+    maxTokens: overrides.textMaxTokens || 128
+  });
+  if (runVisionProbe) {
+    result.checks.visionJson = await runPageSpecProbe({
+      config,
+      includeImage: true,
+      imagePath,
+      prompt: "Look at this slide image and return JSON only: {\"ok\":true,\"mode\":\"vision-json\"}",
+      maxTokens: overrides.visionMaxTokens || 512
+    });
+  }
+  result.checks.nonEmpty = Boolean(result.checks.textJson?.contentLength || result.checks.visionJson?.contentLength);
+  result.ok = Boolean(result.checks.textJson?.ok && (!runVisionProbe || result.checks.visionJson?.ok));
+  result.message = result.ok
+    ? "Page spec provider supports non-empty JSON output for the requested probe."
+    : buildPageSpecProbeMessage(result.checks, runVisionProbe);
+  return result;
+}
+
 export async function listLlmModels(overrides = {}) {
   const config = mergeLlmConfig(overrides);
   if (!config.apiKey) return { ok: false, configured: false, provider: publicProviderConfig(config), error: "Missing API key", models: [] };
@@ -134,6 +183,125 @@ export async function listLlmModels(overrides = {}) {
     chatModels: models.filter((id) => !/embedding|audio|tts|whisper|image|moderation|realtime|transcribe/i.test(id)),
     imageModels: models.filter((id) => /image|gpt-image|dall-e/i.test(id))
   };
+}
+
+async function runPageSpecProbe({ config, includeImage = false, imagePath = "", prompt = "", maxTokens = 256 }) {
+  const attempts = [
+    { responseFormat: true, reason: "json_object" },
+    { responseFormat: false, reason: "plain-json-fallback" }
+  ];
+  const records = [];
+  let last = null;
+  for (const attempt of attempts) {
+    last = await runSinglePageSpecProbe({ config, includeImage, imagePath, prompt, maxTokens, attempt });
+    records.push(last);
+    if (last.ok) break;
+  }
+  return {
+    ...(last || { ok: false, error: "Page spec probe did not run.", contentLength: 0, finishReason: "" }),
+    attempts: records
+  };
+}
+
+async function runSinglePageSpecProbe({ config, includeImage = false, imagePath = "", prompt = "", maxTokens = 256, attempt = {} }) {
+  try {
+    const content = [{ type: "text", text: prompt || "Return JSON only: {\"ok\":true}" }];
+    if (includeImage) {
+      content.push({ type: "image_url", image_url: { url: await imageDataUrl(imagePath) } });
+    }
+    const body = {
+      model: config.model,
+      messages: [{ role: "user", content }],
+      max_tokens: clampNumber(maxTokens, 32, 2048, includeImage ? 512 : 128),
+      temperature: 0
+    };
+    if (attempt.responseFormat) body.response_format = { type: "json_object" };
+    const result = await requestOpenAiCompatible(config.baseUrl, "/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` },
+      body: JSON.stringify(body),
+      timeoutMs: config.timeoutMs,
+      maxRetries: config.maxRetries
+    });
+    if (!result.response.ok) {
+      return {
+        ok: false,
+        status: result.response.status,
+        baseUrl: stripEndpoint(result.url, "/chat/completions"),
+        error: await readProviderError(result.response),
+        contentLength: 0,
+        finishReason: "",
+        reason: attempt.reason || "",
+        responseFormat: Boolean(attempt.responseFormat)
+      };
+    }
+    const data = await result.response.json();
+    const contentText = extractChatContent(data);
+    let parsed = null;
+    let parseError = "";
+    try {
+      parsed = JSON.parse(String(contentText || "").trim());
+    } catch (error) {
+      parseError = error.message || String(error);
+    }
+    const parsedOk = Boolean(parsed && typeof parsed === "object" && parsed.ok === true);
+    return {
+      ok: Boolean(contentText && parsedOk),
+      baseUrl: stripEndpoint(result.url, "/chat/completions"),
+      contentLength: String(contentText || "").length,
+      finishReason: data.choices?.[0]?.finish_reason || "",
+      usage: data.usage || null,
+      parsedOk,
+      parseError,
+      sample: String(contentText || "").slice(0, 160),
+      reason: attempt.reason || "",
+      responseFormat: Boolean(attempt.responseFormat)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || String(error),
+      contentLength: 0,
+      finishReason: "",
+      reason: attempt.reason || "",
+      responseFormat: Boolean(attempt.responseFormat)
+    };
+  }
+}
+
+async function imageDataUrl(filePath = "") {
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+  const buffer = await fs.readFile(filePath);
+  return `data:${mime};base64,${buffer.toString("base64")}`;
+}
+
+function extractChatContent(data = {}) {
+  const message = data.choices?.[0]?.message || {};
+  const content = message.content ?? data.output_text ?? data.text ?? "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((part) => typeof part === "string" ? part : part?.text || part?.content || part?.output_text || "").filter(Boolean).join("\n");
+  }
+  if (message.parsed && typeof message.parsed === "object") return JSON.stringify(message.parsed);
+  const toolCallArgs = message.tool_calls?.[0]?.function?.arguments;
+  return typeof toolCallArgs === "string" ? toolCallArgs : "";
+}
+
+function buildPageSpecProbeMessage(checks = {}, ranVisionProbe = false) {
+  if (!checks.textJson?.ok) {
+    if (checks.textJson?.status) return `Page spec model text JSON probe failed with HTTP ${checks.textJson.status}: ${checks.textJson.error || "provider error"}`;
+    if (checks.textJson?.finishReason === "length") return "Page spec model text JSON probe was truncated before returning parseable JSON.";
+    if (checks.textJson?.contentLength === 0) return "Page spec model returned empty content for JSON probe.";
+    return checks.textJson?.error || checks.textJson?.parseError || "Page spec model did not return parseable JSON.";
+  }
+  if (ranVisionProbe && !checks.visionJson?.ok) {
+    if (checks.visionJson?.status) return `Page spec model vision JSON probe failed with HTTP ${checks.visionJson.status}: ${checks.visionJson.error || "provider error"}`;
+    if (checks.visionJson?.finishReason === "length") return "Page spec model vision JSON probe was truncated before returning parseable JSON.";
+    if (checks.visionJson?.contentLength === 0) return "Page spec model returned empty content for vision JSON probe.";
+    return checks.visionJson?.error || checks.visionJson?.parseError || "Page spec model does not support image input with JSON output.";
+  }
+  return "Page spec provider probe failed.";
 }
 
 export async function testImageProvider(overrides = {}) {

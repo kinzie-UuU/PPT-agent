@@ -4,12 +4,13 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { rootDir } from "./store.js";
-import { getLatestV1AcceptanceReport, v1AcceptanceRootDir } from "./workflowV1AcceptanceReport.js";
-import { readWorkflowJob } from "./workflowJobs.js";
+import { getLatestV1AcceptanceReport, v1AcceptanceRootDir, writeV1AcceptanceReport } from "./workflowV1AcceptanceReport.js";
+import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { getWorkflowNextActionPreflight } from "./workflowNextAction.js";
 import { authorizeExternalImageSpend } from "./workflowAuthorizations.js";
 import { approveCodexPptGate, preflightCodexPptGate } from "./workflowApprovals.js";
-import { assembleWorkflowImageDeck, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages } from "./workflowVisuals.js";
+import { invalidateWorkflowEditableRebuildEvidence } from "./workflowEditable.js";
+import { appendEvent, artifactRecord, assembleWorkflowImageDeck, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages, parsePageSelection } from "./workflowVisuals.js";
 
 const execFileAsync = promisify(execFile);
 const latestProductVisualReadinessPath = path.join(v1AcceptanceRootDir, "latest-product-visual-readiness.json");
@@ -156,6 +157,10 @@ export async function getProductVisualSamplePreflight(options = {}) {
   const provider = latest?.result?.provider || {};
   const imageEditReady = Boolean(provider.configured && provider.enabled && provider.supportsImageEdit !== false);
   const readyIfConfirmed = Boolean(isSampleAction && confirmedPreview.startReady && !confirmedPreview.didRun && imageEditReady);
+  const promptPreviewStatus = await getProductVisualSamplePromptPreviewStatus(jobId, {
+    ...base,
+    provider
+  });
   const blockingIssues = [
     ...(!isSampleAction ? [`当前运行手册下一步不是 visual/sample：${action || "无"}`] : []),
     ...(!imageEditReady ? ["图片 API 未声明支持源页参考图重绘，不能生成产品级样张。"] : []),
@@ -163,6 +168,7 @@ export async function getProductVisualSamplePreflight(options = {}) {
   ].filter(Boolean);
   const warnings = [
     ...(blockedPreview.requiredConfirmation ? ["生成真实样张前必须确认外部图片 API 额度。"] : []),
+    ...(!promptPreviewStatus.ready ? [promptPreviewStatus.message] : []),
     ...(confirmedPreview.warnings || [])
   ].filter(Boolean);
   const checks = [
@@ -171,6 +177,7 @@ export async function getProductVisualSamplePreflight(options = {}) {
     { id: "runbook-action", ok: isSampleAction, label: "运行手册动作", detail: action || "无" },
     { id: "provider", ok: Boolean(provider.configured && provider.enabled), label: "图片 API", detail: provider.model || "未配置" },
     { id: "image-edit-provider", ok: imageEditReady, label: "源页参考图重绘", detail: imageEditReady ? (provider.editEndpoint || "/images/edits") : "未启用" },
+    { id: "prompt-preview", ok: promptPreviewStatus.ready, label: "Prompt 证据", detail: promptPreviewStatus.label },
     { id: "approval-gates", ok: Boolean(latest?.result?.approvals?.passed >= 3), label: "大纲/风格/后端", detail: `${latest?.result?.approvals?.passed || 0}/${latest?.result?.approvals?.total || 5}` },
     { id: "external-spend-confirmation", ok: Boolean(blockedPreview.requiredConfirmation === "externalImageSpend" || readyIfConfirmed), label: "额度确认门槛", detail: "1 次图片调用" }
   ];
@@ -184,6 +191,18 @@ export async function getProductVisualSamplePreflight(options = {}) {
     targetPages: 1,
     requiredConfirmation: "externalImageSpend",
     readyIfConfirmed,
+    blockingIssues
+  });
+  const authorizationPreview = buildAuthorizationPreview({
+    phase: "sample",
+    label: "生成 1 页真实产品级样张",
+    job,
+    provider,
+    promptPreviewStatus,
+    externalImageCalls: 1,
+    readyIfConfirmed,
+    requiredConfirmation: "externalImageSpend",
+    nextAction: "product-visual-sample-run",
     blockingIssues
   });
 
@@ -206,6 +225,8 @@ export async function getProductVisualSamplePreflight(options = {}) {
     blockingIssues,
     warnings,
     executionSnapshot,
+    authorizationPreview,
+    promptPreviewStatus,
     blockedPreview: compactPreflight(blockedPreview),
     confirmedPreview: compactPreflight(confirmedPreview),
     summary: readyIfConfirmed
@@ -281,7 +302,12 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
   }
 
   const renderedPageCount = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : pageCount;
-  const calls = clampInteger(options.maxPages || renderedPageCount || pageCount, 1, 50, pageCount);
+  const requestedPages = cleanString(options.pages || options.pageNumbers || "");
+  const requestedMaxPages = clampInteger(options.maxPages || renderedPageCount || pageCount, 1, 50, pageCount);
+  const selectedPages = requestedPages
+    ? parsePageSelection(requestedPages, renderedPageCount || pageCount).slice(0, requestedMaxPages)
+    : parsePageSelection("", renderedPageCount || pageCount).slice(0, requestedMaxPages);
+  const calls = selectedPages.length;
   const provider = latest?.result?.provider || {};
   const approved = getApprovedGateSet(job);
   const sample = job.artifacts?.visualSample || null;
@@ -295,7 +321,8 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     ...(sample?.path && !sampleProduct ? ["当前样张仍是 dry-run/passthrough、缺少 sha256，或没有源页面图片参考证据，不能作为产品级样张。"] : []),
     ...(!sampleApproved ? ["样张关卡尚未确认。"] : []),
     ...(!fullDeckApproved ? ["全量生成关卡尚未授权。"] : []),
-    ...(!renderedPageCount ? ["缺少可生成的源页面。"] : [])
+    ...(!renderedPageCount ? ["缺少可生成的源页面。"] : []),
+    ...(requestedPages && !selectedPages.length ? [`指定页码无效或超出范围：${requestedPages}。有效范围是 1-${renderedPageCount || pageCount}。`] : [])
   ];
   const checks = [
     { id: "latest-readiness", ok: true, label: "最新无费用预检", detail: latestBundle.latestRelativePath || "latest-product-visual-readiness.json" },
@@ -306,6 +333,7 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     { id: "sample-approval", ok: sampleApproved, label: "样张确认", detail: sampleApproved ? "已确认" : "待确认" },
     { id: "full-deck-approval", ok: fullDeckApproved, label: "全量授权", detail: fullDeckApproved ? "已授权" : "待授权" },
     { id: "source-pages", ok: Boolean(renderedPageCount), label: "目标页数", detail: `${renderedPageCount || calls} 页` },
+    { id: "page-selection", ok: Boolean(selectedPages.length), label: "生成页码", detail: selectedPages.length ? selectedPages.join(",") : requestedPages || `1-${requestedMaxPages}` },
     { id: "external-spend-confirmation", ok: true, label: "额度确认门槛", detail: `${calls} 次图片调用` }
   ];
   const readyIfConfirmed = blockingIssues.length === 0;
@@ -324,6 +352,8 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
   return {
     ...base,
     externalImageCalls: calls,
+    pages: selectedPages,
+    requestedPages,
     ready: readyIfConfirmed,
     readyIfConfirmed,
     job: {
@@ -393,25 +423,27 @@ export async function getProductVisualSamplePromptPreview(options = {}) {
   const prompts = buildVisualPromptsPayload(job, renderedPages, options);
   const promptRecord = prompts.pages[pageNumber - 1] || null;
   const sourcePage = renderedPages[pageNumber - 1] || null;
+  const promptPreview = {
+    kind: "product_visual_sample_prompt_preview",
+    pageNumber,
+    pageId: sourcePage?.pageId || promptRecord?.pageId || "",
+    sourcePagePath: sourcePage?.path || promptRecord?.sourcePagePath || "",
+    sourcePageLink: sourcePage ? makeWorkflowArtifactLink(jobId, "rendered-page", sourcePage.pageId || `page_${String(pageNumber).padStart(3, "0")}`) : null,
+    provider: preflight.provider || null,
+    styleBrief: prompts.styleBrief || "",
+    imageInputMode: "source-page-edit",
+    sourceReferenceRequired: true,
+    prompt: promptRecord?.prompt || "",
+    promptExcerpt: excerptText(promptRecord?.prompt || "", 520),
+    promptLength: String(promptRecord?.prompt || "").length,
+    externalImageCalls: 1,
+    instruction: "这是即将用于真实 codex-ppt 样张的 prompt 预览；本接口不生成图片，不消耗外部 API。"
+  };
+  const persistedPromptPreview = await persistProductVisualSamplePromptPreview(job, promptPreview);
   return {
     ...base,
     ready: true,
-    promptPreview: {
-      kind: "product_visual_sample_prompt_preview",
-      pageNumber,
-      pageId: sourcePage?.pageId || promptRecord?.pageId || "",
-      sourcePagePath: sourcePage?.path || promptRecord?.sourcePagePath || "",
-      sourcePageLink: sourcePage ? makeWorkflowArtifactLink(jobId, "rendered-page", sourcePage.pageId || `page_${String(pageNumber).padStart(3, "0")}`) : null,
-      provider: preflight.provider || null,
-      styleBrief: prompts.styleBrief || "",
-      imageInputMode: "source-page-edit",
-      sourceReferenceRequired: true,
-      prompt: promptRecord?.prompt || "",
-      promptExcerpt: excerptText(promptRecord?.prompt || "", 520),
-      promptLength: String(promptRecord?.prompt || "").length,
-      externalImageCalls: 1,
-      instruction: "这是即将用于真实 codex-ppt 样张的 prompt 预览；本接口不生成图片，不消耗外部 API。"
-    },
+    promptPreview: persistedPromptPreview,
     summary: "真实样张 prompt 已可预览；确认无误后才进入 1 次外部图片 API 生成。"
   };
 }
@@ -447,6 +479,7 @@ export async function runProductVisualSample(options = {}) {
     error.preflight = preflight;
     throw error;
   }
+  const promptPreviewEvidence = await assertProductVisualSamplePromptPreviewReady(jobId, preflight);
   const authorization = await authorizeExternalImageSpend(jobId, {
     scope: "visual-sample",
     imageCalls: 1,
@@ -470,6 +503,7 @@ export async function runProductVisualSample(options = {}) {
     jobId,
     authorization: authorization.authorization,
     provider: preflight.provider,
+    promptPreview: promptPreviewEvidence,
     sample: job.artifacts?.visualSample || null,
     sampleLink: makeWorkflowArtifactLink(jobId, "visual-sample"),
     runbook: preflight.runbook,
@@ -480,6 +514,118 @@ export async function runProductVisualSample(options = {}) {
       currentStage: job.currentStage || "",
       visualSample: Boolean(job.artifacts?.visualSample?.path)
     }
+  };
+}
+
+async function assertProductVisualSamplePromptPreviewReady(jobId, preflight = {}) {
+  const job = await readWorkflowJob(jobId);
+  const artifact = job.artifacts?.codexPptSamplePromptPreview || null;
+  const previewPath = artifact?.path || path.join(job.rootDir, "codex-ppt", "sample_prompt_preview.json");
+  let preview = null;
+  try {
+    preview = JSON.parse(await fs.readFile(previewPath, "utf8"));
+  } catch {
+    const error = new Error("生成真实 codex-ppt 样张前，请先预览并保存当前样张 prompt。");
+    error.code = "PRODUCT_VISUAL_SAMPLE_PROMPT_PREVIEW_ARTIFACT_REQUIRED";
+    error.status = 409;
+    error.requiredConfirmation = "promptPreview";
+    error.expectedPromptPreviewJobId = jobId;
+    error.preflight = preflight;
+    throw error;
+  }
+  const issues = [];
+  if (preview.kind !== "product_visual_sample_prompt_preview") issues.push("prompt 预览类型不正确");
+  if (!preview.prompt || !Number(preview.promptLength || 0)) issues.push("prompt 为空");
+  if (preview.imageInputMode !== "source-page-edit") issues.push("prompt 预览不是源页参考图重绘模式");
+  if (preview.sourceReferenceRequired !== true) issues.push("prompt 预览缺少源页参考图要求");
+  if (preview.provider?.model && preflight.provider?.model && preview.provider.model !== preflight.provider.model) {
+    issues.push(`prompt 预览模型 ${preview.provider.model} 与当前模型 ${preflight.provider.model} 不一致`);
+  }
+  if (!preview.sourcePagePath || !fsSync.existsSync(preview.sourcePagePath)) issues.push("源页图片不存在");
+  if (issues.length) {
+    const error = new Error(`样张 prompt 预览证据不可用：${issues.join("；")}。请重新预览 prompt 后再生成真实样张。`);
+    error.code = "PRODUCT_VISUAL_SAMPLE_PROMPT_PREVIEW_STALE";
+    error.status = 409;
+    error.requiredConfirmation = "promptPreview";
+    error.expectedPromptPreviewJobId = jobId;
+    error.promptPreviewIssues = issues;
+    error.promptPreviewPath = previewPath;
+    error.preflight = preflight;
+    throw error;
+  }
+  return {
+    path: previewPath,
+    pageId: preview.pageId || "",
+    pageNumber: preview.pageNumber || 1,
+    promptLength: Number(preview.promptLength || 0),
+    provider: preview.provider || null,
+    persistedAt: preview.persistedAt || "",
+    artifactLink: makeWorkflowArtifactLink(jobId, "codex-ppt-sample-prompt-preview")
+  };
+}
+
+async function getProductVisualSamplePromptPreviewStatus(jobId, preflight = {}) {
+  if (!jobId) {
+    return {
+      ready: false,
+      label: "缺少预检任务",
+      message: "请先运行无费用产品视觉预检，再预览样张 prompt。"
+    };
+  }
+  try {
+    const evidence = await assertProductVisualSamplePromptPreviewReady(jobId, preflight);
+    return {
+      ready: true,
+      label: `已保存 ${evidence.promptLength || 0} 字符`,
+      message: "样张 prompt 证据已保存，可在确认额度后生成真实样张。",
+      expectedPromptPreviewJobId: jobId,
+      artifactLink: evidence.artifactLink,
+      persistedAt: evidence.persistedAt || "",
+      path: evidence.path || ""
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      label: error.code === "PRODUCT_VISUAL_SAMPLE_PROMPT_PREVIEW_STALE" ? "需重新预览" : "尚未预览",
+      message: error.message || "生成真实样张前，请先预览并保存当前样张 prompt。",
+      code: error.code || "PRODUCT_VISUAL_SAMPLE_PROMPT_PREVIEW_REQUIRED",
+      expectedPromptPreviewJobId: jobId,
+      promptPreviewIssues: error.promptPreviewIssues || [],
+      promptPreviewPath: error.promptPreviewPath || ""
+    };
+  }
+}
+
+async function persistProductVisualSamplePromptPreview(job = {}, promptPreview = {}) {
+  const codexDir = path.join(job.rootDir, "codex-ppt");
+  await fs.mkdir(codexDir, { recursive: true });
+  const persisted = {
+    ...promptPreview,
+    persistedAt: new Date().toISOString()
+  };
+  const previewPath = path.join(codexDir, "sample_prompt_preview.json");
+  await fs.writeFile(previewPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    codexPptSamplePromptPreview: artifactRecord("codex_ppt_sample_prompt_preview", previewPath, {
+      pageId: persisted.pageId || "",
+      pageNumber: persisted.pageNumber || 1,
+      promptLength: persisted.promptLength || 0,
+      externalImageCalls: persisted.externalImageCalls || 1,
+      provider: persisted.provider || null
+    })
+  };
+  job.events = appendEvent(job.events, "codex-ppt.sample_prompt_preview_ready", "Previewed product visual sample prompt", {
+    pageId: persisted.pageId || "",
+    pageNumber: persisted.pageNumber || 1,
+    promptLength: persisted.promptLength || 0,
+    path: previewPath
+  });
+  await saveWorkflowJob(job);
+  return {
+    ...persisted,
+    artifactPath: previewPath,
+    artifactLink: makeWorkflowArtifactLink(job.id, "codex-ppt-sample-prompt-preview")
   };
 }
 
@@ -590,7 +736,8 @@ export async function approveProductVisualSample(options = {}) {
   });
   const fullDeckPreflight = await getProductVisualFullDeckPreflight({
     workflowJobId: preflight.jobId,
-    maxPages: options.maxPages
+    maxPages: options.maxPages,
+    pages: options.pages
   }).catch((error) => ({
     ok: false,
     error: error.message || "全量生成预检失败"
@@ -691,7 +838,8 @@ export async function approveProductVisualFullDeck(options = {}) {
   if (preflight.passed) {
     const fullDeckPreflight = await getProductVisualFullDeckPreflight({
       workflowJobId: preflight.jobId,
-      maxPages: options.maxPages
+      maxPages: options.maxPages,
+      pages: options.pages
     }).catch((error) => ({
       ok: false,
       error: error.message || "全量生成预检失败"
@@ -721,7 +869,8 @@ export async function approveProductVisualFullDeck(options = {}) {
   });
   const fullDeckPreflight = await getProductVisualFullDeckPreflight({
     workflowJobId: preflight.jobId,
-    maxPages: options.maxPages
+    maxPages: options.maxPages,
+    pages: options.pages
   }).catch((error) => ({
     ok: false,
     error: error.message || "全量生成预检失败"
@@ -766,6 +915,10 @@ export async function runProductVisualFullDeck(options = {}) {
   const authorization = await authorizeExternalImageSpend(jobId, {
     scope: "full-deck",
     imageCalls,
+    pages: preflight.pages || [],
+    pageSelection: Array.isArray(preflight.pages) && preflight.pages.length ? preflight.pages.join(",") : cleanString(options.pages || `1-${imageCalls}`),
+    targetPages: Array.isArray(preflight.pages) && preflight.pages.length ? preflight.pages.length : imageCalls,
+    mode: cleanString(options.pages ? "custom" : imageCalls <= 2 ? "test" : "full"),
     confirmedBy: cleanString(options.confirmedBy || "frontend-operator"),
     reason: cleanString(options.reason || "产品级 v1 全量视觉生成授权")
   });
@@ -781,7 +934,19 @@ export async function runProductVisualFullDeck(options = {}) {
   const imageDeckJob = await assembleWorkflowImageDeck(jobId, {
     outName: "product-visual-image-deck.pptx"
   });
-  const finalJob = imageDeckJob || visualJob;
+  const finalJob = await invalidateWorkflowEditableRebuildEvidence(jobId, {
+    reason: "product visual images changed; rerun image-to-editable-ppt before final delivery"
+  }).catch(() => imageDeckJob || visualJob);
+  const v1ReportSync = await syncProductVisualDeckToV1AcceptanceReport({
+    job: finalJob,
+    preflight,
+    imageCalls,
+    pages: preflight.pages || [],
+    authorization: authorization.authorization
+  }).catch((error) => ({
+    ok: false,
+    error: error.message || "Failed to sync product visual deck to v1 acceptance report."
+  }));
   return {
     ok: true,
     paidImageGeneration: true,
@@ -791,14 +956,15 @@ export async function runProductVisualFullDeck(options = {}) {
     jobId,
     authorization: authorization.authorization,
     provider: preflight.provider,
-    visualImages: finalJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || [],
-    visualQuality: finalJob.artifacts?.visualQuality || visualJob.artifacts?.visualQuality || null,
-    imageDeck: finalJob.artifacts?.imageDeck || null,
+    visualImages: finalJob.artifacts?.visualImages || imageDeckJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || [],
+    visualQuality: finalJob.artifacts?.visualQuality || imageDeckJob.artifacts?.visualQuality || visualJob.artifacts?.visualQuality || null,
+    imageDeck: finalJob.artifacts?.imageDeck || imageDeckJob.artifacts?.imageDeck || null,
     imageDeckLink: makeWorkflowArtifactLink(jobId, "image-deck", "", { download: true }),
     visualQualityLink: makeWorkflowArtifactLink(jobId, "visual-quality"),
     visualImageLinks: buildVisualImageLinks(jobId, finalJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || []),
+    v1ReportSync,
     runbook: preflight.runbook,
-    summary: "产品级 codex-ppt 全量视觉图片和图片型 PPT 已生成。",
+    summary: "产品级 codex-ppt 全量视觉图片和图片型 PPT 已生成；旧可编辑重建证据已失效，请重新运行 image-to-editable-ppt。",
     job: {
       id: finalJob.id,
       status: finalJob.status || "",
@@ -812,6 +978,149 @@ export async function runProductVisualFullDeck(options = {}) {
 async function writeLatestProductVisualReadiness(payload = {}) {
   await fs.mkdir(v1AcceptanceRootDir, { recursive: true });
   await fs.writeFile(latestProductVisualReadinessPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+export async function syncProductVisualDeckToV1AcceptanceReport({
+  job = null,
+  preflight = {},
+  imageCalls = 0,
+  pages = [],
+  authorization = null
+} = {}) {
+  if (!job?.id) {
+    return { ok: false, skipped: true, reason: "Missing workflow job." };
+  }
+  const latestBundle = await getLatestV1AcceptanceReport().catch(() => null);
+  const latestReport = latestBundle?.latest || null;
+  const visualImages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [];
+  const visualCount = visualImages.length;
+  const sourcePages = Number(latestReport?.sourceRender?.renderedPages || preflight.executionSnapshot?.source?.renderedPages || 0);
+  const targetPages = Number(latestReport?.acceptance?.targetPages || preflight.executionSnapshot?.targetPages || sourcePages || imageCalls || 0);
+  const fullV1Scope = sourcePages >= 15 && visualCount >= 15 && targetPages >= 15;
+  const provenancePreserved = Boolean(visualImages.length)
+    && visualImages.every((image) => image?.path && image.provider !== "passthrough" && image.dryRun !== true && image.sha256);
+  const slideState = summarizeProductVisualSlideState(job, visualCount);
+  const updatedReport = {
+    ...(latestReport || {}),
+    ok: true,
+    kind: "real-ppt-regression",
+    command: latestReport?.command || "",
+    sourcePath: latestReport?.sourcePath || preflight.sourcePath || preflight.executionSnapshot?.source?.path || "",
+    maxPages: Math.max(Number(latestReport?.maxPages || 0), targetPages || visualCount || imageCalls || 0),
+    pageSelection: latestReport?.pageSelection || (Array.isArray(pages) && pages.length ? pages.join(",") : `1-${visualCount || imageCalls || 1}`),
+    sourceRender: latestReport?.sourceRender || {
+      renderedPages: sourcePages,
+      renderer: preflight.executionSnapshot?.source?.renderer || ""
+    },
+    approvals: mergeProductVisualApprovals(latestReport?.approvals),
+    sample: {
+      ...(latestReport?.sample || {}),
+      visualSample: job.artifacts?.visualSample?.path || latestReport?.sample?.visualSample || "",
+      visualSampleManifest: job.artifacts?.visualSampleManifest?.path || latestReport?.sample?.visualSampleManifest || ""
+    },
+    visual: {
+      mode: "product-v1-real-full-deck",
+      visualImages: visualCount,
+      slideState,
+      provenancePreserved,
+      nonProduct: false,
+      provider: preflight.provider || null,
+      authorization,
+      generatedFromJobId: job.id,
+      selectedPages: Array.isArray(pages) ? pages : [],
+      latestImageCreatedAt: latestCreatedAt(visualImages),
+      images: visualImages.map((image) => ({
+        pageId: image.pageId || "",
+        pageNumber: image.pageNumber || null,
+        provider: image.provider || "",
+        baseUrl: image.baseUrl || "",
+        model: image.model || "",
+        dryRun: Boolean(image.dryRun),
+        sha256: image.sha256 || "",
+        createdAt: image.createdAt || "",
+        path: image.path || ""
+      })),
+      visualManifest: job.artifacts?.visualManifest?.path || "",
+      visualManifestCreatedAt: job.artifacts?.visualManifest?.createdAt || "",
+      visualQualityCreatedAt: job.artifacts?.visualQuality?.createdAt || "",
+      imageDeck: job.artifacts?.imageDeck?.path || "",
+      imageDeckCreatedAt: job.artifacts?.imageDeck?.createdAt || "",
+      nextRunbookStep: "editppt-prepare"
+    },
+    artifacts: {
+      ...(latestReport?.artifacts || {}),
+      state: path.join(job.rootDir || "", "state.json"),
+      imageDeck: job.artifacts?.imageDeck?.path || latestReport?.artifacts?.imageDeck || "",
+      codexPptDeckSpec: job.artifacts?.codexPptDeckSpec?.path || latestReport?.artifacts?.codexPptDeckSpec || "",
+      codexPptSlideJobs: job.artifacts?.codexPptSlideJobs?.path || latestReport?.artifacts?.codexPptSlideJobs || "",
+      codexPptSlideRunState: job.artifacts?.codexPptSlideRunState?.path || latestReport?.artifacts?.codexPptSlideRunState || ""
+    },
+    productVisualEvidence: {
+      ok: provenancePreserved,
+      syncedAt: new Date().toISOString(),
+      jobId: job.id,
+      imageCalls,
+      visualImages: visualCount,
+      fullV1Scope,
+      imageDeck: job.artifacts?.imageDeck?.path || ""
+    }
+  };
+  const writeResult = await writeV1AcceptanceReport(updatedReport, {
+    kind: "real-ppt-regression",
+    requiredForV1: fullV1Scope
+  });
+  return {
+    ok: true,
+    latestUpdated: writeResult.latestUpdated,
+    fullV1Scope,
+    reportPath: writeResult.path,
+    latestPath: writeResult.latestPath,
+    visualImages: visualCount,
+    provenancePreserved,
+    acceptance: {
+      ready: writeResult.report?.acceptance?.ready === true,
+      missing: writeResult.report?.acceptance?.missing || [],
+      phaseProgress: writeResult.report?.acceptance?.phaseProgress || writeResult.report?.phaseProgress || null
+    }
+  };
+}
+
+function mergeProductVisualApprovals(approvals = {}) {
+  const recorded = new Set(Array.isArray(approvals?.recorded) ? approvals.recorded : []);
+  for (const gate of ["outline", "style", "backend", "sample", "fullDeck"]) recorded.add(gate);
+  return {
+    ...(approvals || {}),
+    approvalGateProbe: approvals?.approvalGateProbe || "CODEX_PPT_APPROVAL_REQUIRED",
+    recorded: [...recorded]
+  };
+}
+
+function summarizeProductVisualSlideState(job = {}, visualCount = 0) {
+  const artifacts = job.artifacts || {};
+  const jobs = artifacts.codexPptSlideJobs || {};
+  const state = artifacts.codexPptSlideRunState || {};
+  const total = Number(state.total || jobs.total || artifacts.codexPptSlidePrompts?.length || visualCount || 0);
+  const dispatched = Number(state.dispatched || jobs.dispatched || visualCount || 0);
+  const recorded = Number(state.recorded || jobs.recorded || visualCount || 0);
+  const failed = Number(state.failed || jobs.failed || 0);
+  return {
+    total,
+    dispatched,
+    recorded,
+    failed,
+    complete: Boolean(artifacts.codexPptDeckSpec?.path && total > 0 && dispatched >= total && recorded >= total && failed === 0),
+    deckSpec: artifacts.codexPptDeckSpec?.path || "",
+    slideJobs: jobs.path || "",
+    slideRunState: state.path || "",
+    prompts: artifacts.codexPptSlidePrompts?.length || 0
+  };
+}
+
+function latestCreatedAt(items = []) {
+  const times = (Array.isArray(items) ? items : [])
+    .map((item) => Date.parse(String(item?.createdAt || "")))
+    .filter((time) => Number.isFinite(time));
+  return times.length ? new Date(Math.max(...times)).toISOString() : "";
 }
 
 async function readJsonIfExists(filePath) {
@@ -869,6 +1178,9 @@ function normalizeLocalPathCandidates(value = "") {
       variants.add(decodeURIComponent(candidate));
     } catch {
       // A pasted local path can contain a bare percent sign; keep the raw value.
+    }
+    if (/^[a-zA-Z]:\\\\/.test(candidate)) {
+      variants.add(candidate.replace(/\\\\+/g, "\\"));
     }
     if (/^[a-zA-Z]:[\\/]/.test(candidate)) {
       variants.add(candidate.replace(/[\\/]+/g, path.sep));
@@ -969,6 +1281,81 @@ function compactPreflight(preflight = {}) {
     blockingIssues: preflight.blockingIssues || [],
     warnings: preflight.warnings || [],
     code: preflight.code || ""
+  };
+}
+
+function buildAuthorizationPreview({
+  phase = "",
+  label = "",
+  job = null,
+  provider = {},
+  promptPreviewStatus = null,
+  externalImageCalls = 0,
+  readyIfConfirmed = false,
+  requiredConfirmation = "externalImageSpend",
+  nextAction = "",
+  blockingIssues = []
+} = {}) {
+  const calls = clampInteger(externalImageCalls, 0, 50, 0);
+  const safeBlockingIssues = Array.isArray(blockingIssues) ? blockingIssues.filter(Boolean) : [];
+  return {
+    phase,
+    label,
+    status: readyIfConfirmed ? "ready-after-user-confirmation" : "blocked",
+    paidImageGeneration: true,
+    safeToRunAutomatically: false,
+    requiresExplicitSpendConfirmation: true,
+    requiredConfirmation,
+    externalImageCalls: calls,
+    nextAction,
+    workflowJobId: job?.id || "",
+    provider: {
+      configured: Boolean(provider?.configured),
+      enabled: Boolean(provider?.enabled),
+      baseUrl: provider?.baseUrl || "",
+      model: provider?.model || "",
+      supportsImageEdit: provider?.supportsImageEdit !== false,
+      editEndpoint: provider?.editEndpoint || "/images/edits"
+    },
+    promptPreview: {
+      ready: Boolean(promptPreviewStatus?.ready),
+      label: promptPreviewStatus?.label || "",
+      expectedPromptPreviewJobId: promptPreviewStatus?.expectedPromptPreviewJobId || "",
+      artifactLink: promptPreviewStatus?.artifactLink || null,
+      persistedAt: promptPreviewStatus?.persistedAt || "",
+      path: promptPreviewStatus?.path || ""
+    },
+    checklist: [
+      {
+        id: "model",
+        label: "图片模型",
+        value: provider?.model || "",
+        ok: Boolean(provider?.model)
+      },
+      {
+        id: "endpoint",
+        label: "源页编辑接口",
+        value: provider?.editEndpoint || "/images/edits",
+        ok: provider?.supportsImageEdit !== false
+      },
+      {
+        id: "prompt-preview",
+        label: "Prompt 证据",
+        value: promptPreviewStatus?.label || "",
+        ok: Boolean(promptPreviewStatus?.ready)
+      },
+      {
+        id: "explicit-confirmation",
+        label: "用户确认",
+        value: `${calls} image call(s)`,
+        ok: Boolean(readyIfConfirmed)
+      }
+    ],
+    blockingIssues: safeBlockingIssues,
+    confirmationText: readyIfConfirmed
+      ? `确认后会调用外部图片 API ${calls} 次生成真实样张。`
+      : "当前条件未满足，不允许调用外部图片 API。",
+    updatedAt: new Date().toISOString()
   };
 }
 

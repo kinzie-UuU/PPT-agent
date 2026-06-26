@@ -25,6 +25,7 @@ export async function listWorkflowArtifactLinks(id) {
       makeLink(job, "codex-ppt-style-md", "codex-ppt Style Markdown", artifacts.codexPptStyle?.markdownPath),
       makeLink(job, "codex-ppt-backend", "codex-ppt Backend JSON", artifacts.codexPptBackendDecision?.path),
       makeLink(job, "codex-ppt-backend-md", "codex-ppt Backend Markdown", artifacts.codexPptBackendDecision?.markdownPath),
+      makeLink(job, "codex-ppt-sample-prompt-preview", "codex-ppt 样张 Prompt 预览", artifacts.codexPptSamplePromptPreview?.path),
       makeLink(job, "visual-sample", "codex-ppt 视觉样张", artifacts.visualSample?.path),
       makeLink(job, "codex-ppt-deck-spec", "codex-ppt Deck Spec", artifacts.codexPptDeckSpec?.path),
       makeLink(job, "codex-ppt-speech", "codex-ppt Speech Notes", artifacts.codexPptSpeech?.path),
@@ -39,6 +40,7 @@ export async function listWorkflowArtifactLinks(id) {
       ...artifactArrayLinks(job, "rendered-page", "源稿页面图", artifacts.renderedPages),
       ...artifactArrayLinks(job, "visual-page", "视觉页面图", artifacts.visualImages),
       ...artifactArrayLinks(job, "rebuild-preview", "重建预览图", reviewArtifacts.previews),
+      ...artifactArrayLinks(job, "final-compare", "最终对比图", getFinalCompareArtifacts(job)),
       ...artifactArrayLinks(job, "page-validation", "页面 Validation", reviewArtifacts.validations),
       ...artifactArrayLinks(job, "page-result", "页面 Result", reviewArtifacts.results),
       ...artifactArrayLinks(job, "page-pptx", "页面 PPTX", reviewArtifacts.pptx, { download: true }),
@@ -87,6 +89,9 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
   } else if (normalizedKey === "codex-ppt-backend-md") {
     filePath = artifacts.codexPptBackendDecision?.markdownPath || "";
     fileName = "codex-ppt-backend.md";
+  } else if (normalizedKey === "codex-ppt-sample-prompt-preview") {
+    filePath = artifacts.codexPptSamplePromptPreview?.path || "";
+    fileName = "sample_prompt_preview.json";
   } else if (normalizedKey === "visual-sample") {
     filePath = artifacts.visualSample?.path || "";
     fileName = path.basename(filePath || "visual-sample.png");
@@ -136,6 +141,10 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
     const page = findPageArtifact(getMirroredReviewArtifacts(job, "preview.png"), pageId);
     filePath = page?.path || "";
     fileName = path.basename(filePath || `${cleanPageId(pageId)}-preview.png`);
+  } else if (normalizedKey === "final-compare") {
+    const page = findPageArtifact(getFinalCompareArtifacts(job), pageId);
+    filePath = page?.path || "";
+    fileName = path.basename(filePath || `${cleanPageId(pageId)}-compare.png`);
   } else if (normalizedKey === "page-validation") {
     const page = findPageArtifact(getMirroredReviewArtifacts(job, "validation.json"), pageId);
     filePath = page?.path || "";
@@ -187,6 +196,23 @@ function artifactArrayLinks(job, key, label, records = [], options = {}) {
   })).filter(Boolean);
 }
 
+function getFinalCompareArtifacts(job = {}) {
+  const rootDir = job.rootDir || "";
+  const renderedCheckDir = path.join(rootDir, "final", "rendered-check");
+  if (!rootDir || !fsSync.existsSync(renderedCheckDir)) return [];
+  return fsSync.readdirSync(renderedCheckDir)
+    .map((fileName) => {
+      const match = String(fileName || "").match(/^compare_(\d+)\.(png|jpg|jpeg|webp)$/i);
+      if (!match) return null;
+      return {
+        pageId: `page_${String(match[1]).padStart(3, "0")}`,
+        path: path.join(renderedCheckDir, fileName)
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.pageId.localeCompare(b.pageId));
+}
+
 function makeLink(job, key, label, filePath, options = {}) {
   if (!filePath) return null;
   try {
@@ -231,8 +257,11 @@ function firstText(items = []) {
 
 function inferBlockedFinalNextAction(finalGate = {}) {
   const text = [firstText(finalGate.reasons), firstText(finalGate.warnings)].join(" ");
-  if (/hash|哈希|过期|stale/i.test(text)) return "重置过期页面证据后，重新运行 image-to-editable-ppt 页面任务。";
-  if (/page worker evidence|页面任务证据|page task evidence|worker evidence/i.test(text)) return "补齐或重跑 image-to-editable-ppt 页面任务证据后，再生成最终 PPTX。";
+  if (/Page-level PPTX cannot be opened by PowerPoint/i.test(text)) return "重置打不开的页面任务，重新运行可编辑重建后再生成最终 PPT。";
+  if (/local text-only multi-page worker|Local text-only multi-page worker/i.test(text)) return "运行产品级可编辑重建后重新生成最终 PPT；本地文本多页输出只能作为实验验证。";
+  if (/PowerPoint|open PPTX|could not open|0x80070570/i.test(text)) return "修复可编辑重建或最终生成输出后重新生成最终 PPT；当前文件不能被 PowerPoint 打开。";
+  if (/hash|哈希|过期|stale/i.test(text)) return "重置过期页面证据后，重新运行可编辑重建页面任务。";
+  if (/page worker evidence|页面任务证据|page task evidence|worker evidence/i.test(text)) return "补齐或重跑可编辑重建页面任务证据后，再生成最终 PPT。";
   if (/manual|人工|复核/i.test(text)) return "完成人工页面复核后再下载最终 PPTX。";
   if (/validation|校验/i.test(text)) return "查看 validation 结果并修复失败页。";
   return "先处理交付门禁提示，再下载最终 PPTX。";

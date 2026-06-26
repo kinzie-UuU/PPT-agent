@@ -46,7 +46,19 @@ export async function getWorkflowV1Readiness(jobId) {
   const styleEvidence = buildCodexPptStyleEvidence(artifacts.codexPptStyle);
   const providerEvidence = buildProviderEvidence(providers, artifacts.codexPptBackendDecision);
   const sampleEvidence = buildVisualSampleEvidence(artifacts.visualSample, providerEvidence);
-  const textHintEvidence = buildTextHintCoverageEvidence(artifacts, sourcePages);
+  const scopedTargetPages = getCurrentWorkflowScopePages(artifacts, {
+    visualImages: visualImages.length,
+    editableTasks: editableTasks.length,
+    sourcePages
+  });
+  const isPartialWorkflowScope = Boolean(sourcePages && scopedTargetPages && scopedTargetPages < sourcePages);
+  const scopeEvidence = {
+    sourcePages,
+    currentScopePages: scopedTargetPages,
+    partial: isPartialWorkflowScope,
+    scopeLabel: isPartialWorkflowScope ? `${scopedTargetPages}/${sourcePages} 页测试范围` : `${scopedTargetPages || sourcePages || 0} 页范围`
+  };
+  const textHintEvidence = buildTextHintCoverageEvidence(artifacts, scopedTargetPages || sourcePages, sourcePages);
   const qualityEvidence = buildPageFinalQualityEvidence(delivery);
   const providerReady = providers.llm.configured && providers.image.configured && providers.image.enabled;
   const sampleAuthorization = getExternalImageAuthorizationStatus(job, { scope: "visual-sample", imageCalls: 1 });
@@ -78,8 +90,14 @@ export async function getWorkflowV1Readiness(jobId) {
     ok: false,
     ready: false,
     startReady: false,
-    error: error.message || "worker 批处理预检不可用"
+    error: error.message || "可编辑重建批处理预检不可用"
   }));
+  const currentEditableEvidence = buildCurrentEditableEvidence({
+    artifacts,
+    finalGate,
+    qualityEvidence
+  });
+  const effectiveWorkerBatchPreflight = suppressResolvedWorkerBatchFailure(workerBatchPreflight, currentEditableEvidence);
   const workerEvidence = {
     total: editableTasks.length,
     ready: readyPages,
@@ -88,7 +106,7 @@ export async function getWorkflowV1Readiness(jobId) {
     failed: failedPages,
     prompts: Array.isArray(artifacts.editableWorkerPrompts) ? artifacts.editableWorkerPrompts.length : 0,
     deliveryNextStepId: rawDeliveryNextStep?.id || "",
-    batchPreflight: workerBatchPreflight
+    batchPreflight: effectiveWorkerBatchPreflight
   };
 
   const checks = [
@@ -129,9 +147,11 @@ export async function getWorkflowV1Readiness(jobId) {
     makeCheck({
       id: "image-deck",
       label: "图片型 PPT 输出",
-      status: artifacts.imageDeck?.path ? "pass" : visualImages.length ? "warning" : "pending",
-      detail: artifacts.imageDeck?.path ? shortPath(artifacts.imageDeck.path) : `${visualImages.length} 张视觉图，图片型 PPT 待生成`,
-      evidence: { visualImages: visualImages.length, imageDeck: Boolean(artifacts.imageDeck?.path) }
+      status: artifacts.imageDeck?.path ? isPartialWorkflowScope ? "warning" : "pass" : visualImages.length ? "warning" : "pending",
+      detail: artifacts.imageDeck?.path
+        ? `${shortPath(artifacts.imageDeck.path)}；当前覆盖 ${scopeEvidence.scopeLabel}${isPartialWorkflowScope ? "，还不是完整 15 页验收图片型 PPT" : ""}`
+        : `${visualImages.length} 张视觉图，图片型 PPT 待生成`,
+      evidence: { visualImages: visualImages.length, imageDeck: Boolean(artifacts.imageDeck?.path), ...scopeEvidence }
     }),
     makeCheck({
       id: "editable-run",
@@ -149,7 +169,7 @@ export async function getWorkflowV1Readiness(jobId) {
       detail: textHintEvidence.ready
         ? textHintEvidence.lowConfidenceCount
           ? `文字提示已覆盖 ${textHintEvidence.coveredPages}/${textHintEvidence.expectedPages} 页，但仍有 ${textHintEvidence.lowConfidenceCount} 条低置信 OCR 需要修正`
-          : `文字提示已覆盖 ${textHintEvidence.coveredPages}/${textHintEvidence.expectedPages} 页，低置信 OCR 已清零`
+          : `文字提示已覆盖 ${textHintEvidence.coveredPages}/${textHintEvidence.expectedPages} 页，低置信 OCR 已清零${textHintEvidence.partialScope ? `；这是当前测试范围，完整 v1 仍需覆盖 ${textHintEvidence.sourcePages} 页` : ""}`
         : textHintEvidence.hasAnyTextHints
           ? `文字提示只覆盖 ${textHintEvidence.coveredPages}/${textHintEvidence.expectedPages || "待定"} 页，请补齐 OCR/editppt hints`
           : "等待 OCR 或 editppt 文字提示；它用于提升可编辑重建的文本准确率",
@@ -158,9 +178,9 @@ export async function getWorkflowV1Readiness(jobId) {
     makeCheck({
       id: "page-workers-and-retry",
       label: "页面任务与可重试性",
-      status: failedPages ? "warning" : recordedPages && (!sourcePages || recordedPages >= sourcePages) ? "pass" : editableTasks.length ? "warning" : "pending",
-      detail: `${recordedPages}/${sourcePages || editableTasks.length || 0} 页已记录，${failedPages} 页失败；重试 API 可用`,
-      evidence: { recordedPages, failedPages, retryApi: true }
+      status: failedPages ? "warning" : recordedPages && (!scopedTargetPages || recordedPages >= scopedTargetPages) ? "pass" : editableTasks.length ? "warning" : "pending",
+      detail: `${recordedPages}/${scopedTargetPages || editableTasks.length || 0} 个当前页面任务已记录，${failedPages} 页失败；重试 API 可用${isPartialWorkflowScope ? `；完整 v1 仍需覆盖 ${sourcePages} 页` : ""}`,
+      evidence: { recordedPages, failedPages, retryApi: true, ...scopeEvidence }
     }),
     makeCheck({
       id: "page-final-evidence-quality",
@@ -223,14 +243,21 @@ export async function getWorkflowV1Readiness(jobId) {
   const fail = checks.filter((check) => check.status === "fail").length;
   const pending = checks.filter((check) => check.status === "pending").length;
   const level = fail ? "blocked" : warning ? "warning" : pending ? "pending" : "pass";
-  const preflightActions = buildPreflightActions(workerBatchPreflight);
+  const preflightActions = buildPreflightActions(effectiveWorkerBatchPreflight);
   const styleActions = buildStyleActions(styleEvidence);
   const sampleActions = buildCodexSampleActions({ approvedGates, sampleEvidence, providerReady, providerEvidence, sourcePages });
-  const codexSlideActions = [...sampleActions, ...buildCodexSlidePreflightActions(codexSlideBatchPreflight, codexSlideResetPreview)];
-  const providerActions = buildProviderActions(providerEvidence, providerReady);
+  const codexSlideActions = filterCodexSlideActionsForCurrentStage(
+    [...sampleActions, ...buildCodexSlidePreflightActions(codexSlideBatchPreflight, codexSlideResetPreview)],
+    {
+      hasImageDeck: Boolean(artifacts.imageDeck?.path),
+      hasEditableRun: Boolean(artifacts.editableRun?.path),
+      workerBatchPreflight: effectiveWorkerBatchPreflight
+    }
+  );
+  const providerActions = buildProviderActions(providerEvidence, providerReady, effectiveWorkerBatchPreflight);
   const authorizationActions = buildAuthorizationActions({ approvedGates, sampleAuthorization, fullDeckAuthorization, sampleEvidence, providerReady, sourcePages });
   const stalePageEvidenceActions = buildStalePageEvidenceActions(delivery.pageEvidence || {});
-  const deliveryNextStep = buildEffectiveDeliveryNextStep(styleActions, providerActions, authorizationActions, codexSlideActions, stalePageEvidenceActions, rawDeliveryNextStep);
+  const deliveryNextStep = buildEffectiveDeliveryNextStep(styleActions, providerActions, authorizationActions, preflightActions, codexSlideActions, stalePageEvidenceActions, rawDeliveryNextStep);
   workerEvidence.deliveryNextStepId = deliveryNextStep?.id || "";
   workerEvidence.rawDeliveryNextStepId = rawDeliveryNextStep?.id || "";
   const evidenceActions = checks
@@ -256,7 +283,7 @@ export async function getWorkflowV1Readiness(jobId) {
     deliveryNextStep,
     codexSlideBatchPreflight,
     codexSlideResetPreview,
-    workerBatchPreflight,
+    workerBatchPreflight: effectiveWorkerBatchPreflight,
     workerEvidence,
     authorization: {
       sample: sampleAuthorization,
@@ -347,6 +374,10 @@ function compactCodexSlideBatchPreflight(preflight = {}) {
 function compactWorkerBatchPreflight(preflight = {}) {
   const external = preflight.requiredConfirmations?.externalImageSpend || {};
   const offline = preflight.requiredConfirmations?.offlineTextHints || {};
+  const llmProviderRecovered = preflight.requiredConfirmations?.llmProviderRecovered || {};
+  const recentProviderFailure = preflight.recentProviderFailure || {};
+  const providerFailure = preflight.providerFailure || {};
+  const llmRecoveryPlan = buildLlmProviderRecoveryPlan({ providerFailure, recentProviderFailure, llmProviderRecovered });
   return {
     ok: preflight.ok === true,
     ready: Boolean(preflight.ready),
@@ -360,6 +391,24 @@ function compactWorkerBatchPreflight(preflight = {}) {
       model: preflight.provider?.model || "",
       baseUrl: preflight.provider?.baseUrl || ""
     },
+    llmProvider: compactProvider(preflight.llmProvider || preflight.providers?.llm),
+    imageProvider: compactProvider(preflight.imageProvider || preflight.providers?.image || preflight.provider),
+    providerFailure: {
+      blocked: Boolean(providerFailure.blocked),
+      kind: providerFailure.kind || "",
+      message: providerFailure.message || "",
+      currentProvider: providerFailure.currentProvider || null,
+      failedProvider: providerFailure.failedProvider || null
+    },
+    recentProviderFailure: {
+      found: Boolean(recentProviderFailure.found),
+      kind: recentProviderFailure.kind || "",
+      message: recentProviderFailure.message || "",
+      pages: Array.isArray(recentProviderFailure.pages) ? recentProviderFailure.pages.slice(0, 20) : [],
+      currentProvider: recentProviderFailure.currentProvider || null,
+      failedProvider: recentProviderFailure.failedProvider || null
+    },
+    llmRecoveryPlan,
     confirmations: {
       externalImageSpend: {
         required: Boolean(external.required),
@@ -369,6 +418,12 @@ function compactWorkerBatchPreflight(preflight = {}) {
         required: Boolean(offline.required),
         confirmed: Boolean(offline.confirmed),
         acceptedByWorkflow: Boolean(offline.acceptedByWorkflow)
+      },
+      llmProviderRecovered: {
+        required: Boolean(llmProviderRecovered.required),
+        confirmed: Boolean(llmProviderRecovered.confirmed),
+        state: llmProviderRecovered.state || "",
+        reason: llmProviderRecovered.reason || ""
       }
     },
     blockingIssues: Array.isArray(preflight.blockingIssues) ? preflight.blockingIssues.slice(0, 5) : [],
@@ -378,6 +433,88 @@ function compactWorkerBatchPreflight(preflight = {}) {
       status: preflight.activeRunner.status || "",
       logHref: preflight.activeRunner.logHref || ""
     } : null
+  };
+}
+
+function buildCurrentEditableEvidence({ artifacts = {}, finalGate = {}, qualityEvidence = {} } = {}) {
+  const checks = finalGate.checks || {};
+  const gateReasons = [
+    ...(Array.isArray(finalGate.reasons) ? finalGate.reasons : []),
+    ...(Array.isArray(finalGate.warnings) ? finalGate.warnings : [])
+  ].map((item) => String(item || ""));
+  const waitingForManualReview = gateReasons.some((item) => /final-visual-qa-needs-review|视觉 QA|人工复核/.test(item));
+  const finalReviewOnly = Boolean(
+    artifacts.editableFinal?.path
+    && finalGate.level === "blocked"
+    && checks.hasFinal === true
+    && checks.validationPassed === true
+    && checks.editabilityPassed === true
+    && checks.powerPointOpenable === true
+    && checks.noFullSlideRaster === true
+    && checks.pageEvidenceComplete === true
+    && checks.manualReviewRecorded !== true
+    && waitingForManualReview
+  );
+  const finalEvidenceUsable = Boolean(
+    artifacts.editableFinal?.path
+    && qualityEvidence.pageEvidenceComplete === true
+    && qualityEvidence.finalValidationPassed === true
+    && qualityEvidence.noFullSlideRaster === true
+    && qualityEvidence.validationFailuresEmpty === true
+  );
+  return {
+    finalReviewOnly,
+    finalEvidenceUsable,
+    suppressHistoricalProviderFailure: Boolean(finalReviewOnly || finalGate.productReady || finalGate.downloadable || finalEvidenceUsable)
+  };
+}
+
+function suppressResolvedWorkerBatchFailure(preflight = {}, currentEditableEvidence = {}) {
+  if (!currentEditableEvidence.suppressHistoricalProviderFailure) return preflight;
+  const blockingIssues = Array.isArray(preflight.blockingIssues)
+    ? preflight.blockingIssues.filter((issue) => !/No ready or failed editable worker task matches this batch/i.test(String(issue || "")))
+    : [];
+  const warnings = Array.isArray(preflight.warnings)
+    ? preflight.warnings.filter((issue) => !/最近一次可编辑重建失败|provider-timeout|timed out|timeout|aborted/i.test(String(issue || "")))
+    : [];
+  return {
+    ...preflight,
+    ready: blockingIssues.length === 0 ? true : preflight.ready,
+    startReady: blockingIssues.length === 0 ? true : preflight.startReady,
+    recentProviderFailure: {
+      ...(preflight.recentProviderFailure || {}),
+      found: false,
+      supersededByCurrentEvidence: true,
+      message: ""
+    },
+    llmRecoveryPlan: {
+      ...(preflight.llmRecoveryPlan || {}),
+      required: false,
+      confirmed: true,
+      supersededByCurrentEvidence: true
+    },
+    confirmations: {
+      ...(preflight.confirmations || {}),
+      llmProviderRecovered: {
+        ...(preflight.confirmations?.llmProviderRecovered || {}),
+        required: false,
+        confirmed: true,
+        state: "not-required-current-evidence-complete",
+        reason: "current-editable-evidence-complete"
+      }
+    },
+    blockingIssues,
+    warnings,
+    currentEditableEvidence
+  };
+}
+
+function compactProvider(provider = {}) {
+  return {
+    configured: Boolean(provider?.configured),
+    enabled: provider?.enabled !== false,
+    model: provider?.model || "",
+    baseUrl: provider?.baseUrl || ""
   };
 }
 
@@ -436,6 +573,18 @@ function buildCodexSlidePreflightActions(preflight = {}, resetPreview = {}) {
     });
   }
   return actions;
+}
+
+function filterCodexSlideActionsForCurrentStage(actions = [], context = {}) {
+  const workerReady = context.workerBatchPreflight?.ready === true || context.workerBatchPreflight?.startReady === true;
+  const editableStageReady = Boolean(context.hasImageDeck && context.hasEditableRun && workerReady);
+  if (!editableStageReady) return actions;
+  return actions.filter((action) => !isExhaustedCodexSlideQueueAction(action));
+}
+
+function isExhaustedCodexSlideQueueAction(action = {}) {
+  const detail = String(action.detail || "");
+  return /No ready or failed codex-ppt slide tasks are available for batch generation/i.test(detail);
 }
 
 function buildCodexSampleActions({ approvedGates = new Set(), sampleEvidence = {}, providerReady = false, providerEvidence = {}, sourcePages = 0 } = {}) {
@@ -497,7 +646,7 @@ function buildPreflightActions(preflight = {}) {
     actions.push({
       id: "confirm-external-image-spend",
       label: "确认外部图片 API 用量",
-      detail: "启动模型页面任务前，请在可编辑任务面板确认外部图片 API 额度用量。",
+      detail: "启动可编辑重建页面任务前，请在可编辑任务面板确认外部图片 API 额度用量。",
       severity: "warning"
     });
   }
@@ -512,7 +661,7 @@ function buildPreflightActions(preflight = {}) {
   for (const issue of preflight.blockingIssues || []) {
     actions.push({
       id: `preflight-blocker-${actions.length + 1}`,
-      label: "处理 worker 预检阻断",
+      label: "处理可编辑重建预检阻断",
       detail: localizeV1Text(issue),
       severity: "blocked"
     });
@@ -520,7 +669,30 @@ function buildPreflightActions(preflight = {}) {
   return actions;
 }
 
-function buildProviderActions(providerEvidence = {}, providerReady = false) {
+function buildProviderActions(providerEvidence = {}, providerReady = false, workerBatchPreflight = {}) {
+  const recentProviderFailure = workerBatchPreflight.recentProviderFailure || {};
+  const providerFailure = workerBatchPreflight.providerFailure || {};
+  const llmFailure = providerFailure.blocked ? providerFailure : recentProviderFailure.found ? recentProviderFailure : null;
+  if (llmFailure) {
+    const isAuth = llmFailure.kind === "provider-auth-failed";
+    const recoveryPlan = buildLlmProviderRecoveryPlan({
+      providerFailure,
+      recentProviderFailure,
+      llmProviderRecovered: workerBatchPreflight.confirmations?.llmProviderRecovered || {}
+    });
+    return [{
+      id: isAuth ? "fix-llm-provider-auth" : "fix-llm-provider-quota",
+      label: isAuth ? "处理对话模型鉴权失败" : "处理对话模型额度不足",
+      detail: llmFailure.message || (isAuth
+        ? "可编辑重建需要可用的对话模型服务商；请先检查 API Key 或服务商鉴权，再重跑可编辑页面任务。"
+        : "可编辑重建需要可用的对话模型服务商；请先充值或切换对话模型服务商，再重跑可编辑页面任务。"),
+      severity: providerFailure.blocked ? "blocked" : "warning",
+      targetStepId: "fix-llm-provider",
+      source: "editable-worker-preflight",
+      providerKind: "llm",
+      recoveryPlan
+    }];
+  }
   if (!providerReady) {
     return [{
       id: "configure-external-image-runtime",
@@ -545,6 +717,34 @@ function buildProviderActions(providerEvidence = {}, providerReady = false) {
     runtimeKey: runtimeLabel,
     approvedBackendKey: backendLabel
   }];
+}
+
+function buildLlmProviderRecoveryPlan({ providerFailure = {}, recentProviderFailure = {}, llmProviderRecovered = {} } = {}) {
+  const activeFailure = providerFailure.blocked ? providerFailure : recentProviderFailure.found ? recentProviderFailure : {};
+  const pages = Array.isArray(activeFailure.pages) ? activeFailure.pages.filter(Boolean) : [];
+  const isAuth = activeFailure.kind === "provider-auth-failed";
+  const stepOne = isAuth
+    ? "检查对话模型 API Key、Base URL 和服务商鉴权"
+    : "充值或切换对话模型服务商，不需要改 gpt-image-2";
+  return {
+    required: Boolean(providerFailure.blocked || recentProviderFailure.found || llmProviderRecovered.required),
+    kind: activeFailure.kind || "",
+    pages,
+    confirmed: Boolean(llmProviderRecovered.confirmed),
+    steps: [
+      stepOne,
+      "重置失败的可编辑页面任务，清掉旧失败证据",
+      "确认对话模型已恢复，并重新启动可编辑重建",
+      "页面任务通过后重新生成最终 PPT，只有交付门禁通过才开放下载"
+    ],
+    apiSequence: [
+      "POST /api/workflow-jobs/:id/pages/retry-failed",
+      "POST /api/workflow-jobs/:id/editable/worker-runs/preflight",
+      "POST /api/workflow-jobs/:id/editable/worker-runs",
+      "POST /api/workflow-jobs/:id/editable/finalize"
+    ],
+    note: "恢复对话模型后不能复用旧失败最终文件；必须重置失败页并重新跑可编辑重建页面任务。"
+  };
 }
 
 function buildAuthorizationActions({ approvedGates = new Set(), sampleAuthorization = {}, fullDeckAuthorization = {}, sampleEvidence = {}, providerReady = false, sourcePages = 0 } = {}) {
@@ -579,7 +779,7 @@ function buildAuthorizationActions({ approvedGates = new Set(), sampleAuthorizat
   return actions;
 }
 
-function buildEffectiveDeliveryNextStep(styleActions = [], providerActions = [], authorizationActions = [], codexSlideActions = [], stalePageEvidenceActions = [], deliveryNextStep = null) {
+function buildEffectiveDeliveryNextStep(styleActions = [], providerActions = [], authorizationActions = [], preflightActions = [], codexSlideActions = [], stalePageEvidenceActions = [], deliveryNextStep = null) {
   const styleAction = styleActions.find((action) => action?.targetStepId);
   if (styleAction) {
     return {
@@ -597,7 +797,8 @@ function buildEffectiveDeliveryNextStep(styleActions = [], providerActions = [],
       label: blockingProviderAction.label || "处理服务商运行环境",
       reason: blockingProviderAction.detail || "继续前请先处理服务商运行环境证据。",
       source: "provider-runtime",
-      actionId: blockingProviderAction.id || ""
+      actionId: blockingProviderAction.id || "",
+      recoveryPlan: blockingProviderAction.recoveryPlan || null
     };
   }
   const authorizationAction = authorizationActions.find((action) => action?.targetStepId);
@@ -615,9 +816,19 @@ function buildEffectiveDeliveryNextStep(styleActions = [], providerActions = [],
     return {
       id: stalePageEvidenceAction.targetStepId || stalePageEvidenceAction.id,
       label: stalePageEvidenceAction.label || "重置过期页面证据",
-      reason: stalePageEvidenceAction.detail || "页面证据哈希已过期，请重置相关页面后重新运行 editable 页面任务。",
+      reason: stalePageEvidenceAction.detail || "页面证据哈希已过期，请重置相关页面后重新运行可编辑页面任务。",
       source: "page-evidence",
       actionId: stalePageEvidenceAction.id || ""
+    };
+  }
+  const workerPreflightAction = preflightActions.find((action) => action?.severity === "blocked" || action?.severity === "warning");
+  if (workerPreflightAction) {
+    return {
+      id: workerPreflightAction.targetStepId || workerPreflightAction.id || "start-page-workers",
+      label: workerPreflightAction.label || "确认可编辑重建任务",
+      reason: workerPreflightAction.detail || "启动可编辑重建页面任务前需要先完成预检确认。",
+      source: "editable-worker-preflight",
+      actionId: workerPreflightAction.id || ""
     };
   }
   const blockingCodexSlideAction = codexSlideActions.find((action) => action?.targetStepId);
@@ -637,7 +848,7 @@ function buildStalePageEvidenceActions(pageEvidence = {}) {
   return [{
     id: "retry-stale-page-evidence",
     label: "重置过期页面证据",
-    detail: `检测到 ${pageIds.length} 页 editable 页面任务证据哈希已过期，请先重置这些页面，再启动页面任务重跑。`,
+    detail: `检测到 ${pageIds.length} 页可编辑页面任务证据哈希已过期，请先重置这些页面，再启动页面任务重跑。`,
     severity: "blocked",
     targetStepId: "retry-stale-page-evidence",
     pages: pageIds
@@ -649,7 +860,7 @@ function stalePageEvidencePageIds(pageEvidence = {}) {
   const ids = new Set();
   for (const issue of issues) {
     const issueText = String(issue?.issue || issue?.code || issue || "");
-    if (!/hash-mismatch-/i.test(issueText)) continue;
+    if (!/hash-mismatch-|page-pptx-powerpoint-open-failed/i.test(issueText)) continue;
     const pageId = issue?.pageId || issue?.page || issue?.id || "";
     if (pageId) ids.add(String(pageId));
   }
@@ -784,10 +995,19 @@ function buildVisualSampleEvidence(sample = {}, providerEvidence = {}) {
   };
 }
 
-function buildTextHintCoverageEvidence(artifacts = {}, sourcePages = 0) {
+function getCurrentWorkflowScopePages(artifacts = {}, counts = {}) {
+  return numberOrZero(artifacts.imageDeck?.pageCount)
+    || numberOrZero(counts.visualImages)
+    || numberOrZero(counts.editableTasks)
+    || numberOrZero(artifacts.editableHints?.summary?.pageCount)
+    || numberOrZero(artifacts.editableRun?.textHints?.pageCount)
+    || numberOrZero(counts.sourcePages);
+}
+
+function buildTextHintCoverageEvidence(artifacts = {}, expectedScopePages = 0, sourcePages = 0) {
   const ocr = artifacts.ocrTextHints || {};
   const editableSummary = artifacts.editableHints?.summary || artifacts.editableRun?.textHints || {};
-  const expectedPages = numberOrZero(sourcePages)
+  const expectedPages = numberOrZero(expectedScopePages)
     || numberOrZero(artifacts.imageDeck?.pageCount)
     || numberOrZero(editableSummary.pageCount)
     || numberOrZero(ocr.pageCount);
@@ -804,6 +1024,8 @@ function buildTextHintCoverageEvidence(artifacts = {}, sourcePages = 0) {
   const textLineCount = Math.max(ocrTextCount, editableHintLineCount);
   return {
     expectedPages,
+    sourcePages: numberOrZero(sourcePages),
+    partialScope: Boolean(sourcePages && expectedPages && expectedPages < sourcePages),
     coveredPages,
     coverageRatio,
     ready: Boolean(expectedPages && coveredPages >= expectedPages && textLineCount > 0),
@@ -894,7 +1116,10 @@ function looksLikeDryRun(value = "") {
 }
 
 function normalizeBaseUrl(value = "") {
-  return String(value || "").trim().replace(/\/+$/, "");
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/v\d+$/i, "");
 }
 
 function hasCjk(value = "") {

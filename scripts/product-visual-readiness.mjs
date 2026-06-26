@@ -148,6 +148,7 @@ async function main() {
       job = await runJobStep(baseUrl, job.id, "visual/generate", {
         maxPages: deckPageLimit,
         pages: `1-${deckPageLimit}`,
+        confirmExternalImageSpend: true,
         styleBrief: "Premium clean business presentation visual, modern hierarchy, no long readable text."
       });
       const visualImages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [];

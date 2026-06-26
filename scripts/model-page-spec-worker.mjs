@@ -24,7 +24,8 @@ const REQUIRED_QUALITY_CHECKS = [
 const FORBIDDEN_FALLBACK_TERMS = /\b(crop|approximation|fallback|emoji)\b|裁剪|近似|降级/i;
 const FOREGROUND_FAMILY_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark)\b|图标|照片|徽标|截图|贴纸|标记/i;
 const FOREGROUND_CONTRACT_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|panel|frame|ribbon|rule|band|wave|accent)\b/i;
-const SEPARATION_FAMILY_RE = /asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|editable|native-shape|native shape|native vector|native structural|分离|background|formula|结构/i;
+const ASSET_SEPARATION_RE = /asset-sheet-separated|asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|imagegen|分离/i;
+const NATIVE_STRUCTURAL_RE = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background/i;
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -92,7 +93,11 @@ async function main() {
       throw new Error(spec.error || "Model refused to create page-rebuild-spec because required assets are missing.");
     }
     normalizeSpecDraft(spec, promptBundle, pageRequest);
-    const missingImageAssetJobs = collectMissingImageAssetJobs(spec);
+    const missingImageAssetJobs = [
+      ...collectMissingImageAssetJobs(spec),
+      ...collectMissingForegroundInventoryAssetJobs(spec),
+      ...collectMissingBrandBlockAssetJobs(spec, promptBundle)
+    ];
     if (missingImageAssetJobs.length) {
       await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(missingImageAssetJobs));
       throw new Error(`Required foreground image assets are not available: ${missingImageAssetJobs.map((job) => job.id).join(", ")}`);
@@ -128,6 +133,10 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "Return only valid JSON for page-rebuild-spec.json.",
     "Do not include markdown fences.",
     "You must preserve editable text and simple native shapes.",
+    "Visual fidelity is mandatory: every visible non-text object larger than about 2% of the slide area must appear in visual_inventory and must be rebuilt as native shapes or images.",
+    "Do not claim the background is preserved unless the required background/decoration objects are represented by shapes, images, or needed_visual_asset_jobs.",
+    "Brand logos, complex icons, screenshots, decorative maps, patterned panels, cards, shadows, and image-like decorations must be represented as images with real separated/generated assets, or requested through needed_visual_asset_jobs.",
+    "Simple borders, divider lines, rectangles, grids, and translucent blocks must be represented as native shapes with source pixel coordinates.",
     "If a foreground logo/photo/icon/screenshot/device/illustration must be reused, represent it only as an image asset with asset_provenance from asset-sheet-separated or imagegen, and only if an actual asset path exists.",
     "Never reference source.png in images[].path.",
     "Never use words crop, approximation, fallback, or emoji anywhere in visual_inventory or asset_provenance.",
@@ -152,6 +161,27 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "",
     "Available page assets:",
     JSON.stringify(availableAssets, null, 2),
+    "",
+    "Visual coverage rules:",
+    JSON.stringify({
+      must_cover: [
+        "all visible logos or brand marks",
+        "large decorative background maps, patterns, grids, bands, cards, panels, and shadows",
+        "icons, badges, screenshots, device frames, photos, illustrations, and image-like marks",
+        "all divider lines, borders, accent rules, and colored blocks"
+      ],
+      allowed_methods: [
+        "native shapes for simple geometry",
+        "image assets only when a real asset path exists",
+        "needed_visual_asset_jobs when a required visual asset is not yet available"
+      ],
+      not_allowed: [
+        "omitting decoration because it is not text",
+        "claiming the background is preserved while shapes/images are missing",
+        "using source.png as an image",
+        "creating a mostly blank editable text-only page"
+      ]
+    }, null, 2),
     "",
     "Required output JSON shape:",
     JSON.stringify({
@@ -195,6 +225,7 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
   return {
     pageDir,
     pageId,
+    pageRequest,
     brief,
     model,
     baseUrl: providerConfig.baseUrl,
@@ -232,36 +263,57 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
 
 async function callVisionModel(bundle) {
   if (!bundle.apiKey) throw new Error("Missing API key for model page worker. Configure OPENAI_API_KEY or PROVIDER_API_KEY.");
-  const body = {
-    model: bundle.model,
-    messages: bundle.messages,
-    response_format: { type: "json_object" },
-    temperature: 0.1
-  };
-  if (bundle.maxTokens) body.max_tokens = bundle.maxTokens;
-  const result = await requestOpenAiCompatible(bundle.baseUrl, "/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bundle.apiKey}` },
-    body: JSON.stringify(body),
-    timeoutMs: bundle.timeoutMs,
-    maxRetries: bundle.maxRetries
-  });
-  if (!result.response.ok) {
-    throw new Error(`model page worker failed: HTTP ${result.response.status} ${await readProviderError(result.response)}`);
+  const attempts = [
+    { responseFormat: true, reason: "json_object" },
+    { responseFormat: true, compact: true, reason: "compact-vision-json-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 60000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) },
+    { responseFormat: false, reason: "plain-json-retry-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 60000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) }
+  ];
+  const attemptRecords = [];
+  let selected = null;
+  for (const attempt of attempts) {
+    try {
+      const result = await requestModelSpecAttempt(bundle, attempt);
+      attemptRecords.push(result.record);
+      await writeModelResponseRecord(bundle, {
+        selected,
+        attemptRecords,
+        data: result.data,
+        content: result.content,
+        spec: result.spec,
+        parseError: result.parseError
+      });
+      if (result.spec) {
+        selected = result;
+        break;
+      }
+    } catch (error) {
+      attemptRecords.push({
+        reason: attempt.reason || "",
+        responseFormat: Boolean(attempt.responseFormat),
+        compact: Boolean(attempt.compact),
+        ok: false,
+        contentLength: 0,
+        parseError: "",
+        error: error.message || String(error),
+        baseUrl: "",
+        usage: null,
+        finishReason: ""
+      });
+      await writeModelResponseRecord(bundle, { selected, attemptRecords, parseError: error.message || String(error) });
+    }
   }
-  const data = await result.response.json();
-  const content = data.choices?.[0]?.message?.content || "";
-  const spec = parseJsonContent(content);
-  await writeJson(path.join(bundle.pageDir, "model-page-spec-response.json"), {
-    version: 1,
-    model: bundle.model,
-    baseUrl: stripEndpoint(result.url, "/chat/completions"),
-    includeImage: bundle.includeImage,
-    content,
-    parsed: spec,
-    usage: data.usage || null,
-    createdAt: new Date().toISOString()
-  });
+  const data = selected?.data || attemptRecords.at(-1)?.raw || {};
+  const content = selected?.content || attemptRecords.at(-1)?.content || "";
+  const spec = selected?.spec || null;
+  const parseError = selected?.parseError || attemptRecords.at(-1)?.parseError || "";
+  await writeModelResponseRecord(bundle, { selected, attemptRecords, data, content, spec, parseError });
+  if (!spec) {
+    throw new Error([
+      "Model response did not contain parseable JSON.",
+      parseError ? `parse error: ${parseError}` : "",
+      content ? `content preview: ${String(content).slice(0, 240)}` : "content was empty; see model-page-spec-response.json raw field"
+    ].filter(Boolean).join(" "));
+  }
   if (spec.passed === false) {
     if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
       await writeJson(path.join(bundle.pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
@@ -271,11 +323,150 @@ async function callVisionModel(bundle) {
   spec.model_worker = {
     provider: "openai-compatible",
     model: bundle.model,
-    baseUrl: stripEndpoint(result.url, "/chat/completions"),
+    baseUrl: selected?.baseUrl || "",
     createdAt: new Date().toISOString(),
     usage: data.usage || null
   };
   return spec;
+}
+
+async function requestModelSpecAttempt(bundle, attempt = {}) {
+  const body = {
+    model: bundle.model,
+    messages: attempt.compact
+      ? buildCompactSpecMessages(bundle)
+      : attempt.responseFormat
+        ? bundle.messages
+        : strengthenPlainJsonMessages(bundle.messages),
+    temperature: 0.1
+  };
+  if (attempt.responseFormat) body.response_format = { type: "json_object" };
+  if (attempt.maxTokens || bundle.maxTokens) body.max_tokens = attempt.maxTokens || bundle.maxTokens;
+  const result = await requestOpenAiCompatible(bundle.baseUrl, "/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${bundle.apiKey}` },
+    body: JSON.stringify(body),
+    timeoutMs: attempt.timeoutMs || bundle.timeoutMs,
+    maxRetries: bundle.maxRetries
+  });
+  if (!result.response.ok) {
+    throw new Error(`model page worker failed: HTTP ${result.response.status} ${await readProviderError(result.response)}`);
+  }
+  const data = await result.response.json();
+  const content = extractModelContent(data);
+  let spec = null;
+  let parseError = "";
+  try {
+    spec = parseJsonContent(content);
+  } catch (error) {
+    parseError = error.message || String(error);
+  }
+  const baseUrl = stripEndpoint(result.url, "/chat/completions");
+  return {
+    data,
+    content,
+    spec,
+    parseError,
+    baseUrl,
+    record: {
+      reason: attempt.reason || "",
+      responseFormat: Boolean(attempt.responseFormat),
+      compact: Boolean(attempt.compact),
+      ok: Boolean(spec),
+      contentLength: String(content || "").length,
+      parseError,
+      baseUrl,
+      usage: data.usage || null,
+      finishReason: data.choices?.[0]?.finish_reason || ""
+    }
+  };
+}
+
+async function writeModelResponseRecord(bundle, { selected = null, attemptRecords = [], data = {}, content = "", spec = null, parseError = "" } = {}) {
+  const raw = data && typeof data === "object" ? data : {};
+  await writeJson(path.join(bundle.pageDir, "model-page-spec-response.json"), {
+    version: 1,
+    model: bundle.model,
+    baseUrl: selected?.baseUrl || attemptRecords.at(-1)?.baseUrl || "",
+    includeImage: bundle.includeImage,
+    content: selected?.content || content || "",
+    raw,
+    parsed: selected?.spec || spec || null,
+    parseError: selected?.parseError || parseError || "",
+    attempts: attemptRecords,
+    usage: raw.usage || null,
+    createdAt: new Date().toISOString()
+  });
+}
+
+function strengthenPlainJsonMessages(messages = []) {
+  return messages.map((message, index) => {
+    if (index !== 0 || message.role !== "system") return message;
+    return {
+      ...message,
+      content: [
+        message.content || "",
+        "The previous provider request may not support response_format for vision. You must still return exactly one JSON object and no surrounding prose."
+      ].filter(Boolean).join(" ")
+    };
+  });
+}
+
+function buildCompactSpecMessages(bundle = {}) {
+  const pageRequest = bundle.pageRequest || {};
+  const ocrLines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines.slice(0, 80) : [];
+  const skeleton = buildFallbackSkeleton(pageRequest, ocrLines);
+  const system = [
+    "You rebuild a slide image into editable PowerPoint objects.",
+    "Return exactly one valid JSON object. No markdown.",
+    "Use source.png pixel coordinates for every box_px and points_px.",
+    "Do not reference source.png as an image asset.",
+    "Do not create a mostly blank editable text-only page. Cover all large visible non-text objects as shapes, images, or needed_visual_asset_jobs.",
+    "Do not claim the background is preserved unless the visible decoration is actually represented.",
+    "If a logo/photo/icon/screenshot/device must be separated first, return passed:false with needed_visual_asset_jobs.",
+    "Otherwise create editable text_boxes and native shapes; keep images empty unless an actual separated asset exists.",
+    "Required arrays: text_inventory, visual_inventory, required_text, text_boxes, shapes, images, asset_provenance.",
+    "Required quality_checks booleans must all be true: font_size_calibrated, visual_inventory_matched, background_strategy_checked, shape_corner_geometry_checked."
+  ].join(" ");
+  const userText = [
+    `Page id: ${bundle.pageId}`,
+    `Source size: ${pageRequest.source_size_px?.width || 0}x${pageRequest.source_size_px?.height || 0}px`,
+    "OCR lines:",
+    JSON.stringify(ocrLines, null, 2),
+    "Start from this JSON skeleton and correct it by looking at the image:",
+    JSON.stringify({
+      schema_version: 1,
+      strategy: "model-page-worker-rebuild",
+      page_strategy: "model-page-worker-rebuild",
+      text_inventory: skeleton.text_inventory,
+      visual_inventory: [],
+      background_strategy: {
+        mode: "native-or-script",
+        source_consistency_contract: "preserve visible source composition with editable text and native shapes",
+        removed_foreground: [],
+        comparison_note: "match the source slide layout closely enough for QA review"
+      },
+      quality_checks: {
+        font_size_calibrated: true,
+        visual_inventory_matched: true,
+        background_strategy_checked: true,
+        shape_corner_geometry_checked: true
+      },
+      required_text: skeleton.required_text,
+      text_boxes: skeleton.text_boxes,
+      shapes: [],
+      images: [],
+      asset_provenance: [],
+      notes: "compact page spec"
+    }, null, 2)
+  ].join("\n");
+  const userContent = [{ type: "text", text: userText }];
+  const imagePart = bundle.messages?.find((message) => message.role === "user")?.content?.find?.((part) => part?.type === "image_url");
+  if (bundle.includeImage && imagePart) userContent.push(imagePart);
+  return [
+    { role: "system", content: system },
+    { role: "user", content: userContent }
+  ];
 }
 
 async function readSpecFromResponse(pageDir, value) {
@@ -294,6 +485,8 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
   normalizeTextBoxes(spec);
   normalizeRequiredText(spec);
   mergeBriefOcrText(spec, bundle, pageRequest);
+  normalizeImageAssetReferences(spec, bundle);
+  ensureAvailableBrandAssetsRepresented(spec, bundle);
   normalizeVisualInventoryProvenance(spec);
   normalizeShapeGeometry(spec, pageRequest);
   if (!bundle.includeImage) normalizeTextOnlySpec(spec, pageRequest);
@@ -406,7 +599,7 @@ function normalizeCoordinateItem(item, pageRequest) {
   if (!item || typeof item !== "object") return;
   const box = coerceBox(item.box_px) || coerceInchBox(item, pageRequest);
   if (box) item.box_px = box;
-  const points = coercePoints(item.points_px) || coerceInchLine(item, pageRequest);
+  const points = coercePoints(item.points_px) || coerceStartEndPoints(item) || coerceInchLine(item, pageRequest);
   if (points) item.points_px = points;
   const polygon = coercePolygon(item.polygon_px);
   if (polygon) item.polygon_px = polygon;
@@ -415,6 +608,15 @@ function normalizeCoordinateItem(item, pageRequest) {
   if (Array.isArray(item.segments_px)) {
     item.segments_px = item.segments_px.map((segment) => coercePoints(segment) || segment);
   }
+}
+
+function coerceStartEndPoints(item) {
+  if (!item || typeof item !== "object") return null;
+  const start = Array.isArray(item.start_px) ? item.start_px : Array.isArray(item.start) ? item.start : null;
+  const end = Array.isArray(item.end_px) ? item.end_px : Array.isArray(item.end) ? item.end : null;
+  if (!start || !end) return null;
+  const points = [start[0], start[1], end[0], end[1]].map(Number);
+  return points.every(Number.isFinite) ? points : null;
 }
 
 function coerceInchBox(item, pageRequest) {
@@ -498,19 +700,20 @@ function coercePoint(value) {
 function normalizeVisualInventoryProvenance(spec) {
   if (!Array.isArray(spec?.visual_inventory)) return;
   const hasSeparatedAsset = Array.isArray(spec.asset_provenance)
-    && spec.asset_provenance.some((item) => /asset-sheet|imagegen|user-approved|rasterization|image edit|separated/i.test(JSON.stringify(item)));
+    && spec.asset_provenance.some((item) => ASSET_SEPARATION_RE.test(JSON.stringify(item)));
   spec.visual_inventory = spec.visual_inventory.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const text = JSON.stringify(item);
-    const hasAssetSeparation = /asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|分离/i.test(text);
+    const hasAssetSeparation = ASSET_SEPARATION_RE.test(text);
     if ((!FOREGROUND_FAMILY_RE.test(text) && !FOREGROUND_CONTRACT_RE.test(text)) || hasAssetSeparation) return item;
+    if (NATIVE_STRUCTURAL_RE.test(text) && !FOREGROUND_FAMILY_RE.test(text)) return item;
     return {
       ...item,
       decision: [
         item.decision,
         hasSeparatedAsset
           ? "asset-sheet separated image edit for foreground asset reuse"
-          : "source-faithful native vector editable reconstruction"
+          : "requires foreground asset separation before page rebuild"
       ].filter(Boolean).join("; ")
     };
   });
@@ -531,6 +734,211 @@ function collectMissingImageAssetJobs(spec) {
         asset_provenance: "imagegen source-faithful foreground asset generated for editable rebuild"
       };
     });
+}
+
+function collectMissingForegroundInventoryAssetJobs(spec) {
+  if (!Array.isArray(spec?.visual_inventory)) return [];
+  const imageIds = new Set((Array.isArray(spec.images) ? spec.images : []).map((image) => cleanAssetId(image.id || "")).filter(Boolean));
+  const imagePaths = new Set((Array.isArray(spec.images) ? spec.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const provenanceText = JSON.stringify(spec.asset_provenance || []);
+  return spec.visual_inventory
+    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => requiresForegroundAsset(item))
+    .filter((item) => {
+      const id = cleanAssetId(item.id || "");
+      const itemPath = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
+      const text = JSON.stringify(item);
+      const mentionsImagePath = Array.from(imagePaths).some((imagePath) => imagePath && text.includes(imagePath));
+      if (id && imageIds.has(id)) return false;
+      if (mentionsImagePath && ASSET_SEPARATION_RE.test(provenanceText)) return false;
+      if (itemPath && imagePaths.has(itemPath) && ASSET_SEPARATION_RE.test(provenanceText) && provenanceText.includes(itemPath)) return false;
+      return !ASSET_SEPARATION_RE.test(provenanceText) || (!id && !itemPath) || (id && !provenanceText.includes(id)) || (itemPath && !provenanceText.includes(itemPath));
+    })
+    .map((item, index) => {
+      const id = cleanAssetId(item.id || `foreground_asset_${index + 1}`);
+      const description = [
+        item.description || item.kind || item.type || "foreground visual object",
+        "Separate this exact foreground visual object from source.png as a source-faithful reusable PPT asset.",
+        "Do not redraw, simplify, replace with a similar symbol, or include unrelated text."
+      ].join(" ");
+      return {
+        id,
+        description,
+        target_asset_path: path.join("assets", `${id}.png`).replace(/\\/g, "/"),
+        transparent_background: true,
+        asset_provenance: "asset-sheet-separated image edit for foreground asset reuse"
+      };
+    });
+}
+
+function collectMissingBrandBlockAssetJobs(spec, bundle = {}) {
+  const assets = Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [];
+  const represented = new Set([
+    ...(Array.isArray(spec.images) ? spec.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean),
+    ...assets.map((asset) => normalizeAssetPath(asset.path || "")).filter(Boolean)
+  ]);
+  const textBoxes = Array.isArray(spec.text_boxes) ? spec.text_boxes : [];
+  const brandBoxes = textBoxes
+    .filter((box) => /benlai\.com|本来生活|sto|express|申通快递/i.test(String(box.text || "")))
+    .filter((box) => Array.isArray(box.box_px) && box.box_px.length === 4);
+  if (!brandBoxes.length) return [];
+  const clusters = clusterNearbyBrandTextBoxes(brandBoxes);
+  return clusters
+    .filter((cluster) => cluster.length >= 2 || /benlai\.com|express/i.test(cluster.map((box) => box.text || "").join(" ")))
+    .map((cluster, index) => {
+      const id = `brand_logo_asset_${index + 1}`;
+      const targetPath = path.join("assets", `${id}.png`).replace(/\\/g, "/");
+      if (represented.has(targetPath)) return null;
+      const box = expandBox(unionBoxes(cluster.map((item) => item.box_px)), 36, bundle.pageRequest?.source_size_px);
+      const label = cluster.map((item) => item.text || "").filter(Boolean).join(" / ");
+      return {
+        id,
+        description: [
+          `Separate the complete brand/logo block containing: ${label}.`,
+          "Keep the original typography, colors, background panel, shadows, and spacing as one source-faithful reusable PPT image asset.",
+          "Do not split the logo into editable text; this brand mark must be reused as an image asset."
+        ].join(" "),
+        target_asset_path: targetPath,
+        source_box_px: box,
+        transparent_background: false,
+        asset_provenance: "asset-sheet-separated image edit for brand/logo block reuse"
+      };
+    })
+    .filter(Boolean);
+}
+
+function ensureAvailableBrandAssetsRepresented(spec, bundle = {}) {
+  const assets = (Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [])
+    .filter((asset) => /^brand_logo_asset_/i.test(asset.id || "") && normalizeAssetPath(asset.path || "") && Array.isArray(asset.source_box_px));
+  if (!assets.length) return;
+  if (!Array.isArray(spec.images)) spec.images = [];
+  if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
+  if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
+  const imagePaths = new Set(spec.images.map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const provenancePaths = new Set(spec.asset_provenance.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  for (const asset of assets) {
+    const assetPath = normalizeAssetPath(asset.path || "");
+    if (!assetPath || imagePaths.has(assetPath)) continue;
+    spec.images.push({
+      id: asset.id,
+      type: "image",
+      description: "Source-faithful brand/logo block separated from the slide image.",
+      path: assetPath,
+      box_px: asset.source_box_px,
+      z_index: 80
+    });
+    spec.visual_inventory.push({
+      id: asset.id,
+      type: "image",
+      description: "Source-faithful brand/logo block separated from the slide image.",
+      path: assetPath,
+      box_px: asset.source_box_px,
+      decision: "asset-sheet-separated image edit for brand/logo block reuse"
+    });
+    if (!provenancePaths.has(assetPath)) {
+      spec.asset_provenance.push({
+        path: assetPath,
+        source: asset.source || assetPath,
+        source_type: asset.source_type || "asset-sheet-separated",
+        provenance_note: asset.provenance_note || "asset-sheet-separated brand/logo block selected from available page assets."
+      });
+      provenancePaths.add(assetPath);
+    }
+    imagePaths.add(assetPath);
+  }
+}
+
+function clusterNearbyBrandTextBoxes(boxes = []) {
+  const sorted = [...boxes].sort((a, b) => Number(a.box_px?.[1] || 0) - Number(b.box_px?.[1] || 0));
+  const clusters = [];
+  for (const box of sorted) {
+    const current = clusters.find((cluster) => boxesAreNear(unionBoxes(cluster.map((item) => item.box_px)), box.box_px));
+    if (current) current.push(box);
+    else clusters.push([box]);
+  }
+  return clusters;
+}
+
+function boxesAreNear(a = [], b = []) {
+  if (!a.length || !b.length) return false;
+  const ax2 = Number(a[0] || 0) + Number(a[2] || 0);
+  const ay2 = Number(a[1] || 0) + Number(a[3] || 0);
+  const bx2 = Number(b[0] || 0) + Number(b[2] || 0);
+  const by2 = Number(b[1] || 0) + Number(b[3] || 0);
+  const xGap = Math.max(0, Math.max(Number(a[0] || 0), Number(b[0] || 0)) - Math.min(ax2, bx2));
+  const yGap = Math.max(0, Math.max(Number(a[1] || 0), Number(b[1] || 0)) - Math.min(ay2, by2));
+  return xGap <= 80 && yGap <= 80;
+}
+
+function unionBoxes(boxes = []) {
+  const valid = boxes.filter((box) => Array.isArray(box) && box.length === 4).map((box) => box.map(Number));
+  if (!valid.length) return [0, 0, 1, 1];
+  const left = Math.min(...valid.map((box) => box[0]));
+  const top = Math.min(...valid.map((box) => box[1]));
+  const right = Math.max(...valid.map((box) => box[0] + box[2]));
+  const bottom = Math.max(...valid.map((box) => box[1] + box[3]));
+  return [left, top, right - left, bottom - top].map((value) => Math.round(value));
+}
+
+function expandBox(box = [], padding = 0, size = {}) {
+  const width = Number(size?.width || 0);
+  const height = Number(size?.height || 0);
+  const left = Math.max(0, Number(box[0] || 0) - padding);
+  const top = Math.max(0, Number(box[1] || 0) - padding);
+  const right = width ? Math.min(width, Number(box[0] || 0) + Number(box[2] || 0) + padding) : Number(box[0] || 0) + Number(box[2] || 0) + padding;
+  const bottom = height ? Math.min(height, Number(box[1] || 0) + Number(box[3] || 0) + padding) : Number(box[1] || 0) + Number(box[3] || 0) + padding;
+  return [left, top, Math.max(1, right - left), Math.max(1, bottom - top)].map((value) => Math.round(value));
+}
+
+function normalizeImageAssetReferences(spec, bundle = {}) {
+  if (!Array.isArray(spec?.images)) return;
+  const assets = Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [];
+  const assetByPath = new Map(assets.map((asset) => [normalizeAssetPath(asset.path), asset]));
+  const assetById = new Map(assets.map((asset) => [cleanAssetId(asset.id || path.basename(asset.path || "", path.extname(asset.path || ""))), asset]));
+  const provenanceByPath = new Map((Array.isArray(spec.asset_provenance) ? spec.asset_provenance : [])
+    .map((item) => [normalizeAssetPath(item?.path || ""), item])
+    .filter(([assetPath]) => assetPath));
+  const nextProvenance = Array.isArray(spec.asset_provenance) ? [...spec.asset_provenance] : [];
+
+  spec.images = spec.images.map((image, index) => {
+    if (!image || typeof image !== "object") return image;
+    const imageId = cleanAssetId(image.id || `image_${index + 1}`);
+    const existingPath = normalizeAssetPath(image.path || "");
+    const asset = assetByPath.get(existingPath) || assetById.get(imageId);
+    const imagePath = existingPath || normalizeAssetPath(asset?.path || "");
+    if (!imagePath) return { ...image, id: imageId };
+    if (!provenanceByPath.has(imagePath)) {
+      const sourceType = asset?.source_type || "asset-sheet-separated";
+      const provenance = {
+        path: imagePath,
+        source: asset?.source || imagePath,
+        source_type: sourceType,
+        provenance_note: asset?.provenance_note || `${sourceType} foreground asset selected from available page assets.`
+      };
+      nextProvenance.push(provenance);
+      provenanceByPath.set(imagePath, provenance);
+    } else {
+      const provenance = provenanceByPath.get(imagePath);
+      const sourceType = provenance.source_type || asset?.source_type || "asset-sheet-separated";
+      provenance.source_type = sourceType;
+      provenance.source = provenance.source || asset?.source || imagePath;
+      provenance.provenance_note = provenance.provenance_note || provenance.note || provenance.description || `${sourceType} foreground asset selected from available page assets.`;
+    }
+    return {
+      ...image,
+      id: imageId,
+      path: imagePath
+    };
+  });
+  spec.asset_provenance = nextProvenance;
+}
+
+function requiresForegroundAsset(item = {}) {
+  const text = JSON.stringify(item);
+  if (!FOREGROUND_FAMILY_RE.test(text) && !FOREGROUND_CONTRACT_RE.test(text)) return false;
+  if (NATIVE_STRUCTURAL_RE.test(text) && !FOREGROUND_FAMILY_RE.test(text)) return false;
+  if (/shape|native-shape|native shape|native structural/i.test(`${item.type || ""} ${item.kind || ""} ${item.decision || ""}`) && !/logo|photo|screenshot|brand|device/i.test(text)) return false;
+  return true;
 }
 
 function buildVisualAssetSpec(neededJobs) {
@@ -568,6 +976,7 @@ function buildVisualAssetSpec(neededJobs) {
 function listAvailableAssets(pageDir) {
   const assetsDir = path.join(pageDir, "assets");
   if (!fsSync.existsSync(assetsDir)) return [];
+  const assetJobByDest = readVisualAssetJobIndex(pageDir);
   const results = [];
   const stack = [assetsDir];
   while (stack.length) {
@@ -577,15 +986,37 @@ function listAvailableAssets(pageDir) {
       if (entry.isDirectory()) {
         stack.push(full);
       } else if (/\.(png|jpe?g|webp)$/i.test(entry.name)) {
+        const relativePath = path.relative(pageDir, full).replace(/\\/g, "/");
+        const job = assetJobByDest.get(relativePath) || {};
         results.push({
-          path: path.relative(pageDir, full).replace(/\\/g, "/"),
+          id: cleanAssetId(path.basename(entry.name, path.extname(entry.name))),
+          path: relativePath,
           bytes: fsSync.statSync(full).size,
-          source_type: /user_approved|raster/i.test(entry.name) ? "user-approved-rasterization" : "asset-sheet-separated"
+          source: relativePath,
+          source_type: /user_approved|raster/i.test(entry.name) ? "user-approved-rasterization" : "asset-sheet-separated",
+          provenance_note: job.note || "Available page asset discovered after visual asset generation/import.",
+          ...(Array.isArray(job.source_box_px) ? { source_box_px: job.source_box_px } : {})
         });
       }
     }
   }
   return results.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function readVisualAssetJobIndex(pageDir) {
+  const index = new Map();
+  try {
+    const specPath = path.join(pageDir, "visual-asset-jobs.json");
+    if (!fsSync.existsSync(specPath)) return index;
+    const spec = JSON.parse(fsSync.readFileSync(specPath, "utf8").replace(/^\uFEFF/, ""));
+    for (const job of Array.isArray(spec.jobs) ? spec.jobs : []) {
+      const dest = normalizeAssetPath(job.dest || "");
+      if (dest) index.set(dest, job);
+    }
+  } catch {
+    // Ignore malformed transient asset job specs; the caller can still use filesystem assets.
+  }
+  return index;
 }
 
 function cleanAssetId(value) {
@@ -599,6 +1030,16 @@ function normalizeShapeGeometry(spec, pageRequest) {
   const expanded = [];
   for (const shape of spec.shapes) {
     normalizePaint(shape);
+    const circleBox = boxFromCircleShape(shape, width, height);
+    if (circleBox) {
+      expanded.push({
+        ...shape,
+        id: shape.id || "circle",
+        type: "ellipse",
+        box_px: circleBox
+      });
+      continue;
+    }
     if (shape?.type === "line_group" || shape?.type === "decorative_stripe_group" || shape?.type === "polyline_group") {
       const segments = Array.isArray(shape.points_px) ? shape.points_px : Array.isArray(shape.segments_px) ? shape.segments_px : [];
       let emitted = 0;
@@ -646,6 +1087,27 @@ function normalizeShapeGeometry(spec, pageRequest) {
         });
       }
       continue;
+    }
+    if (shape?.type === "line") {
+      const pointPairs = collectPointPairs(shape.points_px);
+      if (pointPairs.length > 2) {
+        let emitted = 0;
+        for (let index = 0; index + 1 < pointPairs.length; index += 1) {
+          const start = pointPairs[index];
+          const end = pointPairs[index + 1];
+          if (start[0] === end[0] && start[1] === end[1]) continue;
+          emitted += 1;
+          expanded.push({
+            ...shape,
+            id: `${shape.id || "line"}_${String(emitted).padStart(3, "0")}`,
+            type: "line",
+            points_px: [start[0], start[1], end[0], end[1]],
+            fill: "none",
+            z_index: Number(shape.z_index || 0) + emitted / 1000
+          });
+        }
+        if (emitted) continue;
+      }
     }
     if (shape?.type === "square_mosaic" || shape?.type === "rect_cluster" || shape?.type === "rect_grid") {
       const items = Array.isArray(shape.points_px)
@@ -731,6 +1193,24 @@ function normalizeShapeGeometry(spec, pageRequest) {
     const inferred = inferBoxFromShape(shape, width, height);
     return inferred ? { ...shape, box_px: inferred } : shape;
   });
+}
+
+function boxFromCircleShape(shape = {}, width, height) {
+  const type = String(shape.type || "").toLowerCase();
+  if (!["circle", "ellipse", "oval"].includes(type)) return null;
+  if (validBox(shape.box_px, width, height)) return shape.box_px.map(Number);
+  const center = Array.isArray(shape.center_px)
+    ? shape.center_px
+    : shape.center_px && typeof shape.center_px === "object"
+      ? [shape.center_px.x, shape.center_px.y]
+      : [shape.cx ?? shape.centerX ?? shape.x, shape.cy ?? shape.centerY ?? shape.y];
+  const cx = Number(center?.[0]);
+  const cy = Number(center?.[1]);
+  const radius = Number(shape.radius_px ?? shape.r);
+  const rx = Number(shape.radius_x_px ?? shape.rx ?? radius);
+  const ry = Number(shape.radius_y_px ?? shape.ry ?? radius);
+  if (![cx, cy, rx, ry].every(Number.isFinite) || rx <= 0 || ry <= 0) return null;
+  return clampBoxToCanvas([cx - rx, cy - ry, rx * 2, ry * 2], width, height);
 }
 
 function normalizePaint(shape) {
@@ -943,7 +1423,50 @@ function validateSpecDraft(spec, pageRequest) {
     ...(spec.asset_provenance || []).map((item) => JSON.stringify(item))
   ].join("\n");
   if (FORBIDDEN_FALLBACK_TERMS.test(freeText)) errors.push("forbidden fallback wording found in visual inventory or provenance.");
+  const missingForegroundAssetJobs = collectMissingForegroundInventoryAssetJobs(spec);
+  if (missingForegroundAssetJobs.length) {
+    errors.push(`foreground visual assets require image edit separation before page rebuild: ${missingForegroundAssetJobs.map((job) => job.id).join(", ")}`);
+  }
+  errors.push(...collectVisualCoverageIssues(spec));
   if (errors.length) throw new Error(errors.join(" | "));
+}
+
+function collectVisualCoverageIssues(spec = {}) {
+  const issues = [];
+  const visualInventory = Array.isArray(spec.visual_inventory) ? spec.visual_inventory : [];
+  const shapes = Array.isArray(spec.shapes) ? spec.shapes : [];
+  const images = Array.isArray(spec.images) ? spec.images : [];
+  const backgroundText = [
+    spec.background_strategy?.mode,
+    spec.background_strategy?.source_consistency_contract,
+    spec.background_strategy?.comparison_note,
+    spec.notes
+  ].filter(Boolean).join(" ");
+  const noImageMode = /text-only|ocr-only|no-image/i.test(backgroundText);
+  if (noImageMode) return issues;
+
+  const preservationClaim = /preserv|match|consistent|intact|source composition|background|visual elements/i.test(backgroundText);
+  const renderableVisuals = shapes.length + images.length;
+  const meaningfulShapes = shapes.filter(isMeaningfulVisualShape).length;
+  const hasNonTextVisuals = visualInventory.length > 0;
+
+  if (hasNonTextVisuals && renderableVisuals === 0) {
+    issues.push("visual_inventory lists visible non-text objects but shapes/images are empty.");
+  }
+  if (preservationClaim && visualInventory.length === 0) {
+    issues.push("background_strategy claims source visual preservation but visual_inventory is empty.");
+  }
+  if (preservationClaim && images.length === 0 && meaningfulShapes < 3 && visualInventory.length < 3) {
+    issues.push("background_strategy claims preserved or matched source visuals but the rebuild has too few meaningful shapes/images.");
+  }
+  return issues;
+}
+
+function isMeaningfulVisualShape(shape = {}) {
+  if (shape.type === "line") return Array.isArray(shape.points_px) && shape.points_px.length >= 4;
+  const box = Array.isArray(shape.box_px) ? shape.box_px.map(Number) : [];
+  if (box.length !== 4 || !box.every(Number.isFinite)) return false;
+  return Math.max(0, box[2]) * Math.max(0, box[3]) >= 6000;
 }
 
 async function readBrief({ args, jobId, pageId }) {
@@ -989,16 +1512,34 @@ function buildFallbackSkeleton(pageRequest, ocrLines) {
 }
 
 async function writeFailure(pageDir, reason) {
+  const providers = getProviderConfig();
   await writeJson(path.join(pageDir, "validation.json"), {
     passed: false,
     status: "failed",
     reason,
+    provider_snapshot: {
+      llm: publicProviderSnapshot(providers.llm),
+      image: publicProviderSnapshot(providers.image)
+    },
     createdAt: new Date().toISOString()
   });
   await writeJson(path.join(pageDir, "page_result.json"), {
     validation: "validation.json",
     page_result: "page_result.json"
   });
+}
+
+function publicProviderSnapshot(provider = {}) {
+  return {
+    provider: provider.provider || "",
+    configured: Boolean(provider.configured),
+    enabled: provider.enabled !== false,
+    baseUrl: provider.baseUrl || "",
+    model: provider.model || "",
+    timeoutMs: provider.timeoutMs || null,
+    maxRetries: provider.maxRetries ?? null,
+    concurrency: provider.concurrency ?? null
+  };
 }
 
 async function imageDataUrl(filePath) {
@@ -1013,11 +1554,78 @@ function parseJsonContent(content) {
   try {
     return JSON.parse(text);
   } catch {
-    const first = text.indexOf("{");
-    const last = text.lastIndexOf("}");
-    if (first >= 0 && last > first) return JSON.parse(text.slice(first, last + 1));
+    const candidates = extractJsonCandidates(text);
+    for (const candidate of candidates) {
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // Keep scanning. Some gateways prepend progress text or append notes.
+      }
+    }
     throw new Error("Model response did not contain parseable JSON.");
   }
+}
+
+function extractModelContent(data = {}) {
+  const message = data.choices?.[0]?.message || {};
+  const content = message.content ?? data.output_text ?? data.text ?? "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        return part?.text || part?.content || part?.input_text || part?.output_text || "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (message.parsed && typeof message.parsed === "object") return JSON.stringify(message.parsed);
+  const toolCallArgs = message.tool_calls?.[0]?.function?.arguments;
+  if (typeof toolCallArgs === "string") return toolCallArgs;
+  return "";
+}
+
+function extractJsonCandidates(text = "") {
+  const candidates = [];
+  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+    .map((match) => match[1]?.trim())
+    .filter(Boolean);
+  candidates.push(...fenced);
+  for (const candidate of balancedObjectCandidates(text)) candidates.push(candidate);
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first >= 0 && last > first) candidates.push(text.slice(first, last + 1));
+  return [...new Set(candidates.map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function balancedObjectCandidates(text = "") {
+  const results = [];
+  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === "\"") inString = false;
+        continue;
+      }
+      if (char === "\"") {
+        inString = true;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          results.push(text.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  return results;
 }
 
 function validBox(value, width, height) {

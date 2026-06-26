@@ -24,10 +24,10 @@ import { buildSceneGraphRepairRecord, buildVisualTargetSamplePrompt, compareRend
 import { buildAssetManifest, validateAssetManifest } from "./assetManifest.js";
 import { ensureVisualProjectForJob, generateVisualProjectSlides } from "./visualProject.js";
 import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
-import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobs, previewWorkflowJobCleanup, readWorkflowJob, restoreWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
+import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobs, previewWorkflowJobCleanup, readWorkflowJob, restoreWorkflowJob, saveWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
 import { getProviderConfig, listLlmModels, testImageProvider, testLlmProvider, testOcrProvider } from "./providers.js";
 import { renderWorkflowSource } from "./sourceRenderer.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, generateWorkflowVisualImages, generateWorkflowVisualSample } from "./workflowVisuals.js";
+import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, writeVisualQualityReport } from "./workflowVisuals.js";
 import { correctWorkflowOcrTextHint, runWorkflowOcr } from "./workflowOcr.js";
 import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, testEditableRuntime } from "./workflowEditable.js";
 import { claimWorkflowEditableWorkerTask, completeWorkflowEditableWorkerTask, heartbeatWorkflowEditableWorkerTask, listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask, syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
@@ -43,9 +43,9 @@ import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } fr
 import { claimWorkflowCodexPptSlideTask, completeWorkflowCodexPptSlideTask, heartbeatWorkflowCodexPptSlideTask, listWorkflowCodexPptSlideTasks, resetWorkflowCodexPptSlideTask, resetWorkflowNonProductCodexPptSlides, syncWorkflowCodexPptSlideTasks } from "./workflowCodexPptWorkerQueue.js";
 import { getWorkflowCodexPptSlideBatchPreflight, runWorkflowCodexPptSlideBatch } from "./workflowCodexPptSlideBatchRunner.js";
 import { runProductDoctor } from "./doctor.js";
-import { getVisualQualityRetryPreflight, retryFailedWorkflowPages, retryStaleWorkflowPageEvidence, retryWorkflowPage } from "./workflowPageRetry.js";
+import { getFinalVisualQaRetryPreflight, getVisualQualityRetryPreflight, retryFailedWorkflowPages, retryFinalVisualQaWorkflowPages, retryStaleWorkflowPageEvidence, retryWorkflowPage } from "./workflowPageRetry.js";
 import { getWorkflowNextActionPreflight, runWorkflowNextAction } from "./workflowNextAction.js";
-import { getWorkflowEditableWorkerBatchPreflight, getWorkflowEditableWorkerRunLog, listWorkflowEditableWorkerRuns, startWorkflowEditableWorkerBatch } from "./workflowWorkerBatchRunner.js";
+import { getWorkflowEditableWorkerBatchPreflight, getWorkflowEditableWorkerRunLog, getWorkflowPageSpecProviderProbe, listWorkflowEditableWorkerRuns, startWorkflowEditableWorkerBatch } from "./workflowWorkerBatchRunner.js";
 import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
 import { getWorkflowV1Readiness } from "./workflowV1Readiness.js";
 import { getLatestV1AcceptanceReport } from "./workflowV1AcceptanceReport.js";
@@ -92,7 +92,7 @@ app.get("/api/health", (_req, res) => {
     hasApiKey: Boolean(globalThis.process?.env?.OPENAI_API_KEY),
     model: globalThis.process?.env?.OPENAI_MODEL || "gpt-4.1-mini",
     providers: {
-      llm: { configured: providers.llm.configured, baseUrl: providers.llm.baseUrl, model: providers.llm.model },
+      llm: { configured: providers.llm.configured, baseUrl: providers.llm.baseUrl, model: providers.llm.model, pageSpecModel: providers.llm.pageSpecModel },
       image: {
         configured: providers.image.configured,
         enabled: providers.image.enabled,
@@ -167,6 +167,7 @@ app.get("/api/config", async (_req, res) => {
     maskedApiKey: maskSecret(env.OPENAI_API_KEY),
     baseUrl: env.OPENAI_BASE_URL || "https://api.openai.com/v1",
     model: env.OPENAI_MODEL || "gpt-4.1-mini",
+    pageSpecModel: env.PAGE_SPEC_MODEL || env.OPENAI_VISION_MODEL || env.OPENAI_MODEL || "gpt-4.1-mini",
     imageModel: env.OPENAI_IMAGE_MODEL || env.CLOUD_IMAGE_MODEL || "gpt-image-2",
     timeoutMs: Number(env.PROVIDER_TIMEOUT_MS || 120000),
     maxRetries: Number(env.PROVIDER_MAX_RETRIES || 2),
@@ -194,6 +195,7 @@ app.post("/api/config", async (req, res, next) => {
       OPENAI_API_KEY: typeof req.body.apiKey === "string" && req.body.apiKey.trim() ? req.body.apiKey.trim() : current.OPENAI_API_KEY || "",
       OPENAI_BASE_URL: normalizeBaseUrl(req.body.baseUrl || current.OPENAI_BASE_URL || "https://api.openai.com/v1"),
       OPENAI_MODEL: String(req.body.model || current.OPENAI_MODEL || "gpt-4.1-mini").trim(),
+      PAGE_SPEC_MODEL: String(req.body.pageSpecModel || current.PAGE_SPEC_MODEL || current.OPENAI_VISION_MODEL || current.OPENAI_MODEL || "gpt-4.1-mini").trim(),
       OPENAI_IMAGE_MODEL: String(req.body.imageModel || current.OPENAI_IMAGE_MODEL || current.CLOUD_IMAGE_MODEL || "gpt-image-2").trim(),
       PROVIDER_TIMEOUT_MS: String(req.body.timeoutMs || current.PROVIDER_TIMEOUT_MS || "120000").trim(),
       PROVIDER_MAX_RETRIES: String(req.body.maxRetries ?? current.PROVIDER_MAX_RETRIES ?? "2").trim(),
@@ -211,6 +213,7 @@ app.post("/api/config", async (req, res, next) => {
       maskedApiKey: maskSecret(nextConfig.OPENAI_API_KEY),
       baseUrl: nextConfig.OPENAI_BASE_URL,
       model: nextConfig.OPENAI_MODEL,
+      pageSpecModel: nextConfig.PAGE_SPEC_MODEL,
       imageModel: nextConfig.OPENAI_IMAGE_MODEL,
       timeoutMs: Number(nextConfig.PROVIDER_TIMEOUT_MS),
       maxRetries: Number(nextConfig.PROVIDER_MAX_RETRIES),
@@ -567,6 +570,578 @@ async function buildLatestV1AcceptancePayload() {
   };
 }
 
+async function buildLlmProviderRecoveryPreflight() {
+  const report = await getLatestV1AcceptanceReport();
+  const providers = getProviderConfig();
+  const llm = providers.llm || {};
+  const completionAudit = report.completionAudit || report.acceptance?.completionAudit || {};
+  const editableStep = Array.isArray(completionAudit.nextSteps)
+    ? completionAudit.nextSteps.find((step) => step.id === "recover-llm-and-run-model-editable-workers")
+    : null;
+  const recentFailure = detectLlmProviderFailure(report.latest || report);
+  const recoveryRequired = Boolean(
+    completionAudit.blockerSummary?.llmProviderActionRequired
+    || editableStep?.requiresLlmProviderRecovery
+    || recentFailure.found
+  );
+  const configured = Boolean(llm.configured);
+  const readyIfUserConfirmed = Boolean(configured && recoveryRequired);
+  const blockingIssues = [];
+  if (!configured) blockingIssues.push("LLM provider is not configured.");
+  if (!recoveryRequired) blockingIssues.push("Latest v1 report does not require LLM recovery.");
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    llmApiCalls: 0,
+    safeToRunAutomatically: true,
+    requiresExplicitUserConfirmation: recoveryRequired,
+    recoveryRequired,
+    ready: readyIfUserConfirmed,
+    readyIfUserConfirmed,
+    startReady: false,
+    blockingIssues,
+    provider: {
+      configured,
+      provider: llm.provider || "",
+      baseUrl: llm.baseUrl || "",
+      model: llm.model || "",
+      maskedApiKey: llm.maskedApiKey || ""
+    },
+    recentFailure,
+    nextActions: recoveryRequired
+      ? [
+        "Check or recharge the LLM provider account; do not change gpt-image-2 for this blocker.",
+        "Run fresh editable local preparation preflights.",
+        "Run editable worker model preflight for pages 1-2.",
+        "Only start the model worker after confirming LLM provider recovery and external spend."
+      ]
+      : [
+        "No LLM recovery blocker is recorded in the latest v1 report."
+      ],
+    summary: recoveryRequired
+      ? configured
+        ? "LLM provider is configured, but the editable rebuild still requires explicit recovery confirmation before model workers run."
+        : "LLM provider recovery is required, but the provider is not configured."
+      : "Latest v1 report does not require LLM provider recovery."
+  };
+}
+
+async function buildEditableRebuildReadinessPreflight() {
+  const report = await getLatestV1AcceptanceReport();
+  const completionAudit = report.completionAudit || report.acceptance?.completionAudit || {};
+  const editableStep = Array.isArray(completionAudit.nextSteps)
+    ? completionAudit.nextSteps.find((step) => step.id === "recover-llm-and-run-model-editable-workers")
+    : null;
+  const jobId = editableStep?.paidAction?.path?.match(/\/api\/workflow-jobs\/([^/]+)\//)?.[1] || report.latest?.jobId || "";
+  const decodedJobId = jobId ? decodeURIComponent(jobId) : "";
+  const llm = await buildLlmProviderRecoveryPreflight();
+  const freshRun = decodedJobId ? await buildFreshRunRecoveryPreflight(decodedJobId) : null;
+  const taskSync = decodedJobId ? await buildEditableWorkerTaskSyncPreflight(decodedJobId) : null;
+  const workerBatch = decodedJobId
+    ? await getWorkflowEditableWorkerBatchPreflight(decodedJobId, {
+      mode: "model",
+      maxPages: 2,
+      pages: "1-2",
+      requireLlmProviderRecovery: Boolean(llm.recoveryRequired)
+    }).catch((error) => ({
+      ok: false,
+      ready: false,
+      startReady: false,
+      error: error.message || "Editable worker batch preflight failed"
+    }))
+    : null;
+  const workerBatchReady = Boolean(workerBatch?.ready);
+  const localPreparationReady = Boolean(freshRun?.ready && taskSync?.ready);
+  const localPreparationRequired = Boolean(localPreparationReady && !workerBatchReady);
+  const checks = [
+    {
+      id: "llm-provider",
+      label: "LLM provider",
+      ok: Boolean(llm.readyIfUserConfirmed || llm.ready),
+      detail: llm.summary || ""
+    },
+    {
+      id: "fresh-editable-run",
+      label: "Fresh editable run",
+      ok: Boolean(freshRun?.ready),
+      detail: freshRun?.summary || "No v1 workflow job found."
+    },
+    {
+      id: "editable-task-sync",
+      label: "Editable task sync",
+      ok: Boolean(taskSync?.ready),
+      detail: taskSync?.summary || "No v1 workflow job found."
+    },
+    {
+      id: "editable-worker-batch",
+      label: "Editable worker batch",
+      ok: workerBatchReady,
+      detail: localPreparationRequired
+        ? "Local editable preparation must run before model page workers can select pages."
+        : Array.isArray(workerBatch?.blockingIssues) && workerBatch.blockingIssues.length
+        ? workerBatch.blockingIssues.slice(0, 2).join("; ")
+        : workerBatch?.summary || ""
+    }
+  ];
+  const hardChecks = localPreparationRequired
+    ? checks.filter((check) => check.id !== "editable-worker-batch")
+    : checks;
+  const readyIfConfirmed = checks.every((check) => check.ok);
+  const localPreparationStartReady = Boolean(localPreparationRequired && hardChecks.every((check) => check.ok));
+  const nextActions = readyIfConfirmed
+    ? [
+      "Confirm LLM provider recovery.",
+      "Confirm external spend before running model editable workers.",
+      "Run 1-2 pages first, then review page-level PPTX output."
+    ]
+    : localPreparationStartReady
+      ? [
+        "Run fresh editable run recovery first; this clears stale editable evidence and rebuilds editppt inputs.",
+        "Run editable worker task sync after fresh recovery.",
+        "Then rerun this readiness preflight before starting model page workers."
+      ]
+      : checks.filter((check) => !check.ok).map((check) => `${check.label}: ${check.detail}`);
+  const acceptancePlan = buildEditableRebuildAcceptancePlan({
+    jobId: decodedJobId,
+    workerBatch,
+    llm,
+    readyIfConfirmed
+  });
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    llmApiCalls: 0,
+    safeToRunAutomatically: true,
+    ready: readyIfConfirmed,
+    readyIfConfirmed,
+    localPreparationRequired,
+    localPreparationStartReady,
+    startReady: false,
+    requiresExplicitSpendConfirmation: true,
+    requiresLlmProviderRecovery: Boolean(llm.recoveryRequired),
+    jobId: decodedJobId,
+    checks,
+    llm,
+    freshRun,
+    taskSync,
+    workerBatch,
+    acceptancePlan,
+    nextActions,
+    summary: readyIfConfirmed
+      ? "Editable rebuild is ready for an explicitly confirmed 1-2 page model-worker run."
+      : localPreparationStartReady
+        ? "Editable rebuild needs local preparation before model workers can run; no external image or LLM call is needed for this preparation."
+      : "Editable rebuild is not ready; review failed checks before running model workers."
+  };
+}
+
+async function buildEditableLoopAcceptancePreflight(options = {}) {
+  const readiness = await buildEditableRebuildReadinessPreflight();
+  const plan = readiness.acceptancePlan || {};
+  const jobId = String(options.jobId || plan.jobId || readiness.jobId || "").trim();
+  const selectedPageIds = normalizeAcceptancePageIds(options.pages || options.pageIds || plan.selectedPageIds || ["page_001", "page_002"]);
+  const delivery = jobId
+    ? await getWorkflowDeliveryStatus(jobId).catch((error) => ({
+      ok: false,
+      error: error.message || "Workflow delivery status failed",
+      pageEvidence: null,
+      finalGate: null,
+      final: null,
+      finalEvidence: null
+    }))
+    : null;
+  const pages = Array.isArray(delivery?.pageEvidence?.pages) ? delivery.pageEvidence.pages : [];
+  const selectedPages = selectedPageIds.map((pageId) => pages.find((page) => page.pageId === pageId) || { pageId, complete: false, issues: ["page-evidence-missing"] });
+  const selectedComplete = selectedPages.length > 0 && selectedPages.every((page) => page.complete === true);
+  const finalGate = delivery?.finalGate || {};
+  const finalArtifact = delivery?.final?.artifact || null;
+  const finalEvidence = delivery?.finalEvidence || null;
+  const checks = [
+    {
+      id: "selected-page-evidence",
+      label: "Selected page evidence",
+      ok: selectedComplete,
+      detail: `${selectedPages.filter((page) => page.complete).length}/${selectedPages.length} selected page(s) complete`,
+      pages: selectedPages.map((page) => ({
+        pageId: page.pageId,
+        complete: Boolean(page.complete),
+        pagePptxOpenable: page.pagePptxOpenable ?? null,
+        validationPassed: Boolean(page.validationPassed),
+        manifestContractOk: Boolean(page.manifestContractOk),
+        issues: Array.isArray(page.issues) ? page.issues : []
+      }))
+    },
+    {
+      id: "final-pptx",
+      label: "Fresh editable-final.pptx",
+      ok: Boolean(finalArtifact?.path),
+      detail: finalArtifact?.path || "editable-final.pptx is missing"
+    },
+    {
+      id: "final-powerpoint-openable",
+      label: "Final PPTX opens in PowerPoint",
+      ok: finalEvidence?.summary?.powerPointOpenable === true || finalArtifact?.powerPointOpenability?.openable === true,
+      detail: finalEvidence?.powerPointOpenability?.error || finalArtifact?.powerPointOpenability?.error || ""
+    },
+    {
+      id: "delivery-gate",
+      label: "Delivery gate",
+      ok: finalGate.productReady === true,
+      detail: finalGate.summary || finalGate.label || "Delivery gate is not ready",
+      reasons: [...(Array.isArray(finalGate.reasons) ? finalGate.reasons : []), ...(Array.isArray(finalGate.warnings) ? finalGate.warnings : [])].slice(0, 8)
+    }
+  ];
+  const ready = Boolean(checks.every((check) => check.ok));
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    llmApiCalls: 0,
+    safeToRunAutomatically: true,
+    ready,
+    jobId,
+    selectedPageIds,
+    checks,
+    delivery: delivery ? {
+      ok: delivery.ok,
+      status: delivery.status || null,
+      finalGate,
+      pageEvidenceSummary: delivery.pageEvidence?.summary || null,
+      finalEvidenceSummary: delivery.finalEvidence?.summary || null
+    } : null,
+    nextActions: ready
+      ? [
+        "Run full 15-page product acceptance after reviewing the 1-2 page output."
+      ]
+      : buildEditableLoopAcceptanceNextActions(checks),
+    summary: ready
+      ? "1-2 page editable rebuild loop has product delivery evidence."
+      : "1-2 page editable rebuild loop is not accepted yet; review failed checks before v1 completion."
+  };
+}
+
+function buildEditableRebuildAcceptancePlan({ jobId = "", workerBatch = null, llm = null, readyIfConfirmed = false } = {}) {
+  const selectedPageIds = Array.isArray(workerBatch?.selectedPageIds) ? workerBatch.selectedPageIds : [];
+  const externalImageCalls = Number(workerBatch?.authorization?.imageCalls || selectedPageIds.length || 0);
+  const startBody = workerBatch?.startBody || {};
+  return {
+    version: 1,
+    scope: "product-editable-rebuild-sample",
+    jobId,
+    readyIfConfirmed: Boolean(readyIfConfirmed),
+    selectedPageIds,
+    selectedCount: selectedPageIds.length,
+    estimatedExternalImageCalls: externalImageCalls,
+    requiresExplicitSpendConfirmation: true,
+    requiresLlmProviderRecovery: Boolean(llm?.recoveryRequired || workerBatch?.requiredConfirmations?.llmProviderRecovered?.required),
+    noSilentSpend: true,
+    startRequest: {
+      method: "POST",
+      path: jobId ? `/api/workflow-jobs/${encodeURIComponent(jobId)}/editable/worker-runs` : "",
+      body: {
+        mode: "model",
+        maxPages: selectedPageIds.length || 2,
+        pages: startBody.pages || selectedPageIds.join(","),
+        confirmExternalImageSpend: true,
+        confirmLlmProviderRecovered: true,
+        requireLlmProviderRecovery: true,
+        acceptOfflineTextHints: true,
+        autoFinalize: true
+      }
+    },
+    verificationPreflight: {
+      method: "POST",
+      path: "/api/v1-acceptance/editable-loop-acceptance/preflight",
+      body: {
+        jobId,
+        pages: selectedPageIds.join(",")
+      },
+      paidImageGeneration: false,
+      externalImageCalls: 0,
+      llmApiCalls: 0,
+      safeToRunAutomatically: true
+    },
+    requiredConfirmations: [
+      {
+        id: "llm-provider-recovered",
+        label: "LLM provider recovered",
+        required: true,
+        satisfied: Boolean(workerBatch?.requiredConfirmations?.llmProviderRecovered?.confirmed),
+        evidence: llm?.provider?.model || workerBatch?.llmProvider?.model || ""
+      },
+      {
+        id: "external-image-spend",
+        label: "External image API spend confirmed",
+        required: true,
+        satisfied: Boolean(workerBatch?.requiredConfirmations?.externalImageSpend?.confirmed),
+        evidence: `${externalImageCalls} image call(s)`
+      },
+      {
+        id: "rapidocr-text-hints",
+        label: "OCR/text hints accepted",
+        required: true,
+        satisfied: Boolean(workerBatch?.requiredConfirmations?.offlineTextHints?.confirmed),
+        evidence: workerBatch?.requiredConfirmations?.offlineTextHints?.reason || ""
+      }
+    ],
+    expectedArtifacts: [
+      "page_result.json for each selected page",
+      "validation.json with passed=true for each selected page",
+      "manifest.json with editable object evidence",
+      "page.pptx that opens in PowerPoint for each selected page",
+      "fresh editable-final.pptx after finalize",
+      "editable validation report and delivery gate evidence"
+    ],
+    acceptanceChecks: [
+      { id: "page-pptx-openable", label: "Each page-level PPTX opens in PowerPoint" },
+      { id: "editable-objects", label: "Pages contain editable text/shapes, not a full-slide screenshot" },
+      { id: "product-rebuild-evidence", label: "Page records are model image-to-editable-ppt rebuild evidence" },
+      { id: "fresh-final", label: "Finalize creates a new editable-final.pptx from current page records" },
+      { id: "delivery-gate", label: "Delivery gate allows download only after product rebuild evidence is valid" }
+    ],
+    failureRecovery: [
+      "If a selected page fails, reset only that page and rerun the model worker for the failed page.",
+      "If the provider returns quota/auth errors, keep final delivery blocked until provider recovery is confirmed and pages are rerun.",
+      "Do not reuse stale editable-final.pptx or local text-only evidence as product delivery."
+    ]
+  };
+}
+
+function normalizeAcceptancePageIds(value = []) {
+  const rawItems = Array.isArray(value) ? value : String(value || "").split(/[,\s]+/);
+  const pageIds = rawItems
+    .flatMap((item) => String(item || "").split(/[,\s]+/))
+    .map((item) => {
+      const text = String(item || "").trim().toLowerCase();
+      if (!text) return "";
+      const match = text.match(/\d+/);
+      return match ? `page_${String(Number(match[0])).padStart(3, "0")}` : /^page_\d{3}$/.test(text) ? text : "";
+    })
+    .filter(Boolean);
+  return [...new Set(pageIds.length ? pageIds : ["page_001", "page_002"])];
+}
+
+function buildEditableLoopAcceptanceNextActions(checks = []) {
+  const failed = checks.filter((check) => !check.ok).map((check) => check.id);
+  const actions = [];
+  if (failed.includes("selected-page-evidence")) actions.push("Run or rerun the selected image-to-editable-ppt model page workers, then record page evidence.");
+  if (failed.includes("final-pptx")) actions.push("Finalize the editable run after selected page records are valid.");
+  if (failed.includes("final-powerpoint-openable")) actions.push("Repair or regenerate the final PPTX until PowerPoint can open it.");
+  if (failed.includes("delivery-gate")) actions.push("Resolve delivery gate reasons before exposing final download.");
+  return actions.length ? actions : ["Review editable rebuild evidence."];
+}
+
+function detectLlmProviderFailure(source = {}) {
+  const text = JSON.stringify(source || {});
+  if (/额度已用尽|余额|insufficient[_\s-]?quota|quota|credit|billing/i.test(text)) {
+    return {
+      found: true,
+      kind: "provider-quota-exhausted",
+      message: "Recent evidence mentions LLM provider quota, balance, credit, or billing failure."
+    };
+  }
+  if (/HTTP\s*401|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(text)) {
+    return {
+      found: true,
+      kind: "provider-auth-failed",
+      message: "Recent evidence mentions LLM provider authorization failure."
+    };
+  }
+  return { found: false, kind: "", message: "" };
+}
+
+async function buildFreshRunRecoveryPreflight(jobId) {
+  const job = await readWorkflowJob(jobId);
+  const artifacts = job.artifacts || {};
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages.length : 0;
+  const imageDeckReady = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const editablePreparePreflight = await getWorkflowEditablePreparePreflight(jobId).catch((error) => ({
+    ok: false,
+    ready: false,
+    startReady: false,
+    blockingIssues: [error.message || "Editable prepare preflight failed"],
+    checks: []
+  }));
+  const visualQualityCheck = Array.isArray(editablePreparePreflight.checks)
+    ? editablePreparePreflight.checks.find((check) => check.id === "visual-quality")
+    : null;
+  const visualQualityExists = Boolean(editablePreparePreflight.visualQuality?.path || artifacts.visualQuality?.path);
+  const visualQualityNeedsApproval = Boolean(visualQualityExists && visualQualityCheck && !visualQualityCheck.ok);
+  const existingKeys = [
+    "editableDispatches",
+    "editableRecords",
+    "editableResets",
+    "editableLocalRebuilds",
+    "editableWorkerPrompts",
+    "editableWorkerTasks",
+    "workerBriefs",
+    "editableNext",
+    "editableFinal",
+    "manualReview"
+  ].filter((key) => artifacts[key] !== undefined);
+  const ready = Boolean((visualImages || imageDeckReady) && editablePreparePreflight.ready);
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    ready,
+    startReady: ready,
+    localOnly: true,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    mutatesOnRun: true,
+    safeToRunAutomatically: false,
+    requiresExplicitUserConfirmation: true,
+    jobId: job.id,
+    visualImages,
+    imageDeckReady,
+    editablePreparePreflight,
+    visualQualityReady: Boolean(visualQualityCheck?.ok),
+    visualQualityRecovery: visualQualityCheck?.ok || visualQualityExists ? null : {
+      method: "POST",
+      path: `/api/workflow-jobs/${encodeURIComponent(job.id)}/visual-quality/rebuild-from-existing`,
+      preflight: {
+        method: "POST",
+        path: `/api/workflow-jobs/${encodeURIComponent(job.id)}/visual-quality/rebuild-from-existing/preflight`,
+        body: {},
+        paidImageGeneration: false,
+        externalImageCalls: 0,
+        safeToRunAutomatically: true
+      },
+      body: {},
+      paidImageGeneration: false,
+      externalImageCalls: 0,
+      safeToRunAutomatically: false,
+      requiresExplicitUserConfirmation: true,
+      sideEffect: "Writes a local visual quality report from existing visual images."
+    },
+    visualQualityReview: visualQualityNeedsApproval ? {
+      method: "POST",
+      path: `/api/workflow-jobs/${encodeURIComponent(job.id)}/visual-quality/review/approve`,
+      body: {
+        reviewer: "product-agent",
+        note: "visual quality report reviewed before editable rebuild"
+      },
+      paidImageGeneration: false,
+      externalImageCalls: 0,
+      safeToRunAutomatically: false,
+      requiresExplicitUserConfirmation: true,
+      sideEffect: "Approves the current visual quality report for editable prepare."
+    } : null,
+    invalidates: existingKeys,
+    summary: ready
+      ? "Fresh editable run recovery is ready. Running it will clear stale editable evidence and rebuild local editppt inputs."
+      : visualQualityCheck && !visualQualityCheck.ok
+        ? `Fresh editable run recovery needs visual quality evidence first: ${visualQualityCheck.detail || "visual quality report missing"}.`
+        : "Fresh editable run recovery is not ready because no visual page evidence is available."
+  };
+}
+
+async function buildVisualQualityRebuildFromExistingPreflight(jobId) {
+  const job = await readWorkflowJob(jobId);
+  const visualImages = await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || "");
+  const renderedPages = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages : [];
+  const ready = Boolean(visualImages.length && renderedPages.length);
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    localOnly: true,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    safeToRunAutomatically: true,
+    ready,
+    startReady: ready,
+    jobId: job.id,
+    visualImageCount: visualImages.length,
+    renderedPageCount: renderedPages.length,
+    existingVisualQuality: job.artifacts?.visualQuality || null,
+    blockingIssues: [
+      ...(!visualImages.length ? ["No existing visual images found."] : []),
+      ...(!renderedPages.length ? ["No rendered source pages found for visual quality comparison."] : [])
+    ],
+    summary: ready
+      ? "Existing visual images can be locally analyzed to rebuild the visual quality report."
+      : "Visual quality report cannot be rebuilt until visual images and rendered pages exist."
+  };
+}
+
+async function rebuildVisualQualityFromExisting(jobId) {
+  const preflight = await buildVisualQualityRebuildFromExistingPreflight(jobId);
+  if (!preflight.ready) {
+    const error = new Error(preflight.summary || "Visual quality rebuild preflight failed.");
+    error.preflight = preflight;
+    throw error;
+  }
+  const job = await readWorkflowJob(jobId);
+  const visualImages = await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || "");
+  const renderedPages = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages : [];
+  const visualQuality = await writeVisualQualityReport(job, visualImages, renderedPages);
+  const stat = await fs.stat(visualQuality.path).catch(() => null);
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    visualImages,
+    visualQuality: {
+      kind: "visual_quality_report",
+      path: visualQuality.path,
+      relativePath: path.relative(rootDir, visualQuality.path),
+      size: stat?.size || 0,
+      createdAt: new Date().toISOString(),
+      summary: visualQuality.summary
+    }
+  };
+  addEvent(job, "visual_quality.rebuilt", "Rebuilt visual quality report from existing visual images", {
+    pageCount: visualQuality.summary?.pageCount || visualImages.length,
+    reviewCount: visualQuality.summary?.reviewCount || 0,
+    failedCount: visualQuality.summary?.failedCount || 0
+  });
+  const saved = await saveWorkflowJob(job);
+  return {
+    ok: true,
+    localOnly: true,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    jobId: saved.id,
+    visualQuality: saved.artifacts?.visualQuality || null,
+    summary: "Visual quality report was rebuilt locally from existing visual images.",
+    job: toClientWorkflowJob(saved, { includeEvents: true })
+  };
+}
+
+async function buildEditableWorkerTaskSyncPreflight(jobId, options = {}) {
+  const job = await readWorkflowJob(jobId);
+  const promptBundle = await listWorkflowEditableWorkerPrompts(jobId, options);
+  const existingTasks = Array.isArray(job.artifacts?.editableWorkerTasks) ? job.artifacts.editableWorkerTasks : [];
+  const ready = Boolean(promptBundle.prompts?.length);
+  return {
+    ok: true,
+    preview: true,
+    didRun: false,
+    ready,
+    startReady: ready,
+    localOnly: true,
+    paidImageGeneration: false,
+    externalImageCalls: 0,
+    mutatesOnRun: true,
+    safeToRunAutomatically: false,
+    requiresExplicitUserConfirmation: true,
+    jobId: job.id,
+    promptCount: promptBundle.prompts?.length || 0,
+    existingTaskCount: existingTasks.length,
+    summary: ready
+      ? "Editable worker task sync is ready. Running it will refresh the local page task queue from current prompts."
+      : "Editable worker task sync is not ready because editable page prompts are missing."
+  };
+}
+
 app.get("/api/v1-acceptance", async (_req, res, next) => {
   try {
     res.json(await buildLatestV1AcceptancePayload());
@@ -610,6 +1185,30 @@ app.post("/api/v1-acceptance/run", async (req, res, next) => {
 app.post("/api/v1-acceptance/product-visual-readiness", async (req, res, next) => {
   try {
     res.json(await runProductVisualReadinessNoCost(req.body || {}));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1-acceptance/llm-provider-recovery/preflight", async (_req, res, next) => {
+  try {
+    res.json(await buildLlmProviderRecoveryPreflight());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1-acceptance/editable-rebuild-readiness/preflight", async (_req, res, next) => {
+  try {
+    res.json(await buildEditableRebuildReadinessPreflight());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/v1-acceptance/editable-loop-acceptance/preflight", async (req, res, next) => {
+  try {
+    res.json(await buildEditableLoopAcceptancePreflight(req.body || {}));
   } catch (error) {
     next(error);
   }
@@ -896,6 +1495,26 @@ app.post("/api/workflow-jobs/:id/visual-quality/review/approve", async (req, res
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Visual quality review approval failed" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/visual-quality/rebuild-from-existing/preflight", async (req, res) => {
+  try {
+    res.json(await buildVisualQualityRebuildFromExistingPreflight(req.params.id, req.body || {}));
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Visual quality rebuild preflight failed" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/visual-quality/rebuild-from-existing", async (req, res) => {
+  try {
+    res.json(await rebuildVisualQualityFromExisting(req.params.id, req.body || {}));
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message || "Visual quality rebuild failed",
+      preflight: error.preflight || null
+    });
   }
 });
 
@@ -1304,6 +1923,14 @@ app.post("/api/workflow-jobs/:id/editable/prepare", async (req, res, next) => {
   }
 });
 
+app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery/preflight", async (req, res) => {
+  try {
+    res.json(await buildFreshRunRecoveryPreflight(req.params.id));
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Fresh editable run recovery preflight failed" });
+  }
+});
+
 app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery", async (req, res, next) => {
   try {
     const maxConcurrentPages = req.body?.maxConcurrentPages || 6;
@@ -1330,6 +1957,10 @@ app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery", async (req, res, 
       pages: req.body?.pages,
       reason: `${reason}; rebuild editable prompts after fresh run recovery`
     });
+    const briefs = await buildWorkflowWorkerBriefs(req.params.id, {
+      pages: req.body?.pages,
+      reason: `${reason}; rebuild worker briefs after fresh run recovery`
+    });
     const tasks = await syncWorkflowEditableWorkerTasks(req.params.id, {
       reason: `${reason}; sync worker tasks after fresh run recovery`
     });
@@ -1352,6 +1983,11 @@ app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery", async (req, res, 
       prompts: {
         count: Array.isArray(promptedJob.artifacts?.editableWorkerPrompts) ? promptedJob.artifacts.editableWorkerPrompts.length : 0,
         path: promptedJob.artifacts?.editableWorkerPromptBundle?.path || ""
+      },
+      briefs: {
+        count: briefs.index?.pageCount || briefs.index?.briefs?.length || 0,
+        path: briefs.index?.path || path.join(briefs.outDir || "", "index.json"),
+        outDir: briefs.outDir || ""
       },
       tasks: {
         summary: tasks.summary || null,
@@ -1466,6 +2102,15 @@ app.post("/api/workflow-jobs/:id/editable/worker-runs/preflight", async (req, re
   }
 });
 
+app.post("/api/workflow-jobs/:id/editable/page-spec-provider/probe", async (req, res) => {
+  try {
+    const result = await getWorkflowPageSpecProviderProbe(req.params.id, req.body || {});
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Page spec provider probe failed" });
+  }
+});
+
 app.get("/api/workflow-jobs/:id/editable/worker-runs/:runId/log", async (req, res) => {
   try {
     const download = req.query?.download === "1";
@@ -1520,6 +2165,14 @@ app.post("/api/workflow-jobs/:id/editable/worker-tasks/sync", async (req, res, n
   }
 });
 
+app.post("/api/workflow-jobs/:id/editable/worker-tasks/sync/preflight", async (req, res) => {
+  try {
+    res.json(await buildEditableWorkerTaskSyncPreflight(req.params.id, req.body || {}));
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Editable worker task sync preflight failed" });
+  }
+});
+
 app.post("/api/workflow-jobs/:id/editable/worker-tasks/:pageId/claim", async (req, res, next) => {
   try {
     const tasks = await claimWorkflowEditableWorkerTask(req.params.id, req.params.pageId, req.body || {});
@@ -1571,6 +2224,28 @@ app.post("/api/workflow-jobs/:id/visual-quality/retry-preflight", async (req, re
     res.json(result);
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Visual quality retry preflight failed" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/final-visual-qa/retry-preflight", async (req, res) => {
+  try {
+    const result = await getFinalVisualQaRetryPreflight(req.params.id, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Final visual QA retry preflight failed" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/final-visual-qa/retry", async (req, res) => {
+  try {
+    const result = await retryFinalVisualQaWorkflowPages(req.params.id, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message || "Final visual QA retry failed",
+      preflight: error.preflight || null
+    });
   }
 });
 
@@ -5985,7 +6660,7 @@ function shortenTitle(title = "") {
 }
 
 function shortenBullet(value = "") {
-  const text = cleanClientText(value).replace(/^(first|second|therefore|so)[:锛?\s]*/i, "");
+  const text = cleanClientText(value).replace(/^(first|second|therefore|so)[:\uFF1A\s]*/i, "");
   return text.length > 24 ? text.slice(0, 24) + "..." : text;
 }
 

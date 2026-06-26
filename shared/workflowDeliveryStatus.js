@@ -14,15 +14,16 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   const imageDeckPages = numberOrZero(artifacts.imageDeck?.pageCount);
   const ocrPages = numberOrZero(artifacts.ocrTextHints?.pageCount);
   const promptPages = countArray(artifacts.editableWorkerPrompts);
-  const readyPages = tasks.filter((task) => task.status === "ready").length;
-  const runningPages = tasks.filter((task) => task.status === "running" || task.status === "claimed").length;
+  const failedTaskSet = new Set(tasks.filter(isFailedEditableWorkerTask));
+  const readyPages = tasks.filter((task) => task.status === "ready" && !failedTaskSet.has(task)).length;
+  const runningPages = tasks.filter((task) => (task.status === "running" || task.status === "claimed") && !failedTaskSet.has(task)).length;
   const taskRecordedPages = tasks.filter((task) => task.status === "recorded").length;
-  const failedPages = tasks.filter((task) => task.status === "failed").length;
+  const failedPages = failedTaskSet.size;
   const validationReady = Boolean(final.validation?.path || job?.finalValidation);
   const validationPages = numberOrZero(job?.finalValidation?.expected_pages || job?.finalValidation?.slides);
   const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || validationPages);
   const hasFinal = hasArtifact(final);
-  const recordedPages = Math.max(taskRecordedPages, hasFinal ? finalPages : 0);
+  const recordedPages = taskRecordedPages;
   const processedPages = Math.max(finalPages, validationPages, promptPages, ocrPages, imageDeckPages, visualPages, recordedPages);
   const retryCount = events.filter((event) => /reset|retry/i.test(`${event.type || ""} ${event.message || ""}`)).length;
   const usesApprovedRaster = tasks.some((task) => /approval|approved|raster/i.test(`${task.message || ""} ${task.error || ""}`));
@@ -42,7 +43,7 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     { label: "源页面", value: sourcePages || "未知" },
     { label: "已渲染页面", value: renderedPages || 0 },
     { label: "图片型 PPT 页面", value: imageDeckPages || 0 },
-    { label: "就绪 worker 页面", value: readyPages || 0 },
+    { label: "就绪重建页面", value: readyPages || 0 },
     { label: "已记录页面", value: recordedPages || 0 },
     { label: "失败页面", value: failedPages || 0 },
     { label: "最终 PPTX", value: hasFinal ? "已生成" : "缺失" },
@@ -52,13 +53,13 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   const warnings = [];
   if (!sourcePages) warnings.push("源页面尚未渲染。");
   if (partialDeck) warnings.push(`当前输出只覆盖 ${processedPages}/${sourcePages} 个源页面。`);
-  if (failedPages) warnings.push(`${failedPages} 个页面 worker 任务失败，需要重试。`);
-  if (runningPages) warnings.push(`${runningPages} 个页面 worker 任务正在运行或已被认领。`);
+  if (failedPages) warnings.push(`${failedPages} 个页面重建任务失败，需要重试。`);
+  if (runningPages) warnings.push(`${runningPages} 个页面重建任务正在运行或已被认领。`);
   if (!validationReady) warnings.push("缺少最终校验 JSON。");
   if (validationFailed) warnings.push("最终校验 JSON 未通过。");
   if (hasFinal && !editablePassed) warnings.push("最终 PPTX 尚未通过对象级可编辑检查。");
   if (usesApprovedRaster) warnings.push("部分页面使用了已批准的栅格兜底证据，需要复核。");
-  if (!hasFinal) warnings.push("editable-final.pptx 尚未生成。");
+  if (!hasFinal) warnings.push("最终可编辑 PPT 尚未生成。");
 
   const nextStep = chooseNextStep({
     sourcePages,
@@ -115,25 +116,25 @@ function chooseNextStep({
   editablePassed
 }) {
   if (!sourcePages || !renderedPages) {
-    return makeNextStep("render-source", "渲染源页面", "把上传的 PPT/PDF/图片转换成标准页面 PNG。");
+    return makeNextStep("render-source", "渲染源页面", "把上传的 PPT、PDF 或图片转换成标准页面 PNG。");
   }
   if (!visualPages || !imageDeckPages) {
-    return makeNextStep("generate-image-deck", "生成图片型 PPT", "使用 codex-ppt 创建视觉幻灯片图片，并组装图片型 PPTX。");
+    return makeNextStep("generate-image-deck", "生成图片型 PPT", "使用 codex-ppt 创建视觉统一的页面图片，并组装图片型 PPTX。");
   }
   if (!editableRunReady) {
-    return makeNextStep("prepare-editable", "准备可编辑重建", "图片型 PPT 就绪后，运行 image-to-editable-ppt prepare。");
+    return makeNextStep("prepare-editable", "准备可编辑重建", "图片型 PPT 就绪后，准备 image-to-editable-ppt 运行目录。");
   }
   if (failedPages) {
-    return makeNextStep("retry-failed-pages", "重试失败页面 worker", `${failedPages} 个失败页面必须先重置并重建。`);
+    return makeNextStep("retry-failed-pages", "重试失败页面", `${failedPages} 个失败页面必须先重置并重建。`);
   }
   if (runningPages) {
-    return makeNextStep("wait-page-workers", "等待页面 worker", `${runningPages} 个页面 worker 仍在运行或已被认领。`);
+    return makeNextStep("wait-page-workers", "等待页面重建", `${runningPages} 个页面重建任务仍在运行或已被认领。`);
   }
   if (!hasFinal && sourcePages && recordedPages < sourcePages && readyPages) {
-    return makeNextStep("start-page-workers", "启动页面 worker 批处理", `${readyPages} 个就绪页面可以重建为可编辑幻灯片对象。`);
+    return makeNextStep("start-page-workers", "启动可编辑页面重建", `${readyPages} 个就绪页面可以重建为可编辑幻灯片对象。`);
   }
   if (!hasFinal && sourcePages && recordedPages < sourcePages && promptPages) {
-    return makeNextStep("sync-page-workers", "同步页面 worker 队列", "可编辑提示已存在，但就绪 worker 任务需要同步或刷新。");
+    return makeNextStep("sync-page-workers", "同步可编辑页面任务", "可编辑提示已存在，但就绪页面任务需要同步或刷新。");
   }
   if (!hasFinal && (!sourcePages || recordedPages >= sourcePages)) {
     return makeNextStep("finalize-editable", "生成最终可编辑 PPTX", "所有已记录页面现在可以组装并校验。");
@@ -158,11 +159,11 @@ function buildNextActions(nextStep, {
   editablePassed
 }) {
   const actions = [nextStep.label + ": " + nextStep.reason];
-  if (failedPages) actions.push("打开 worker 队列，检查失败页面，只重试这些页面。");
-  if (!hasFinal && readyPages) actions.push(`确认外部图片 API 用量后，为 ${readyPages} 个就绪页面运行受保护的 worker 批处理。`);
-  if (!hasFinal && runningPages) actions.push("观察后台 worker 日志，直到所有页面已记录或失败。");
-  if (!hasFinal && sourcePages && recordedPages >= sourcePages) actions.push("运行最终生成，创建 editable-final.pptx 和 editable-validation.json。");
-  if (hasFinal && validationReady && editablePassed) actions.push("下载最终 PPTX、校验 JSON 和日志包。");
+  if (failedPages) actions.push("打开页面任务队列，检查失败页面，只重试这些页面。");
+  if (!hasFinal && readyPages) actions.push(`确认外部 API 用量后，为 ${readyPages} 个就绪页面运行受保护的可编辑重建批处理。`);
+  if (!hasFinal && runningPages) actions.push("观察后台页面任务日志，直到所有页面已记录或失败。");
+  if (!hasFinal && sourcePages && recordedPages >= sourcePages) actions.push("运行最终生成，创建最终可编辑 PPT 和校验证据。");
+  if (hasFinal && validationReady && editablePassed) actions.push("下载最终 PPT、校验证据和日志包。");
   return uniqueStrings(actions);
 }
 
@@ -198,6 +199,13 @@ function numberOrZero(value) {
 
 function hasArtifact(artifact = {}) {
   return Boolean(artifact?.path);
+}
+
+function isFailedEditableWorkerTask(task = {}) {
+  return task.status === "failed"
+    || task.validationStatus === "failed"
+    || (task.status === "recorded" && task.evidence?.validationPassed === false)
+    || Boolean(task.evidence?.validationError);
 }
 
 function uniqueStrings(items = []) {

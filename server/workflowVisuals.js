@@ -141,7 +141,9 @@ export async function generateWorkflowVisualImages(jobId, options = {}) {
     visualQuality: artifactRecord("visual_quality_report", visualQuality.path, visualQuality.summary),
     visualImages: allExisting
   };
-  const complete = errors.length === 0 && allExisting.length >= renderedPages.length;
+  const existingPageNumbers = new Set(allExisting.map((image) => Number(image.pageNumber || 0)).filter(Number.isFinite));
+  const selectedComplete = selected.length > 0 && selected.every((pageNumber) => existingPageNumbers.has(Number(pageNumber)));
+  const complete = errors.length === 0 && selectedComplete;
   job.currentStage = complete ? "image_deck_ready" : "visual_generating";
   job.status = errors.length ? "failed" : complete ? "image_deck_ready" : "visual_generating";
   job.stageStatus = errors.length ? "failed" : complete ? "complete" : "running";
