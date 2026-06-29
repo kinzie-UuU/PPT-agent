@@ -6,6 +6,7 @@ const root = process.cwd();
 const explicitTextTargets = [
   "README.md",
   "docs/product-goal.md",
+  "docs/current-agent-plan.md",
   "server/index.js",
   "server/smoke-tests.js",
   "server/workflowDelivery.js",

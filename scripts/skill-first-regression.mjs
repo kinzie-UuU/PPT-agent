@@ -8,7 +8,7 @@ async function main() {
   const files = await readProjectFiles();
   const checks = [
     checkReadme(files),
-    checkProductGoalV2(files),
+    checkProductGoalCurrent(files),
     checkFrontendMainFlow(files),
     checkApiSurface(files),
     checkDeliveryGate(files),
@@ -100,6 +100,27 @@ function checkProductGoalV2(files) {
     mustInclude(files.productGoal, "旧模板");
     mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
     mustInclude(files.currentAgentPlan, "当前是 2/15 页小样本");
+    mustNotInclude(files.productGoal, "美学设计系统");
+    mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
+  });
+}
+
+function checkProductGoalCurrent(files) {
+  return named("Product goal documents current target", () => {
+    mustInclude(files.productGoal, "PPT Agent 产品目标");
+    mustInclude(files.productGoal, "codex-ppt");
+    mustInclude(files.productGoal, "image-to-editable-ppt");
+    mustInclude(files.productGoal, "gpt-image-2");
+    mustInclude(files.productGoal, "rapidocr-local");
+    mustInclude(files.productGoal, "editable-final.pptx");
+    mustInclude(files.productGoal, "acceptance.ready");
+    mustInclude(files.productGoal, "人工视觉复核");
+    mustInclude(files.productGoal, "旧模板");
+    mustInclude(files.productGoal, "当前已跑通：15/15 页真实样例闭环");
+    mustInclude(files.productGoal, "当前交付状态：ready，可以交付");
+    mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
+    mustInclude(files.currentAgentPlan, "当前交付状态：ready，可以交付");
+    mustInclude(files.currentAgentPlan, "这不是早期 2 页小样本状态");
     mustNotInclude(files.productGoal, "美学设计系统");
     mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
   });
@@ -207,6 +228,7 @@ function checkMojibakeAuditScope(files) {
   return named("Mojibake audit protects user-facing files", () => {
     mustInclude(files.auditMojibake, "README.md");
     mustInclude(files.auditMojibake, "docs/product-goal.md");
+    mustInclude(files.auditMojibake, "docs/current-agent-plan.md");
     mustInclude(files.auditMojibake, "server/index.js");
     mustInclude(files.auditMojibake, "src");
     mustNotInclude(files.auditMojibake, "scripts/skill-first-regression.mjs");
