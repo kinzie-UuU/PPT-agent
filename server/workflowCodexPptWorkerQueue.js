@@ -33,10 +33,6 @@ export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
   const prompts = await writeVisualPrompts(job, targetPages, options);
   const maxPages = Number.isFinite(Number(options.maxPages)) ? Math.max(1, Number(options.maxPages)) : targetPages.length;
   const selectedPages = parsePageSelection(options.pages || options.pageNumbers, targetPages.length).slice(0, maxPages);
-  const shouldPrepare = Boolean(options.force)
-    || !job.artifacts?.codexPptDeckSpec?.path
-    || !job.artifacts?.codexPptSlideJobs?.path
-    || !job.artifacts?.codexPptSlideRunState?.path;
   let slideRun = {
     deckSpec: job.artifacts?.codexPptDeckSpec,
     speech: job.artifacts?.codexPptSpeech,
@@ -44,8 +40,17 @@ export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
     slideRunState: job.artifacts?.codexPptSlideRunState,
     slidePrompts: job.artifacts?.codexPptSlidePrompts || []
   };
+  const shouldPrepare = Boolean(options.force)
+    || Boolean(options.forceSync)
+    || shouldRefreshSlideRun(slideRun, selectedPages, targetPages.length)
+    || !job.artifacts?.codexPptDeckSpec?.path
+    || !job.artifacts?.codexPptSlideJobs?.path
+    || !job.artifacts?.codexPptSlideRunState?.path;
   if (shouldPrepare) {
-    slideRun = await prepareCodexPptSlideRun(job, { renderedPages: targetPages, prompts, selectedPages, options });
+    const preparePages = options.forceSync && selectedPages.length
+      ? targetPages.map((page) => page.pageNumber).filter(Boolean)
+      : selectedPages;
+    slideRun = await prepareCodexPptSlideRun(job, { renderedPages: targetPages, prompts, selectedPages: preparePages, options });
   }
   const tasks = mergeTasks(job.artifacts?.codexPptSlideWorkerTasks, slideRun.slidePrompts, await readSlideRunState(slideRun.slideRunState?.path));
   job.artifacts = {
@@ -65,6 +70,16 @@ export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
   });
   job = await saveWorkflowJob(job);
   return toTaskBundle(job, tasks);
+}
+
+function shouldRefreshSlideRun(slideRun = {}, selectedPages = [], targetCount = 0) {
+  const prompts = Array.isArray(slideRun.slidePrompts) ? slideRun.slidePrompts : [];
+  const promptPages = new Set(prompts.map((prompt) => Number(prompt.pageNumber || 0)).filter(Boolean));
+  if (targetCount && prompts.length < Math.min(targetCount, selectedPages.length || targetCount)) return true;
+  if (Array.isArray(selectedPages) && selectedPages.length) {
+    return selectedPages.some((pageNumber) => !promptPages.has(Number(pageNumber)));
+  }
+  return false;
 }
 
 export async function listWorkflowCodexPptSlideTasks(jobId) {

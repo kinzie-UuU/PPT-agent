@@ -14,20 +14,23 @@ const MANUAL_ACTION_RE = /approve|approval|review\/approve|codex slide worker|sl
 export async function runWorkflowNextAction(jobId, options = {}) {
   const compliance = await getWorkflowComplianceStatus(jobId);
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
+  const job = await readWorkflowJob(jobId);
+  const partialFinal = buildPartialFinalContinuation(job);
+  if (partialFinal && (!action || action === "review/approve" || /review\/approve/i.test(action))) {
+    return {
+      ok: true,
+      didRun: false,
+      manualRequired: true,
+      action: "partial-final-review-or-continue",
+      reason: partialFinal.reason,
+      compliance,
+      job,
+      ...partialFinal
+    };
+  }
   if (!action) {
-    const job = await readWorkflowJob(jobId);
-    const partialFinal = buildPartialFinalContinuation(job);
     if (partialFinal) {
-      return {
-        ok: true,
-        didRun: false,
-        manualRequired: true,
-        action: "partial-final-review-or-continue",
-        reason: partialFinal.reason,
-        compliance,
-        job,
-        ...partialFinal
-      };
+      return { ok: true, didRun: false, manualRequired: true, action: "partial-final-review-or-continue", reason: partialFinal.reason, compliance, job, ...partialFinal };
     }
   }
   if (!action) return makeIdleResult(jobId, compliance, "当前没有可运行的工作流动作。");
@@ -104,8 +107,29 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
   const job = await readWorkflowJob(jobId);
   const body = { ...options, requestedBy: options.requestedBy || "workflow-next-action-preflight" };
+  const partialFinal = buildPartialFinalContinuation(job);
+  if (partialFinal && (!action || action === "review/approve" || /review\/approve/i.test(action))) {
+    return {
+      ok: true,
+      preview: true,
+      didRun: false,
+      jobId,
+      action: "partial-final-review-or-continue",
+      title: "当前测试范围已生成",
+      summary: "当前最终 PPT 已生成但只覆盖部分源页面。",
+      startReady: false,
+      manualRequired: true,
+      requiredConfirmation: "",
+      externalImageCalls: 0,
+      mutatesWorkflow: false,
+      blockingIssues: [],
+      warnings: partialFinal.warnings,
+      compliance,
+      updatedAt: new Date().toISOString(),
+      ...partialFinal
+    };
+  }
   if (!action) {
-    const partialFinal = buildPartialFinalContinuation(job);
     if (partialFinal) {
       return {
         ok: true,

@@ -545,7 +545,7 @@ export async function dispatchWorkflowEditablePage(jobId, options = {}) {
 
 async function ensureTextHintsCheckpoint(job, runtime, options = {}) {
   if (job.artifacts?.editableTextHintsAcknowledgement?.accepted) return job;
-  const rapidOcrHints = getRapidOcrTextHintsCheckpoint(job);
+  const localOcrHints = getLocalOcrTextHintsCheckpoint(job);
   const result = await testEditableRuntime({
     skillRoot: runtime.skillRoot,
     pythonPath: runtime.pythonPath,
@@ -554,18 +554,19 @@ async function ensureTextHintsCheckpoint(job, runtime, options = {}) {
   const textHints = result.doctor?.text_hints || {};
   const needsOfflineAcknowledgement = textHints.selection === "builtin-ink" || textHints.paddle_token === "unset";
   if (!needsOfflineAcknowledgement) return job;
-  const acceptedByRapidOcr = Boolean(rapidOcrHints?.path);
-  if (!acceptedByRapidOcr && !options.acceptOfflineTextHints && !options.confirmOfflineTextHints && !options.paddleOcrDeclined) {
-    throw new Error("PaddleOCR token is not configured. Before dispatching page reconstruction, confirm whether to continue with offline builtin-ink text hints or configure a free PaddleOCR token from https://aistudio.baidu.com/account/accessToken and rerun editppt run hints.");
+  const acceptedByLocalOcr = Boolean(localOcrHints?.path);
+  if (!acceptedByLocalOcr && !options.acceptOfflineTextHints && !options.confirmOfflineTextHints && !options.paddleOcrDeclined) {
+    throw new Error("本地 OCR 文字提示尚未就绪。派发前请先运行 PaddleOCR/RapidOCR 本地文字识别，或确认继续使用 editppt 离线内置文字提示。");
   }
   const acknowledgement = {
     kind: "editable_text_hints_acknowledgement",
     accepted: true,
-    textHintsBackend: acceptedByRapidOcr ? "rapidocr-local" : textHints.selection || "builtin-ink",
+    textHintsBackend: acceptedByLocalOcr ? localOcrHints.backend : textHints.selection || "builtin-ink",
     paddleToken: textHints.paddle_token || "unset",
     applyUrl: textHints.apply_url || "https://aistudio.baidu.com/account/accessToken",
-    reason: cleanString(options.offlineTextHintsReason || (acceptedByRapidOcr ? "RapidOCR local text hints are available for this workflow" : "user accepted offline text hints for this workflow")),
-    rapidOcrHintsPath: rapidOcrHints?.path || "",
+    reason: cleanString(options.offlineTextHintsReason || (acceptedByLocalOcr ? `${localOcrHints.backend} text hints are available for this workflow` : "user accepted offline text hints for this workflow")),
+    rapidOcrHintsPath: localOcrHints?.path || "",
+    localOcrHintsPath: localOcrHints?.path || "",
     acceptedAt: new Date().toISOString()
   };
   job.artifacts = {
@@ -576,7 +577,7 @@ async function ensureTextHintsCheckpoint(job, runtime, options = {}) {
   return saveWorkflowJob(job);
 }
 
-function getRapidOcrTextHintsCheckpoint(job = {}) {
+function getLocalOcrTextHintsCheckpoint(job = {}) {
   const artifacts = job.artifacts || {};
   const candidates = [
     artifacts.ocrTextHints?.path,
@@ -586,7 +587,7 @@ function getRapidOcrTextHintsCheckpoint(job = {}) {
   if (!hintPath) return null;
   return {
     path: hintPath,
-    backend: "rapidocr-local"
+    backend: artifacts.ocrTextHints?.backend || artifacts.ocrTextHints?.ocrBackend?.name || "local-ocr"
   };
 }
 

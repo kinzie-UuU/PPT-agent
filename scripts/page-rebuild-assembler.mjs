@@ -117,11 +117,18 @@ function buildManifest({ pageDir, pageRequest, spec }) {
   const normalizedImages = normalizeImages(hydratedSpec.images || [], width, height, pageDir)
     .sort((a, b) => Number(a.z_index || 0) - Number(b.z_index || 0));
   const normalizedProvenance = Array.isArray(hydratedSpec.asset_provenance) ? hydratedSpec.asset_provenance.map(normalizeProvenance).filter(hasUsableProvenance) : [];
-  const usableAssets = omitMissingGeneratedImageAssets({
+  const reconciledAssets = reconcileImagegenAssetPaths({
     pageDir,
     images: normalizedImages,
     provenance: normalizedProvenance,
     visualInventory: hydratedSpec.visual_inventory
+  });
+  const usableAssets = omitMissingGeneratedImageAssets({
+    pageDir,
+    images: reconciledAssets.images,
+    provenance: reconciledAssets.provenance,
+    visualInventory: reconciledAssets.visualInventory,
+    initialWarnings: reconciledAssets.warnings
   });
   const images = usableAssets.images;
   const textBoxes = filterTextBoxesCoveredByImages(normalizeTextBoxes(spec.text_boxes || [], width, height), images, { width, height });
@@ -306,10 +313,140 @@ function createSourceFidelityTiles({ sourcePath = "", assetsDir = "", width = 0,
   ].filter((tile) => fsSync.existsSync(path.join(assetsDir, path.basename(tile.path))));
 }
 
-function omitMissingGeneratedImageAssets({ pageDir, images = [], provenance = [], visualInventory = [] } = {}) {
+function reconcileImagegenAssetPaths({ pageDir, images = [], provenance = [], visualInventory = [] } = {}) {
+  const jobs = readImagegenJobs(pageDir);
+  const warnings = [];
+  if (!jobs.length) {
+    return {
+      images: Array.isArray(images) ? images : [],
+      provenance: Array.isArray(provenance) ? provenance : [],
+      visualInventory: Array.isArray(visualInventory) ? visualInventory : [],
+      warnings
+    };
+  }
+
+  const rewrites = new Map();
+  const imagesNext = (Array.isArray(images) ? images : []).map((image) => {
+    const imagePath = normalizeAssetPath(image.path || "");
+    if (!imagePath || fsSync.existsSync(path.join(pageDir, imagePath))) return image;
+    const matched = findImagegenJobForMissingAsset({ image, imagePath, jobs, imageCount: images.length });
+    if (!matched) return image;
+    const actualPath = normalizeAssetPath(matched.output || matched.dest || "");
+    if (!actualPath || !fsSync.existsSync(path.join(pageDir, actualPath))) return image;
+    rewrites.set(imagePath, actualPath);
+    warnings.push(`Reconciled missing image asset ${imagePath} to recorded imagegen output ${actualPath}.`);
+    return {
+      ...image,
+      path: actualPath,
+      id: cleanId(image.id || matched.job_id || path.basename(actualPath, path.extname(actualPath))),
+      alt: cleanString(image.alt || matched.job_id || image.id || actualPath)
+    };
+  });
+
+  if (!rewrites.size) {
+    return {
+      images: imagesNext,
+      provenance: Array.isArray(provenance) ? provenance : [],
+      visualInventory: Array.isArray(visualInventory) ? visualInventory : [],
+      warnings
+    };
+  }
+
+  const provenanceNext = (Array.isArray(provenance) ? provenance : []).map((item) => {
+    const imagePath = normalizeAssetPath(item.path || "");
+    const sourcePath = normalizeAssetPath(item.source || "");
+    const nextPath = rewrites.get(imagePath) || rewrites.get(sourcePath);
+    if (!nextPath) return item;
+    return {
+      ...item,
+      path: nextPath,
+      source: nextPath
+    };
+  });
+  const existingProvenancePaths = new Set(provenanceNext.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  for (const actualPath of rewrites.values()) {
+    if (existingProvenancePaths.has(actualPath)) continue;
+    const job = jobs.find((item) => normalizeAssetPath(item.output || item.dest || "") === actualPath) || {};
+    provenanceNext.push({
+      path: actualPath,
+      source: actualPath,
+      source_type: "imagegen",
+      provenance_note: cleanString(job.note || "Recorded imagegen asset output reconciled for page rebuild.")
+    });
+    existingProvenancePaths.add(actualPath);
+  }
+
+  const visualInventoryNext = (Array.isArray(visualInventory) ? visualInventory : []).map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const itemPath = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
+    const nextPath = rewrites.get(itemPath);
+    if (!nextPath) return item;
+    return {
+      ...item,
+      path: nextPath,
+      asset_provenance: {
+        ...(item.asset_provenance || {}),
+        path: nextPath,
+        source: nextPath
+      }
+    };
+  });
+
+  return {
+    images: imagesNext,
+    provenance: provenanceNext,
+    visualInventory: visualInventoryNext,
+    warnings
+  };
+}
+
+function readImagegenJobs(pageDir) {
+  const file = path.join(pageDir, "imagegen-jobs.json");
+  if (!fsSync.existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(fsSync.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+    return (Array.isArray(parsed.jobs) ? parsed.jobs : [])
+      .filter((job) => job && typeof job === "object")
+      .map((job) => ({
+        ...job,
+        job_id: cleanId(job.job_id || job.id || ""),
+        output: normalizeAssetPath(job.output || job.dest || ""),
+        status: cleanString(job.status || "")
+      }))
+      .filter((job) => job.output && fsSync.existsSync(path.join(pageDir, job.output)));
+  } catch {
+    return [];
+  }
+}
+
+function findImagegenJobForMissingAsset({ image = {}, imagePath = "", jobs = [], imageCount = 0 } = {}) {
+  const imageId = cleanId(image.id || "");
+  const pathBase = cleanId(path.basename(imagePath, path.extname(imagePath)));
+  const exact = jobs.find((job) => job.job_id && (job.job_id === imageId || job.job_id === pathBase));
+  if (exact) return exact;
+  const contains = jobs.find((job) => {
+    if (!job.job_id) return false;
+    return (imageId && (job.job_id.includes(imageId) || imageId.includes(job.job_id)))
+      || (pathBase && (job.job_id.includes(pathBase) || pathBase.includes(job.job_id)));
+  });
+  if (contains) return contains;
+  const likelyGeneratedForeground = /generated_asset|foreground|illustration|cityscape|character|visual|asset/i.test([
+    imageId,
+    pathBase,
+    imagePath,
+    image.alt,
+    image.description
+  ].filter(Boolean).join(" "));
+  if (likelyGeneratedForeground && jobs.length === 1) return jobs[0];
+  if (Number(imageCount) === 1 && jobs.length === 1) return jobs[0];
+  const imageText = JSON.stringify(image).toLowerCase();
+  return jobs.find((job) => job.job_id && imageText.includes(job.job_id.toLowerCase())) || null;
+}
+
+function omitMissingGeneratedImageAssets({ pageDir, images = [], provenance = [], visualInventory = [], initialWarnings = [] } = {}) {
   const provenanceByPath = new Map((Array.isArray(provenance) ? provenance : []).map((item) => [normalizeAssetPath(item.path), item]));
   const missingGenerated = new Set();
-  const warnings = [];
+  const warnings = Array.isArray(initialWarnings) ? [...initialWarnings] : [];
   for (const image of Array.isArray(images) ? images : []) {
     const imagePath = normalizeAssetPath(image.path || "");
     if (!imagePath) continue;

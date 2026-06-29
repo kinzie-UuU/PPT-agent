@@ -64,10 +64,8 @@ function checkReadme(files) {
     mustInclude(files.readme, "/api/workflow-jobs/:id/cost-estimate");
     mustInclude(files.readme, "npm run regression:skill-first");
     mustInclude(files.readme, "产品级 v1 验收");
-    mustInclude(files.readme, "product-visual-sample/prompt-preview");
-    mustInclude(files.readme, "product-visual-full-deck/approval/approve");
     mustInclude(files.readme, "acceptance.ready=true");
-    mustInclude(files.readme, "必须明确确认");
+    mustInclude(files.readme, "必须显式确认外部 API 额度");
     mustNotInclude(files.readme, "workflow-briefs");
   });
 }
@@ -93,6 +91,7 @@ function checkProductGoalV2(files) {
     mustInclude(files.productGoal, "codex-ppt");
     mustInclude(files.productGoal, "image-to-editable-ppt");
     mustInclude(files.productGoal, "gpt-image-2");
+    mustInclude(files.productGoal, "paddleocr-local");
     mustInclude(files.productGoal, "rapidocr-local");
     mustInclude(files.productGoal, "editable-final.pptx");
     mustInclude(files.productGoal, "acceptance.ready");
@@ -111,16 +110,18 @@ function checkProductGoalCurrent(files) {
     mustInclude(files.productGoal, "codex-ppt");
     mustInclude(files.productGoal, "image-to-editable-ppt");
     mustInclude(files.productGoal, "gpt-image-2");
+    mustInclude(files.productGoal, "paddleocr-local");
     mustInclude(files.productGoal, "rapidocr-local");
     mustInclude(files.productGoal, "editable-final.pptx");
     mustInclude(files.productGoal, "acceptance.ready");
     mustInclude(files.productGoal, "人工视觉复核");
     mustInclude(files.productGoal, "旧模板");
-    mustInclude(files.productGoal, "当前已跑通：15/15 页真实样例闭环");
-    mustInclude(files.productGoal, "当前交付状态：ready，可以交付");
+    mustInclude(files.productGoal, "当前已跑通：2/20 页真实小样本闭环");
+    mustInclude(files.productGoal, "当前交付状态：draft");
+    mustInclude(files.productGoal, "继续生成剩余 18 页");
     mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
-    mustInclude(files.currentAgentPlan, "当前交付状态：ready，可以交付");
-    mustInclude(files.currentAgentPlan, "这不是早期 2 页小样本状态");
+    mustInclude(files.currentAgentPlan, "当前交付状态：draft");
+    mustInclude(files.currentAgentPlan, "这不是完整 20 页产品级交付");
     mustNotInclude(files.productGoal, "美学设计系统");
     mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
   });

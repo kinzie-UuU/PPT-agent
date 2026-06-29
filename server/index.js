@@ -52,6 +52,7 @@ import { getLatestV1AcceptanceReport } from "./workflowV1AcceptanceReport.js";
 import { getV1AcceptanceRunStatus, preflightV1AcceptanceRun, startV1AcceptanceRun } from "./workflowV1AcceptanceRunner.js";
 import { approveProductVisualFullDeck, approveProductVisualSample, getLatestProductVisualReadiness, getProductVisualFullDeckApprovalPreflight, getProductVisualFullDeckPreflight, getProductVisualSampleApprovalPreflight, getProductVisualSamplePreflight, getProductVisualSamplePromptPreview, runProductVisualFullDeck, runProductVisualReadinessNoCost, runProductVisualSample } from "./workflowProductVisualReadinessRunner.js";
 import { authorizeExternalImageSpend, getExternalImageAuthorizationStatus, listWorkflowAuthorizations } from "./workflowAuthorizations.js";
+import { getWorkflowContinuationPreflight, runWorkflowContinuation } from "./workflowContinuation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -102,7 +103,12 @@ app.get("/api/health", (_req, res) => {
         editEndpoint: providers.image.editEndpoint || "/images/edits",
         requiredInputMode: providers.image.requiredInputMode || "source-page-edit"
       },
-      ocr: { enabled: providers.ocr.enabled, provider: providers.ocr.provider, pythonPath: providers.ocr.pythonPath }
+      ocr: {
+        enabled: providers.ocr.enabled,
+        provider: providers.ocr.provider,
+        fallbackProvider: providers.ocr.fallbackProvider || "",
+        pythonPath: providers.ocr.pythonPath
+      }
     },
     time: new Date().toISOString()
   });
@@ -172,7 +178,8 @@ app.get("/api/config", async (_req, res) => {
     timeoutMs: Number(env.PROVIDER_TIMEOUT_MS || 120000),
     maxRetries: Number(env.PROVIDER_MAX_RETRIES || 2),
     concurrency: Number(env.PROVIDER_CONCURRENCY || 2),
-    ocrProvider: env.OCR_PROVIDER || "rapidocr-local",
+    ocrProvider: env.OCR_PROVIDER || "paddleocr-local",
+    ocrFallbackProvider: env.OCR_FALLBACK_PROVIDER || "rapidocr-local",
     ocrPythonPath: env.OCR_PYTHON_PATH || env.PYTHON_PATH || "python",
     editppt: {
       ok: Boolean(editppt.ok),
@@ -200,7 +207,8 @@ app.post("/api/config", async (req, res, next) => {
       PROVIDER_TIMEOUT_MS: String(req.body.timeoutMs || current.PROVIDER_TIMEOUT_MS || "120000").trim(),
       PROVIDER_MAX_RETRIES: String(req.body.maxRetries ?? current.PROVIDER_MAX_RETRIES ?? "2").trim(),
       PROVIDER_CONCURRENCY: String(req.body.concurrency || current.PROVIDER_CONCURRENCY || "2").trim(),
-      OCR_PROVIDER: String(req.body.ocrProvider || current.OCR_PROVIDER || "rapidocr-local").trim(),
+      OCR_PROVIDER: String(req.body.ocrProvider || current.OCR_PROVIDER || "paddleocr-local").trim(),
+      OCR_FALLBACK_PROVIDER: String(req.body.ocrFallbackProvider || current.OCR_FALLBACK_PROVIDER || "rapidocr-local").trim(),
       OCR_PYTHON_PATH: String(req.body.ocrPythonPath || current.OCR_PYTHON_PATH || current.PYTHON_PATH || "python").trim(),
       PORT: current.PORT || String(port)
     };
@@ -219,6 +227,7 @@ app.post("/api/config", async (req, res, next) => {
       maxRetries: Number(nextConfig.PROVIDER_MAX_RETRIES),
       concurrency: Number(nextConfig.PROVIDER_CONCURRENCY),
       ocrProvider: nextConfig.OCR_PROVIDER,
+      ocrFallbackProvider: nextConfig.OCR_FALLBACK_PROVIDER,
       ocrPythonPath: nextConfig.OCR_PYTHON_PATH,
       providers
     });
@@ -1566,6 +1575,33 @@ app.post("/api/workflow-jobs/:id/next/preflight", async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Workflow next action preflight failed", code: error.code || "" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/continue-remaining/preflight", async (req, res) => {
+  try {
+    res.json(await getWorkflowContinuationPreflight(req.params.id, req.body || {}));
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      code: error.code || "WORKFLOW_CONTINUATION_PREFLIGHT_FAILED",
+      error: error.message || "workflow continuation preflight failed",
+      preflight: error.preflight || null
+    });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/continue-remaining", async (req, res) => {
+  try {
+    const result = await runWorkflowContinuation(req.params.id, req.body || {});
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (error) {
+    res.status(error.code === "EXTERNAL_IMAGE_SPEND_CONFIRMATION_REQUIRED" ? 409 : 400).json({
+      ok: false,
+      code: error.code || "WORKFLOW_CONTINUATION_FAILED",
+      error: error.message || "workflow continuation failed",
+      preflight: error.preflight || null
+    });
   }
 });
 

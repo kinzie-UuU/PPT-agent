@@ -184,14 +184,14 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   const cost = await getWorkflowCostEstimate(jobId).catch(() => null);
   const externalImageRequired = mode === "model";
   const textHints = getTextHintEvidence(artifacts);
-  const rapidOcrTextHintsAccepted = Boolean(textHints.ocrReady && textHints.backend === "rapidocr-local");
+  const localOcrTextHintsAccepted = Boolean(textHints.ocrReady && /ocr-local|local-ocr|rapidocr|paddleocr/i.test(textHints.backend || ""));
   const offlineTextHintsRequired = !textHints.ocrReady && textHints.backend === "builtin-ink";
   const offlineHintsAccepted = Boolean(
     options.acceptOfflineTextHints
     || options.confirmOfflineTextHints
     || options.paddleOcrDeclined
     || artifacts.editableTextHintsAcknowledgement?.accepted
-    || rapidOcrTextHintsAccepted
+    || localOcrTextHintsAccepted
   );
   const authorization = externalImageRequired
     ? getExternalImageAuthorizationStatus(job, {
@@ -276,11 +276,11 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
       source: authorization?.persisted ? "authorization-ledger" : requestOnlyExternalImageConfirmation ? "request-confirmation-ignored" : "missing"
     },
     offlineTextHints: {
-      required: offlineTextHintsRequired || rapidOcrTextHintsAccepted,
+      required: offlineTextHintsRequired || localOcrTextHintsAccepted,
       confirmed: offlineHintsAccepted,
       acceptedByWorkflow: Boolean(artifacts.editableTextHintsAcknowledgement?.accepted),
-      reason: rapidOcrTextHintsAccepted ? "rapidocr-local" : offlineTextHintsRequired ? "builtin-ink" : textHints.backend || "not-required",
-      state: rapidOcrTextHintsAccepted ? "ocr-ready" : offlineTextHintsRequired ? "offline-ack-required" : "not-required"
+      reason: localOcrTextHintsAccepted ? textHints.backend : offlineTextHintsRequired ? "builtin-ink" : textHints.backend || "not-required",
+      state: localOcrTextHintsAccepted ? "ocr-ready" : offlineTextHintsRequired ? "offline-ack-required" : "not-required"
     },
     llmProviderRecovered: {
       required: llmProviderRecoveryRequired,
@@ -558,11 +558,13 @@ function getTextHintEvidence(artifacts = {}) {
     return {
       source: "ocrTextHints",
       ocrReady: true,
-      backend: "rapidocr-local",
+      backend: ocr.backend || ocr.ocrBackend?.name || "local-ocr",
       pageCount: Number(ocr.pageCount || 0) || 0,
       readyPages: Number(ocr.pageCount || 0) || 0,
       textLineCount: Number(ocr.textCount || 0) || 0,
       lowConfidenceCount: Number(ocr.lowConfidenceCount || 0) || 0,
+      mojibakeCount: Number(ocr.mojibakeCount || 0) || 0,
+      quality: ocr.quality || null,
       path: ocr.relativePath || ocr.path || ""
     };
   }

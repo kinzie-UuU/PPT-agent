@@ -79,6 +79,8 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   });
   const nextActions = buildNextActions(nextStep, {
     sourcePages,
+    processedPages,
+    partialDeck,
     readyPages,
     runningPages,
     recordedPages,
@@ -150,6 +152,8 @@ function chooseNextStep({
 
 function buildNextActions(nextStep, {
   sourcePages,
+  processedPages,
+  partialDeck,
   readyPages,
   runningPages,
   recordedPages,
@@ -159,11 +163,17 @@ function buildNextActions(nextStep, {
   editablePassed
 }) {
   const actions = [nextStep.label + ": " + nextStep.reason];
+  if (partialDeck && hasFinal && sourcePages && processedPages) {
+    const remainingPages = Math.max(0, sourcePages - processedPages);
+    actions.push(`复核当前 ${processedPages} 页样例：逐页确认视觉目标图、可编辑预览、校验结果和资产分离证据。`);
+    if (remainingPages > 0) actions.push(`继续生成剩余 ${remainingPages} 页：启动前必须再次确认 gpt-image-2 图片 API 和页面规格模型调用额度。`);
+  }
   if (failedPages) actions.push("打开页面任务队列，检查失败页面，只重试这些页面。");
   if (!hasFinal && readyPages) actions.push(`确认外部 API 用量后，为 ${readyPages} 个就绪页面运行受保护的可编辑重建批处理。`);
   if (!hasFinal && runningPages) actions.push("观察后台页面任务日志，直到所有页面已记录或失败。");
   if (!hasFinal && sourcePages && recordedPages >= sourcePages) actions.push("运行最终生成，创建最终可编辑 PPT 和校验证据。");
-  if (hasFinal && validationReady && editablePassed) actions.push("下载最终 PPT、校验证据和日志包。");
+  if (hasFinal && validationReady && editablePassed && partialDeck) actions.push(`下载当前 ${processedPages || recordedPages || ""} 页小样本草稿、校验证据和日志包。`);
+  else if (hasFinal && validationReady && editablePassed) actions.push("下载最终 PPT、校验证据和日志包。");
   return uniqueStrings(actions);
 }
 

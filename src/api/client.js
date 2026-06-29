@@ -230,6 +230,12 @@ export const api = {
   async workflowNextActionPreflight(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/next/preflight`, body);
   },
+  async workflowContinuationPreflight(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/continue-remaining/preflight`, body);
+  },
+  async workflowContinueRemaining(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/continue-remaining`, body);
+  },
   async archiveWorkflowJob(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/archive`, body);
   },

@@ -1124,12 +1124,12 @@ function App() {
   async function savePaddleOcrToken() {
     const token = String(apiConfig.paddleOcrToken || "").trim();
     if (!token) {
-      setError("请先粘贴 PaddleOCR 令牌。");
+      setError("请先粘贴 editppt 兼容 OCR 令牌；主流程已使用本地开源 OCR。");
       return;
     }
     setSettingsBusy(true);
     setError("");
-    setStatus("正在把 PaddleOCR 令牌保存到 editppt 配置...");
+    setStatus("正在把 editppt 兼容 OCR 令牌保存到配置...");
     try {
       const data = await api.savePaddleOcrToken({ paddleOcrToken: token });
       setApiConfig((current) => ({
@@ -1137,7 +1137,7 @@ function App() {
         paddleOcrToken: "",
         editppt: data.editppt || current.editppt
       }));
-      setStatus("PaddleOCR 令牌已保存。可在现有工作流中运行“重新生成文字提示”刷新页面文字提示。");
+      setStatus("editppt 兼容 OCR 令牌已保存。主流程仍优先使用本地 PaddleOCR / RapidOCR 文字提示。");
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -1952,6 +1952,18 @@ function SkillFirstProductConsole({ approvalSummary = null, busy, fileCount = 0,
   );
 }
 
+function formatOcrProviderDetail(check = null, provider = {}) {
+  const details = check?.details || {};
+  const primary = details.provider || provider?.provider || "";
+  const fallback = details.fallbackProvider || provider?.fallbackProvider || "";
+  const probe = details.probe || {};
+  if (primary && fallback && fallback !== primary) {
+    const suffix = probe.primaryReady === false && probe.fallbackReady ? "（当前使用兜底）" : "";
+    return `${primary}，兜底 ${fallback}${suffix}`;
+  }
+  return check?.message || primary || "";
+}
+
 function ProductReadinessPanel({ connection, doctor, job = null, localImage, status }) {
   const providers = connection?.details?.providers || {};
   const artifacts = job?.artifacts || {};
@@ -2006,7 +2018,7 @@ function ProductReadinessPanel({ connection, doctor, job = null, localImage, sta
       label: "OCR",
       value: ocrDoctorCheck ? (ocrDoctorCheck.ok ? "可用" : "需处理") : providers.ocr?.enabled ? "检查中" : "可选",
       state: ocrDoctorCheck ? (ocrDoctorCheck.ok ? "ready" : "blocked") : providers.ocr?.enabled ? "working" : "pending",
-      detail: ocrDoctorCheck ? (ocrDoctorCheck.message || providers.ocr?.provider) : providers.ocr?.provider || localImage?.details?.provider || "用于可编辑重建的文字提示"
+      detail: formatOcrProviderDetail(ocrDoctorCheck, providers.ocr) || localImage?.details?.provider || "用于可编辑重建的文字提示"
     },
     {
       id: "codex",
@@ -2634,9 +2646,67 @@ function WorkflowRebuildPanel({ busy, files = [], hasBrief = false, job, jobs = 
     }
   }
 
+  async function continueRemainingPagesFromPartialFinal(option = {}) {
+    if (!job?.id) return;
+    setCodexSlideLoading(true);
+    setCodexSlideError("");
+    setGuidedActionNote("正在检查剩余页面生成条件...");
+    try {
+      const preflight = await api.workflowContinuationPreflight(job.id, {
+        confirmExternalImageSpend: false
+      });
+      setGuidedPreflightBundle({
+        ...guidedPreflightBundle,
+        continuationPreflight: preflight
+      });
+      const calls = preflight.externalImageCalls || option.externalImageCalls || 0;
+      const pages = preflight.partialFinal?.numericPageSelection || preflight.pageSelection || option.pageSelection || "";
+      if (!preflight.ready) {
+        const issue = [...(preflight.blockingIssues || []), ...(preflight.warnings || [])].join(" ") || "剩余页面预检未通过。";
+        setCodexSlideError(uiZh(issue));
+        setGuidedActionNote("");
+        return;
+      }
+      const confirmed = window.confirm(`将继续处理剩余页面 ${pages}，预计调用 ${calls} 次 gpt-image-2 图片 API。确认后会真实生成图片型 PPT，并准备 image-to-editable-ppt 重建。是否继续？`);
+      if (!confirmed) {
+        setGuidedActionNote("已取消继续生成剩余页面。");
+        return;
+      }
+      setGuidedActionNote(`正在启动剩余 ${preflight.remainingPages || calls || ""} 页真实生成...`);
+      const result = await api.workflowContinueRemaining(job.id, {
+        confirmExternalImageSpend: true,
+        requestedBy: "frontend-continue-remaining-pages",
+        reason: "用户在 Agent 工作台确认继续生成部分 final 后的剩余页面"
+      });
+      if (result.result?.taskBundle) setCodexSlideBundle(result.result.taskBundle);
+      await loadCodexSlideBatchPreflight(job.id, {
+        confirmExternalImageSpend: true,
+        assembleImageDeck: true,
+        prepareEditable: true,
+        buildEditablePrompts: true,
+        syncEditableWorkerTasks: true
+      });
+      await onRefresh?.();
+      setGuidedActionNote(result.ok ? "剩余页面图片型 PPT 生成批次已完成或已进入下一阶段，请继续查看可编辑重建状态。" : "剩余页面批次已返回，但存在失败页，请查看失败恢复。");
+    } catch (error) {
+      const data = error?.data || {};
+      if (data.preflight) {
+        setGuidedPreflightBundle({
+          ...(guidedPreflightBundle || {}),
+          continuationPreflight: data.preflight,
+          blockingIssues: data.preflight.blockingIssues || [getErrorMessage(error)]
+        });
+      }
+      setCodexSlideError(getErrorMessage(error));
+      setGuidedActionNote("");
+    } finally {
+      setCodexSlideLoading(false);
+    }
+  }
+
   async function startEditableWorkerBatch() {
     if (!editableOfflineHintsAccepted) {
-      setPageRetryError("启动后台页面批处理前，请确认离线内置文字提示，或配置 PaddleOCR。");
+      setPageRetryError("启动后台页面批处理前，请先运行本地 OCR 文字提示，或确认使用 editppt 离线内置文字提示。");
       return;
     }
     if (!editableImageSpendConfirmed) {
@@ -3369,7 +3439,11 @@ function WorkflowRebuildPanel({ busy, files = [], hasBrief = false, job, jobs = 
           onFocus={() => focusDeliveryNextStep({ id: productSampleAction.targetStepId || "generate-sample" })}
         />
       ) : null}
-      <GuidedNextActionPreflightCard bundle={guidedPreflightBundle} guidedAction={guidedAction} />
+      <GuidedNextActionPreflightCard
+        bundle={guidedPreflightBundle}
+        guidedAction={guidedAction}
+        onContinueRemaining={continueRemainingPagesFromPartialFinal}
+      />
       {guidedActionNote ? <p className="workflow-guided-note">{guidedActionNote}</p> : null}
       {pageRetryError ? <p className="workflow-error">{pageRetryError}</p> : null}
       <details className="workflow-advanced-panel workflow-product-advanced">
@@ -3636,9 +3710,9 @@ function WorkflowRebuildPanel({ busy, files = [], hasBrief = false, job, jobs = 
           <div className="workflow-offline-hints-confirm">
             <label className="workflow-confirm">
               <input type="checkbox" checked={acceptOfflineTextHints || Boolean(job?.artifacts?.editableTextHintsAcknowledgement?.accepted)} onChange={(event) => setAcceptOfflineTextHints(event.target.checked)} disabled={Boolean(job?.artifacts?.editableTextHintsAcknowledgement?.accepted)} />
-              <span>PaddleOCR 令牌未设置；允许此工作流使用离线内置文字提示。</span>
+              <span>本地 OCR 文字提示未被此工作流确认；允许使用 editppt 离线内置文字提示。</span>
             </label>
-            <small>配置免费 PaddleOCR 令牌后，editppt 文字提示会更接近真实内容。没有令牌时，需要先确认此工作流可接受离线提示。</small>
+            <small>主流程优先使用本地 PaddleOCR / RapidOCR。若当前工作流没有本地 OCR 证据，需要先确认可接受 editppt 离线提示。</small>
           </div>
           <div className="workflow-offline-hints-confirm">
             <label className="workflow-confirm external-spend">
@@ -5961,7 +6035,7 @@ function WorkflowExternalSpendAuthorizationPanel({ bundle = null, busy = "", can
   );
 }
 
-function GuidedNextActionPreflightCard({ bundle = null, guidedAction = null }) {
+function GuidedNextActionPreflightCard({ bundle = null, guidedAction = null, onContinueRemaining }) {
   if (!bundle && !guidedAction) return null;
   const requiredConfirmation = bundle?.requiredConfirmation || "";
   const blocked = Boolean(bundle?.blockingIssues?.length || bundle?.error);
@@ -5981,6 +6055,17 @@ function GuidedNextActionPreflightCard({ bundle = null, guidedAction = null }) {
   const authorization = bundle?.authorization || null;
   const recovery = bundle?.recovery || null;
   const recoveryPages = Array.isArray(recovery?.pages) ? recovery.pages : [];
+  const nextOptions = Array.isArray(bundle?.nextOptions) ? bundle.nextOptions : [];
+  function focusNextOption(option = {}) {
+    if (option.id === "continue-remaining-pages") {
+      onContinueRemaining?.(option);
+      return;
+    }
+    const target = option.targetPanel || "";
+    if (!target) return;
+    const element = document.getElementById(target);
+    if (element) element.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   return (
     <div className={`guided-next-preflight ${level}`}>
       <div>
@@ -6006,6 +6091,23 @@ function GuidedNextActionPreflightCard({ bundle = null, guidedAction = null }) {
             </div>
           ) : null}
           {recovery.externalImageConfirmationRequired ? <small>重跑可编辑页面任务前需要确认外部图片 API 额度。</small> : null}
+        </div>
+      ) : null}
+      {nextOptions.length ? (
+        <div className="guided-next-options">
+          <span>可选下一步</span>
+          {nextOptions.map((option) => (
+            <button
+              key={option.id || option.label}
+              type="button"
+              className={option.requiresExternalImageConfirmation ? "warning" : "primary"}
+              onClick={() => focusNextOption(option)}
+            >
+              <b>{uiZh(option.label || option.id)}</b>
+              <small>{uiZh(option.detail || "")}</small>
+              {option.externalImageCalls ? <em>{option.externalImageCalls} 次图片 API</em> : null}
+            </button>
+          ))}
         </div>
       ) : null}
       {authorization?.warning ? <small className="guided-next-preflight-issue">{uiZh(authorization.warning)}</small> : null}
@@ -10782,10 +10884,11 @@ function SettingsPanel({ config, busy, models, styleReferences = [], onChange, o
       <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>保存配置</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>测试对话 API</button><button className="btn ghost" type="button" onClick={onTestImage} disabled={busy}>测试图片 API</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>检测模型</button></div>
       <div className="settings-divider" />
       <h2>可编辑重建 OCR</h2>
-      <div className={"api-state " + (config.editppt?.textHints?.paddleToken === "set" ? "ready" : "missing")}><span className={config.editppt?.textHints?.paddleToken === "set" ? "state-dot active" : "state-dot error"} /><div><b>{config.editppt?.textHints?.paddleToken === "set" ? "PaddleOCR 令牌已配置" : "PaddleOCR 令牌未设置"}</b><p>{uiZh(config.editppt?.textHints?.selection || "unknown")} 文字提示 / <a href={config.editppt?.textHints?.applyUrl || "https://aistudio.baidu.com/account/accessToken"} target="_blank" rel="noreferrer">申请令牌</a></p></div></div>
-      <Field label="PaddleOCR 令牌"><input type="password" value={config.paddleOcrToken || ""} onChange={(event) => update("paddleOcrToken", event.target.value)} placeholder={config.editppt?.textHints?.paddleToken === "set" ? "留空则保留已保存的令牌" : "粘贴 PaddleOCR 令牌"} autoComplete="off" /></Field>
-      <p className="settings-note">会保存到本地可编辑重建配置。保存后，在工作流中使用“重新生成文字提示”刷新页面文字提示。</p>
-      <div className="button-row tight"><button className="btn ghost" type="button" onClick={onSavePaddleOcrToken} disabled={busy || !String(config.paddleOcrToken || "").trim()}>保存 PaddleOCR 令牌</button></div>
+      <div className="api-state ready"><span className="state-dot active" /><div><b>本地开源 OCR</b><p>{formatOcrProviderDetail(null, { provider: config.ocrProvider, fallbackProvider: config.ocrFallbackProvider }) || "paddleocr-local，本地识别；rapidocr-local 兜底"}</p></div></div>
+      <div className={"api-state " + (config.editppt?.textHints?.paddleToken === "set" ? "ready" : "missing")}><span className={config.editppt?.textHints?.paddleToken === "set" ? "state-dot active" : "state-dot error"} /><div><b>{config.editppt?.textHints?.paddleToken === "set" ? "editppt 兼容 OCR 令牌已配置" : "editppt 兼容 OCR 令牌未设置（可选）"}</b><p>{uiZh(config.editppt?.textHints?.selection || "unknown")} 文字提示 / 主流程优先使用本地 OCR</p></div></div>
+      <Field label="editppt 兼容 OCR 令牌（可选）"><input type="password" value={config.paddleOcrToken || ""} onChange={(event) => update("paddleOcrToken", event.target.value)} placeholder={config.editppt?.textHints?.paddleToken === "set" ? "留空则保留已保存的令牌" : "可选：粘贴 editppt 兼容 OCR 令牌"} autoComplete="off" /></Field>
+      <p className="settings-note">主流程使用本地 PaddleOCR / RapidOCR 生成文字提示；这里仅保留 editppt 兼容令牌入口。</p>
+      <div className="button-row tight"><button className="btn ghost" type="button" onClick={onSavePaddleOcrToken} disabled={busy || !String(config.paddleOcrToken || "").trim()}>保存兼容 OCR 令牌</button></div>
       <div className="settings-divider" />
       <h2>可选参考图（非模板）</h2>
       <p className="settings-note">参考图只作为 codex-ppt 的色彩、留白、质感和画面密度约束，不是旧模板库，也不会锁死固定版式。</p>

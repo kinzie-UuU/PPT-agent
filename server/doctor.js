@@ -70,8 +70,15 @@ export async function runProductDoctor(options = {}) {
     "ocr-provider",
     "OCR provider",
     Boolean(ocrProbe.ok),
-    ocrProbe.ok ? providers.ocr.provider : ocrProbe.error || "OCR unavailable",
-    { provider: providers.ocr.provider, pythonPath: providers.ocr.pythonPath }
+    ocrProbe.ok
+      ? `${providers.ocr.provider}${providers.ocr.fallbackProvider ? ` fallback ${providers.ocr.fallbackProvider}` : ""}`
+      : ocrProbe.error || "OCR unavailable",
+    {
+      provider: providers.ocr.provider,
+      fallbackProvider: providers.ocr.fallbackProvider || "",
+      pythonPath: providers.ocr.pythonPath,
+      probe: ocrProbe
+    }
   ));
 
   const editable = await testEditableRuntime({ timeoutMs: Number(options.editpptTimeoutMs || 60000) }).catch((error) => ({

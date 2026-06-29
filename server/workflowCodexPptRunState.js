@@ -12,6 +12,7 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
   const selected = selectedPages.length ? selectedPages : renderedPages.map((page) => page.pageNumber).filter(Boolean);
   const pagesByNumber = new Map(renderedPages.map((page) => [Number(page.pageNumber), page]));
   const promptByNumber = new Map((Array.isArray(prompts.pages) ? prompts.pages : []).map((prompt) => [Number(prompt.pageNumber), prompt]));
+  const preservedByNumber = await readPreservedSlides(job);
   const backend = job.artifacts?.codexPptBackend || job.artifacts?.codexPptBackendDecision || {};
   const slidePrompts = [];
 
@@ -72,7 +73,7 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
       pageId: prompt.pageId,
       pageNumber: prompt.pageNumber,
       promptPath: prompt.path,
-      status: "pending"
+      status: preservedByNumber.get(Number(prompt.pageNumber))?.status === "recorded" ? "recorded" : "pending"
     })),
     policy: {
       fixedBackendRequired: true,
@@ -88,19 +89,7 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
     createdAt: now,
     updatedAt: now,
     maxConcurrentSlides: clampInteger(options.maxConcurrentSlides || options.concurrency, 1, 12, 6),
-    slides: slidePrompts.map((prompt) => ({
-      slideId: prompt.slideId,
-      pageId: prompt.pageId,
-      pageNumber: prompt.pageNumber,
-      promptPath: prompt.path,
-      status: "pending",
-      backend: deckSpec.backend,
-      agentId: "",
-      dispatchedAt: "",
-      recordedAt: "",
-      imagePath: "",
-      qaNote: ""
-    }))
+    slides: slidePrompts.map((prompt) => buildPreparedSlide(prompt, deckSpec.backend, preservedByNumber.get(Number(prompt.pageNumber))))
   };
   const slideRunState = {
     version: 1,
@@ -124,6 +113,53 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
     slideJobs: await artifactRecord("codex_ppt_slide_jobs", slideJobsPath, summarizeSlideJobs(slideJobs.slides)),
     slideRunState: await artifactRecord("codex_ppt_slide_run_state", slideRunStatePath, summarizeSlideJobs(slideRunState.slides)),
     slidePrompts
+  };
+}
+
+async function readPreservedSlides(job = {}) {
+  const byNumber = new Map();
+  const existingState = await readJson(job.artifacts?.codexPptSlideRunState?.path);
+  const existingJobs = await readJson(job.artifacts?.codexPptSlideJobs?.path);
+  const existingTasks = Array.isArray(job.artifacts?.codexPptSlideWorkerTasks) ? job.artifacts.codexPptSlideWorkerTasks : [];
+  for (const slide of [...(existingJobs.slides || []), ...(existingState.slides || [])]) {
+    const pageNumber = Number(slide.pageNumber || 0);
+    if (!pageNumber) continue;
+    byNumber.set(pageNumber, { ...(byNumber.get(pageNumber) || {}), ...slide });
+  }
+  for (const task of existingTasks) {
+    const pageNumber = Number(task.pageNumber || String(task.pageId || "").match(/\d+/)?.[0] || 0);
+    if (!pageNumber) continue;
+    const previous = byNumber.get(pageNumber) || {};
+    byNumber.set(pageNumber, {
+      ...previous,
+      status: task.status || previous.status,
+      agentId: task.agentId || previous.agentId || "",
+      dispatchedAt: task.dispatchAt || previous.dispatchedAt || "",
+      recordedAt: task.recordedAt || previous.recordedAt || "",
+      imagePath: task.imagePath || previous.imagePath || "",
+      imageSha256: task.imageSha256 || previous.imageSha256 || "",
+      qaNote: task.message || previous.qaNote || ""
+    });
+  }
+  return byNumber;
+}
+
+function buildPreparedSlide(prompt, backend, preserved = {}) {
+  const recorded = preserved.status === "recorded" && preserved.imagePath;
+  return {
+    slideId: prompt.slideId,
+    pageId: prompt.pageId,
+    pageNumber: prompt.pageNumber,
+    promptPath: prompt.path,
+    status: recorded ? "recorded" : "pending",
+    backend: recorded ? compactBackend(preserved.backend || preserved) : backend,
+    agentId: recorded ? cleanString(preserved.agentId || "") : "",
+    dispatchMode: recorded ? cleanString(preserved.dispatchMode || "") : "",
+    dispatchedAt: recorded ? cleanString(preserved.dispatchedAt || preserved.dispatchAt || "") : "",
+    recordedAt: recorded ? cleanString(preserved.recordedAt || "") : "",
+    imagePath: recorded ? cleanString(preserved.imagePath || "") : "",
+    imageSha256: recorded ? cleanString(preserved.imageSha256 || "") : "",
+    qaNote: recorded ? cleanString(preserved.qaNote || preserved.message || "") : ""
   };
 }
 

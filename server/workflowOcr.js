@@ -15,19 +15,21 @@ export async function runWorkflowOcr(jobId, options = {}) {
   await fs.mkdir(job.dirs.ocr, { recursive: true });
   const provider = getProviderConfig().ocr;
   if (!provider.enabled) throw new Error("OCR provider disabled");
-  if (provider.provider !== "rapidocr-local") throw new Error(`Unsupported OCR provider: ${provider.provider}`);
 
   const startedAt = new Date().toISOString();
   const pages = [];
   const errors = [];
   for (const image of images) {
     try {
-      const page = await runRapidOcrPage({ image, ocrDir: job.dirs.ocr, provider, minConfidence: options.minConfidence });
+      const page = await runOcrPage({ image, ocrDir: job.dirs.ocr, provider, minConfidence: options.minConfidence });
       pages.push(page);
-      job.pages = upsertPage(job.pages, image.pageNumber, "recorded", `OCR ready: ${page.lineCount} line(s)`, {
+      job.pages = upsertPage(job.pages, image.pageNumber, "recorded", `OCR ready: ${page.lineCount} line(s) via ${page.backend}`, {
         ocrPath: page.ocrPath,
+        ocrBackend: page.backend,
         textCount: page.lineCount,
-        lowConfidenceCount: page.lowConfidenceCount
+        lowConfidenceCount: page.lowConfidenceCount,
+        mojibakeCount: page.mojibakeCount || 0,
+        quality: page.quality || {}
       });
     } catch (error) {
       const failure = {
@@ -47,9 +49,14 @@ export async function runWorkflowOcr(jobId, options = {}) {
   job.artifacts = {
     ...(job.artifacts || {}),
     ocrTextHints: artifactRecord("ocr_text_hints", hintsPath, {
+      backend: hints.ocrBackend?.name || hints.backend || provider.provider,
+      fallbackBackend: hints.fallbackBackend || provider.fallbackProvider || "",
+      ocrBackend: hints.ocrBackend,
       pageCount: pages.length,
       textCount: hints.summary.textCount,
-      lowConfidenceCount: hints.summary.lowConfidenceCount
+      lowConfidenceCount: hints.summary.lowConfidenceCount,
+      mojibakeCount: hints.summary.mojibakeCount,
+      quality: hints.summary.quality
     }),
     ocrPages: pages.map((page) => ({
       kind: "ocr_page",
@@ -57,8 +64,11 @@ export async function runWorkflowOcr(jobId, options = {}) {
       pageNumber: page.pageNumber,
       path: page.ocrPath,
       relativePath: path.relative(process.cwd(), page.ocrPath),
+      backend: page.backend,
       lineCount: page.lineCount,
-      lowConfidenceCount: page.lowConfidenceCount
+      lowConfidenceCount: page.lowConfidenceCount,
+      mojibakeCount: page.mojibakeCount || 0,
+      quality: page.quality || {}
     }))
   };
   await syncRapidOcrHintsToEditableRun(job, hintsPath);
@@ -74,6 +84,8 @@ export async function runWorkflowOcr(jobId, options = {}) {
     pageCount: pages.length,
     textCount: hints.summary.textCount,
     lowConfidenceCount: hints.summary.lowConfidenceCount,
+    mojibakeCount: hints.summary.mojibakeCount,
+    quality: hints.summary.quality,
     errors
   });
   if (errors.length) job.errors = [...(job.errors || []), ...errors.map((item) => ({ stage: "ocr_ready", message: item.error, details: item, createdAt: new Date().toISOString() }))].slice(-50);
@@ -157,6 +169,110 @@ export async function correctWorkflowOcrTextHint(jobId, options = {}) {
   return saveWorkflowJob(job);
 }
 
+async function runOcrPage({ image, ocrDir, provider, minConfidence }) {
+  const providers = buildOcrProviderChain(provider);
+  const failures = [];
+  for (const providerName of providers) {
+    try {
+      const page = providerName === "paddleocr-local"
+        ? await runPaddleOcrPage({ image, ocrDir, provider, minConfidence })
+        : await runRapidOcrPage({ image, ocrDir, provider, minConfidence });
+      page.fallbacks = failures;
+      if (page.quality?.hasMojibake && providerName !== providers.at(-1)) {
+        failures.push({
+          provider: providerName,
+          reason: `OCR output looks mojibake (${page.mojibakeCount || 0} line(s)); trying fallback.`
+        });
+        continue;
+      }
+      return page;
+    } catch (error) {
+      failures.push({ provider: providerName, reason: error.message || String(error) });
+    }
+  }
+  throw new Error(failures.map((item) => `${item.provider}: ${item.reason}`).join(" | ") || "OCR failed");
+}
+
+function buildOcrProviderChain(provider = {}) {
+  const selected = [provider.provider || "paddleocr-local", provider.fallbackProvider || "rapidocr-local"]
+    .map((item) => cleanString(item))
+    .filter(Boolean);
+  return [...new Set(selected)].filter((item) => ["paddleocr-local", "rapidocr-local"].includes(item));
+}
+
+async function runPaddleOcrPage({ image, ocrDir, provider, minConfidence }) {
+  const threshold = Number.isFinite(Number(minConfidence)) ? Number(minConfidence) : 0.35;
+  const pageDir = path.join(ocrDir, image.pageId);
+  await fs.mkdir(pageDir, { recursive: true });
+  const outputPath = path.join(pageDir, "ocr.json");
+  const script = [
+    "import json, sys",
+    "import os",
+    "os.environ.setdefault('PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT', '0')",
+    "os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')",
+    "os.environ.setdefault('FLAGS_use_mkldnn', '0')",
+    "from paddleocr import PaddleOCR",
+    "img=sys.argv[1]",
+    "out=sys.argv[2]",
+    "threshold=float(sys.argv[3])",
+    "def make_ocr():",
+    "    attempts=[",
+    "        {'lang':'ch', 'use_textline_orientation': True},",
+    "        {'lang':'ch', 'use_angle_cls': True, 'show_log': False},",
+    "        {'lang':'ch'},",
+    "    ]",
+    "    last=None",
+    "    for kwargs in attempts:",
+    "        try:",
+    "            return PaddleOCR(**kwargs)",
+    "        except Exception as exc:",
+    "            last=exc",
+    "    raise last",
+    "ocr=make_ocr()",
+    "if hasattr(ocr, 'predict'):",
+    "    result=ocr.predict(img)",
+    "else:",
+    "    result=ocr.ocr(img, cls=True)",
+    "lines=[]",
+    "def add_line(points, text, score):",
+    "    clean=str(text or '').strip()",
+    "    if not clean: return",
+    "    pts=points",
+    "    if pts is None: pts=[]",
+    "    if hasattr(pts, 'tolist'): pts=pts.tolist()",
+    "    if len(pts)==4 and all(isinstance(v,(int,float)) for v in pts):",
+    "        x,y,w,h=[float(v) for v in pts]; pts=[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]",
+    "    if len(pts)==0: pts=[[0,0],[1,0],[1,1],[0,1]]",
+    "    xs=[float(p[0]) for p in pts]; ys=[float(p[1]) for p in pts]",
+    "    score=float(score or 0)",
+    "    box=[int(round(min(xs))), int(round(min(ys))), max(1,int(round(max(xs)-min(xs)))), max(1,int(round(max(ys)-min(ys))))]",
+    "    lines.append({'id': f'O{len(lines)+1:03d}', 'text': clean, 'confidence': round(score,4), 'low_confidence': score < threshold, 'box_px': box, 'polygon_px': [[int(round(float(x))), int(round(float(y)))] for x,y in pts], 'font_pt_if_cjk': round(box[3] * 0.58, 1)})",
+    "def parse_node(node):",
+    "    if isinstance(node, dict):",
+    "        texts=node.get('rec_texts') or node.get('texts') or []",
+    "        scores=node.get('rec_scores') or node.get('scores') or []",
+    "        polys=node.get('rec_polys') or node.get('dt_polys') or node.get('rec_boxes') or node.get('boxes') or []",
+    "        for i,text in enumerate(texts): add_line(polys[i] if i < len(polys) else None, text, scores[i] if i < len(scores) else 0)",
+    "        return",
+    "    if isinstance(node, (list, tuple)):",
+    "        if len(node)>=2 and isinstance(node[1], (list, tuple)) and len(node[1])>=2 and isinstance(node[1][0], str):",
+    "            add_line(node[0], node[1][0], node[1][1]); return",
+    "        for child in node: parse_node(child)",
+    "parse_node(result)",
+    "lines=sorted(lines, key=lambda item: (item['box_px'][1], item['box_px'][0]))",
+    "for idx,line in enumerate(lines, start=1): line['id']=f'O{idx:03d}'",
+    "data={'backend':'paddleocr-local','image':img,'min_confidence':threshold,'line_count':len(lines),'low_confidence_count':sum(1 for line in lines if line['low_confidence']),'lines':lines}",
+    "open(out,'w',encoding='utf-8').write(json.dumps(data, ensure_ascii=False, indent=2))"
+  ].join("\n");
+  await execFileAsync(provider.pythonPath, ["-c", script, image.path, outputPath, String(threshold)], {
+    timeout: provider.timeoutMs,
+    windowsHide: true,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+    encoding: "utf8"
+  });
+  return readOcrPageResult({ image, outputPath });
+}
+
 async function runRapidOcrPage({ image, ocrDir, provider, minConfidence }) {
   const threshold = Number.isFinite(Number(minConfidence)) ? Number(minConfidence) : 0.35;
   const pageDir = path.join(ocrDir, image.pageId);
@@ -194,16 +310,24 @@ async function runRapidOcrPage({ image, ocrDir, provider, minConfidence }) {
     env: { ...process.env, PYTHONIOENCODING: "utf-8" },
     encoding: "utf8"
   });
+  return readOcrPageResult({ image, outputPath });
+}
+
+async function readOcrPageResult({ image, outputPath }) {
   const data = JSON.parse(await fs.readFile(outputPath, "utf8"));
+  const lines = annotateOcrLines(data.lines || []);
+  const quality = summarizeOcrQuality(lines);
   return {
     pageId: image.pageId,
     pageNumber: image.pageNumber,
     imagePath: image.path,
     ocrPath: outputPath,
     backend: data.backend,
-    lineCount: data.line_count || 0,
-    lowConfidenceCount: data.low_confidence_count || 0,
-    lines: data.lines || []
+    lineCount: lines.length,
+    lowConfidenceCount: lines.filter((line) => line.low_confidence).length,
+    mojibakeCount: lines.filter((line) => line.mojibake_suspect).length,
+    quality,
+    lines
   };
 }
 
@@ -213,7 +337,9 @@ function recomputeOcrHints(hints = {}) {
     const lines = Array.isArray(page.ocrLines) ? page.ocrLines : [];
     page.lineCount = lines.length;
     page.lowConfidenceCount = lines.filter((line) => line.low_confidence).length;
-    page.requiredText = lines.filter((line) => !line.low_confidence).map((line) => line.text).filter(Boolean);
+    page.mojibakeCount = lines.filter((line) => line.mojibake_suspect).length;
+    page.quality = summarizeOcrQuality(lines);
+    page.requiredText = lines.filter((line) => !line.low_confidence && !line.mojibake_suspect).map((line) => line.text).filter(Boolean);
   }
   const allLines = pages.flatMap((page) => Array.isArray(page.ocrLines) ? page.ocrLines : []);
   hints.summary = {
@@ -221,8 +347,10 @@ function recomputeOcrHints(hints = {}) {
     pageCount: pages.length,
     textCount: allLines.length,
     lowConfidenceCount: allLines.filter((line) => line.low_confidence).length,
+    mojibakeCount: allLines.filter((line) => line.mojibake_suspect).length,
     correctedCount: allLines.filter((line) => line.corrected).length
   };
+  hints.summary.quality = summarizeOcrQuality(allLines);
 }
 
 async function syncRapidOcrHintsToEditableRun(job, hintsPath) {
@@ -237,36 +365,88 @@ async function syncRapidOcrHintsToEditableRun(job, hintsPath) {
 function buildTextHints({ job, provider, startedAt, pages, errors }) {
   const textCount = pages.reduce((sum, page) => sum + page.lineCount, 0);
   const lowConfidenceCount = pages.reduce((sum, page) => sum + page.lowConfidenceCount, 0);
+  const mojibakeCount = pages.reduce((sum, page) => sum + (page.mojibakeCount || 0), 0);
+  const allLines = pages.flatMap((page) => page.lines || []);
   const finishedAt = new Date().toISOString();
   return {
     version: 1,
     jobId: job.id,
     backend: provider.provider,
+    fallbackBackend: provider.fallbackProvider || "",
     ocrBackend: {
-      name: "rapidocr-onnxruntime",
+      name: pages.find((page) => page.backend)?.backend || provider.provider,
       mode: "local-open-source",
-      pythonPath: provider.pythonPath
+      pythonPath: provider.pythonPath,
+      fallback: provider.fallbackProvider || ""
     },
+    pageCount: pages.length,
+    textCount,
+    lowConfidenceCount,
+    mojibakeCount,
+    quality: summarizeOcrQuality(allLines),
     summary: {
       pageCount: pages.length,
       textCount,
       lowConfidenceCount,
-      errorCount: errors.length
+      mojibakeCount,
+      errorCount: errors.length,
+      quality: summarizeOcrQuality(allLines)
     },
     pages: pages.map((page) => ({
       pageId: page.pageId,
       pageNumber: page.pageNumber,
       imagePath: page.imagePath,
       ocrPath: page.ocrPath,
+      backend: page.backend,
       lineCount: page.lineCount,
       lowConfidenceCount: page.lowConfidenceCount,
-      requiredText: page.lines.filter((line) => !line.low_confidence).map((line) => line.text),
+      mojibakeCount: page.mojibakeCount || 0,
+      quality: page.quality || {},
+      fallbacks: page.fallbacks || [],
+      requiredText: page.lines.filter((line) => !line.low_confidence && !line.mojibake_suspect).map((line) => line.text),
       ocrLines: page.lines
     })),
     errors,
     startedAt,
     finishedAt
   };
+}
+
+function annotateOcrLines(lines = []) {
+  return (Array.isArray(lines) ? lines : []).map((line) => {
+    const text = cleanString(line.text || "");
+    const mojibake = detectMojibake(text);
+    return {
+      ...line,
+      text,
+      low_confidence: Boolean(line.low_confidence || mojibake),
+      mojibake_suspect: mojibake,
+      quality_issue: mojibake ? "mojibake-suspect" : line.quality_issue || ""
+    };
+  });
+}
+
+function summarizeOcrQuality(lines = []) {
+  const total = Array.isArray(lines) ? lines.length : 0;
+  const lowConfidence = lines.filter((line) => line.low_confidence).length;
+  const mojibake = lines.filter((line) => line.mojibake_suspect).length;
+  return {
+    status: mojibake ? "needs-review" : lowConfidence ? "warning" : "pass",
+    lineCount: total,
+    lowConfidenceCount: lowConfidence,
+    mojibakeCount: mojibake
+  };
+}
+
+function detectMojibake(text = "") {
+  const value = String(text || "");
+  if (!value) return false;
+  if (/[€�]/.test(value)) return true;
+  if (/[锛绔垫湀鏈哄伐鎶棶窛]/.test(value) && /[涓姹囧窛鎶鏈鍛樺伐鎱棶鎻愭椿哄厛鑷磋繙]/.test(value)) return true;
+  const cjk = (value.match(/[\u4e00-\u9fff]/g) || []).length;
+  const latin = (value.match(/[A-Za-z0-9]/g) || []).length;
+  const suspicious = (value.match(/[€锛绔垫湀鏈哄伐鎶棶窛]/g) || []).length;
+  return cjk >= 3 && suspicious / Math.max(1, cjk + latin) > 0.35;
 }
 
 function getOcrInputImages(job, options = {}) {

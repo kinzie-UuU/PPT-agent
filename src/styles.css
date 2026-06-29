@@ -7680,6 +7680,60 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   gap: 10px;
   align-items: center;
 }
+.guided-next-options {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(40,84,216,.16);
+  border-radius: 7px;
+  background: rgba(40,84,216,.04);
+}
+.guided-next-options > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.guided-next-options button {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(40,84,216,.22);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.guided-next-options button.warning {
+  border-color: rgba(154,106,22,.3);
+  background: #fffaf0;
+}
+.guided-next-options button b,
+.guided-next-options button small,
+.guided-next-options button em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.guided-next-options button b {
+  font-size: 13px;
+}
+.guided-next-options button small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.guided-next-options button em {
+  justify-self: start;
+  margin-top: 2px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(154,106,22,.12);
+  color: #8a5b0f;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
 .workflow-manual-review-summary {
   display: grid;
   gap: 8px;

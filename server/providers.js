@@ -52,7 +52,8 @@ export function getProviderConfig(env = globalThis.process?.env || {}) {
       concurrency
     },
     ocr: {
-      provider: env.OCR_PROVIDER || "rapidocr-local",
+      provider: env.OCR_PROVIDER || "paddleocr-local",
+      fallbackProvider: env.OCR_FALLBACK_PROVIDER || "rapidocr-local",
       enabled: env.OCR_ENABLED !== "false",
       pythonPath: resolveDefaultOcrPythonPath(env),
       timeoutMs: clampNumber(env.OCR_TIMEOUT_MS, 5000, 600000, DEFAULT_TIMEOUT_MS),
@@ -330,31 +331,42 @@ export async function testImageProvider(overrides = {}) {
 export async function testOcrProvider(overrides = {}) {
   const config = mergeOcrConfig(overrides);
   if (!config.enabled) return { ok: false, configured: false, provider: config.provider, error: "OCR provider disabled" };
-  if (config.provider !== "rapidocr-local") {
-    return { ok: true, configured: true, provider: config.provider, message: "OCR provider selected; runtime check is only implemented for rapidocr-local." };
-  }
   try {
-    const probe = "import importlib.util, json; mods=['rapidocr_onnxruntime','rapidocr']; print(json.dumps({m: bool(importlib.util.find_spec(m)) for m in mods}))";
+    const probe = "import importlib.util, json; mods=['paddleocr','paddle','rapidocr_onnxruntime','rapidocr']; print(json.dumps({m: bool(importlib.util.find_spec(m)) for m in mods}))";
     const { stdout } = await execFileAsync(config.pythonPath, ["-c", probe], {
       timeout: config.timeoutMs,
       windowsHide: true,
       env: { ...process.env, PYTHONIOENCODING: "utf-8" }
     });
     const modules = JSON.parse(stdout.trim() || "{}");
-    const ok = Boolean(modules.rapidocr_onnxruntime || modules.rapidocr);
+    const primaryReady = config.provider === "paddleocr-local"
+      ? Boolean(modules.paddleocr && modules.paddle)
+      : config.provider === "rapidocr-local"
+        ? Boolean(modules.rapidocr_onnxruntime || modules.rapidocr)
+        : false;
+    const fallbackReady = config.fallbackProvider === "rapidocr-local"
+      ? Boolean(modules.rapidocr_onnxruntime || modules.rapidocr)
+      : config.fallbackProvider === "paddleocr-local"
+        ? Boolean(modules.paddleocr && modules.paddle)
+        : false;
+    const ok = Boolean(primaryReady || fallbackReady);
     return {
       ok,
       configured: ok,
       provider: config.provider,
+      fallbackProvider: config.fallbackProvider,
       pythonPath: config.pythonPath,
       modules,
-      error: ok ? "" : "rapidocr_onnxruntime or rapidocr is not installed in this Python runtime"
+      primaryReady,
+      fallbackReady,
+      error: ok ? "" : "paddleocr+paddle, rapidocr_onnxruntime, or rapidocr is not installed in this Python runtime"
     };
   } catch (error) {
     return {
       ok: false,
       configured: false,
       provider: config.provider,
+      fallbackProvider: config.fallbackProvider,
       pythonPath: config.pythonPath,
       error: error.message || "OCR runtime check failed"
     };
@@ -567,7 +579,8 @@ function mergeImageConfig(overrides = {}) {
 function mergeOcrConfig(overrides = {}) {
   const config = getProviderConfig().ocr;
   return {
-    provider: String(overrides.provider || config.provider || "rapidocr-local").trim(),
+    provider: String(overrides.provider || config.provider || "paddleocr-local").trim(),
+    fallbackProvider: String(overrides.fallbackProvider || config.fallbackProvider || "rapidocr-local").trim(),
     enabled: overrides.enabled ?? config.enabled,
     pythonPath: String(overrides.pythonPath || config.pythonPath || "python").trim(),
     timeoutMs: clampNumber(overrides.timeoutMs || config.timeoutMs, 5000, 600000, DEFAULT_TIMEOUT_MS),
