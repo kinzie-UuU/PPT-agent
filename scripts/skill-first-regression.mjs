@@ -286,7 +286,15 @@ function checkApiSurface(files) {
     mustInclude(files.workflowProductVisualReadinessRunner, "风格锁");
     mustInclude(files.providers, "referenceImagePaths");
     mustInclude(files.providers, "source-page-edit-plus-style-reference");
-    mustInclude(files.frontend, "风格锁");
+    mustInclude(files.frontend, "确认方案");
+    mustInclude(files.frontend, "确认样张");
+    mustInclude(files.frontend, "后台生成");
+    mustInclude(files.frontend, "不需要用户操作的 codex-ppt 步骤保持后台处理");
+    mustNotInclude(files.frontend, "先按 codex-ppt skill 完成 6 步");
+    mustNotInclude(files.frontend, "样张已确认，图片版正在后台生成和组装。");
+    mustNotInclude(files.frontend, "后续图片页生成、检查和组装在后台完成");
+    mustNotInclude(files.frontend, "图片页已检查并组装");
+    mustNotInclude(files.frontend, "正在生成、检查和组装");
   });
 }
 

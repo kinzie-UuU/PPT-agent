@@ -16,7 +16,6 @@ const SKILL_FIRST_RULES = {
     "最终交付以可编辑 PPT 和校验证据为准"
   ]
 };
-const PRODUCT_VISUAL_STYLE_LOCK_LABEL = "风格锁";
 
 const LAYOUT_LABELS = {
   cover: "\u5c01\u9762",
@@ -2093,7 +2092,7 @@ function DualRouteDashboard({
       ? onApproveNoCostGates
       : state.routeB.finalReady && !state.routeB.reviewReady
         ? onOpenDelivery
-      : state.routeA.imageDeckReady
+      : state.routeA.status === "ready"
         ? onOpenEditable
         : onOpenVisual;
   const primaryLabel = !job?.id
@@ -2102,7 +2101,7 @@ function DualRouteDashboard({
       ? "确认就绪关卡"
       : state.routeB.finalReady && !state.routeB.reviewReady
         ? "继续人工复核"
-      : state.routeA.imageDeckReady
+      : state.routeA.status === "ready"
         ? "继续转可编辑 PPT"
         : "继续生成图片版 PPT";
   const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
@@ -2201,10 +2200,9 @@ function DualRouteDashboard({
           status={state.routeA.status}
           steps={state.routeA.steps}
           metrics={[
-            ["源页", state.routeA.sourceLabel],
-            ["图片页", state.routeA.visualLabel],
-            ["风格锁", state.routeA.imageDeckReady ? `${PRODUCT_VISUAL_STYLE_LOCK_LABEL}已固化` : `等待${PRODUCT_VISUAL_STYLE_LOCK_LABEL}`],
-            ["图片 PPT", state.routeA.imageDeckReady ? "已组装" : "待组装"]
+            ["用户确认", state.routeA.userConfirmLabel],
+            ["后台生成", state.routeA.backgroundLabel],
+            ["图片版", state.routeA.imageDeckReady ? "可下载" : "未完成"]
           ]}
           actions={[
             imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
@@ -2241,7 +2239,7 @@ function DualRouteDashboard({
           <h2>下一步建议</h2>
           <strong>{state.nextAction}</strong>
           <ul>
-            <li className={state.routeA.imageDeckReady ? "done" : "active"}>图片版已经完成，可以下载交付</li>
+            <li className={state.routeA.status === "ready" ? "done" : "active"}>{state.routeA.status === "ready" ? "图片版 PPT 已完成，可以下载交付" : state.routeA.nextUserConfirmation || "需要你确认的地方会弹出确认界面，其余生成步骤在后台完成"}</li>
             <li className={state.routeB.deliverableReady ? "done" : "active"}>{state.routeB.deliverableReady ? "可编辑版已复核，可以下载交付" : state.routeB.finalReady ? "可编辑版已生成，先完成人工复核" : "如需可编辑版，后续进入路线 B"}</li>
             <li>可编辑重建会消耗更多时间和资源</li>
           </ul>
@@ -2342,7 +2340,44 @@ function buildDualRouteState(job = null) {
     || imagePageCount
     || 0
   );
+  const imageTotal = expectedPages || imagePageCount || sourcePages || 0;
   const imageDeckReady = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const approvedGates = getApprovedCodexPptGateSet(job);
+  const visualSample = artifacts.visualSample || {};
+  const sampleReady = Boolean(
+    visualSample.path
+    && visualSample.sha256
+    && visualSample.dryRun !== true
+    && visualSample.provider !== "passthrough"
+    && visualSample.passthrough !== true
+  );
+  const sampleApproved = Boolean(sampleReady && approvedGates.has("sample"));
+  const fullDeckApproved = Boolean(approvedGates.has("fullDeck"));
+  const codexPptDecisionReady = Boolean(
+    approvedGates.has("outline")
+    && approvedGates.has("style")
+    && approvedGates.has("backend")
+    && (artifacts.codexPptOutline?.path || artifacts.codexPptOutline?.markdownPath)
+    && (artifacts.codexPptStyle?.path || artifacts.codexPptStyle?.styleBrief)
+    && (artifacts.codexPptBackendDecision?.path || artifacts.codexPptBackendDecision?.backend)
+  );
+  const slideJobTotal = Number(
+    artifacts.codexPptSlideRunState?.total
+    || artifacts.codexPptSlideJobs?.total
+    || artifacts.codexPptSlidePrompts?.length
+    || codexTasks.length
+    || imageTotal
+    || 0
+  );
+  const slideDispatched = Number(artifacts.codexPptSlideRunState?.dispatched || artifacts.codexPptSlideJobs?.dispatched || 0)
+    || codexTasks.filter((task) => task.status === "dispatched" || task.status === "recorded").length;
+  const slideRecorded = Number(artifacts.codexPptSlideRunState?.recorded || artifacts.codexPptSlideJobs?.recorded || 0)
+    || Math.max(recordedVisualPages, imagePageCount);
+  const slideFailed = Number(artifacts.codexPptSlideRunState?.failed || artifacts.codexPptSlideJobs?.failed || 0);
+  const slideJobsReady = Boolean(artifacts.codexPptDeckSpec?.path && artifacts.codexPptSlideJobs?.path && artifacts.codexPptSlideRunState?.path && slideJobTotal > 0);
+  const slideDispatchReady = Boolean(slideJobsReady && slideJobTotal > 0 && slideDispatched >= slideJobTotal && slideFailed === 0);
+  const slideResultsRecorded = Boolean(slideJobsReady && slideJobTotal > 0 && slideRecorded >= slideJobTotal && slideFailed === 0);
+  const qaAssemblyReady = Boolean(imageDeckReady && (artifacts.codexPptSpeech?.path || artifacts.codexPptSpeech?.relativePath || artifacts.imageDeck?.path));
   const editableTasks = Array.isArray(job?.editableWorkerTasks?.tasks) ? job.editableWorkerTasks.tasks : [];
   const recordedEditablePages = editableTasks.filter((task) => task.status === "recorded").length
     || Number(artifacts.pageEvidence?.summary?.readyPages || artifacts.editableFinal?.summary?.recordedPages || 0);
@@ -2350,13 +2385,32 @@ function buildDualRouteState(job = null) {
   const finalReady = Boolean(artifacts.editableFinal?.path && (!expectedPages || finalPages >= expectedPages));
   const reviewReady = artifacts.manualReview?.status === "approved";
   const deliverableReady = Boolean(finalReady && reviewReady);
-  const routeAReady = Boolean(imageDeckReady);
+  const routeAReady = Boolean(qaAssemblyReady && slideResultsRecorded && sampleApproved && codexPptDecisionReady);
   const routeBStarted = Boolean(recordedEditablePages || finalPages || artifacts.editableRun);
   const routeBReady = deliverableReady;
   const routeAStatus = routeAReady ? "ready" : job?.id ? "active" : "pending";
   const routeBStatus = routeBReady ? "ready" : routeBStarted ? "active" : routeAReady ? "optional" : "locked";
-  const imageTotal = expectedPages || imagePageCount || sourcePages || 0;
   const editableTotal = expectedPages || editableTasks.length || finalPages || 0;
+  const nextUserConfirmation = !codexPptDecisionReady
+    ? "需要你确认大纲、视觉风格和生图后端。"
+    : !sampleApproved
+      ? "需要你确认 1 页样张，确认后再生成整套图片版。"
+      : "";
+  const backgroundComplete = Boolean(slideResultsRecorded && qaAssemblyReady);
+  const backgroundActive = Boolean(sampleApproved && !backgroundComplete);
+  const routeANextAction = !job?.id
+    ? "先上传材料并创建图片版 PPT 任务。"
+    : !codexPptDecisionReady
+      ? "先弹出确认界面：确认大纲、视觉风格和生图后端。"
+      : !sampleApproved
+        ? "先弹出样张确认界面；确认后后台生成整套图片版。"
+        : !qaAssemblyReady
+          ? "样张已确认，图片版正在后台生成。"
+          : finalReady && !reviewReady
+            ? "图片版和可编辑版都已生成；可先下载检查，最终交付仍需人工复核。"
+            : !routeBReady
+              ? "图片版已可作为阶段交付；如需要对象级编辑，再继续路线 B。"
+              : "可编辑 PPT 已完成交付门禁，可进入下载与复核。";
 
   return {
     message: imageDeckReady
@@ -2364,28 +2418,35 @@ function buildDualRouteState(job = null) {
       : job?.id
         ? "当前先推进图片版 PPT。完成图片页和图片型 PPT 后，再决定是否转成可编辑 PPT。"
         : "上传材料后先创建图片版 PPT 任务，可编辑重建作为第二阶段按需开启。",
-    nextAction: !job?.id
-      ? "先上传材料并创建图片版 PPT 任务。"
-      : !imageDeckReady
-        ? "优先完成路线 A：生成视觉页面并组装图片版 PPT。"
-        : finalReady && !reviewReady
-          ? "图片版和可编辑版都已生成；可先下载检查，最终交付仍需人工复核。"
-        : !routeBReady
-          ? "图片版已可作为阶段交付；如需要对象级编辑，再继续路线 B。"
-          : "可编辑 PPT 已完成交付门禁，可进入下载与复核。",
+    nextAction: routeANextAction,
     routeA: {
       status: routeAStatus,
       imageDeckReady,
+      codexPptDecisionReady,
+      slideJobsReady,
+      slideDispatchReady,
+      slideResultsRecorded,
+      qaAssemblyReady,
+      nextUserConfirmation,
+      userConfirmLabel: !codexPptDecisionReady ? "待确认方案" : !sampleApproved ? "待确认样张" : "已确认",
+      backgroundLabel: backgroundComplete ? "已完成" : backgroundActive ? "后台处理中" : "等待确认",
+      sampleReady,
+      sampleApproved,
       sourceLabel: sourcePages ? `${sourcePages} 页` : "待解析",
       visualLabel: imageTotal ? formatProgress(imagePageCount, imageTotal) : imagePageCount ? `${imagePageCount} 页` : "待生成",
-      summary: imageDeckReady
-        ? "图片版 PPT 已组装，可先下载交付或作为可编辑重建输入。"
-        : "先把源稿重绘成视觉统一的图片页面，再组装成图片型 PPT。",
+      summary: routeAReady
+        ? "图片版 PPT 已完成，可以先作为阶段交付。"
+        : !codexPptDecisionReady
+          ? "先确认生成方案：大纲、视觉风格和生图后端需要你明确确认。"
+          : !sampleApproved
+            ? "先看 1 页样张，确认风格、版式节奏和文字质量。"
+            : "样张已确认，后续会在后台完成。",
+      // 不需要用户操作的 codex-ppt 步骤保持后台处理；这里只展示确认点和交付状态。
       steps: [
-        { label: "上传材料", detail: sourcePages ? "材料已上传完成" : "等待材料", state: job?.id || sourcePages ? "done" : "pending" },
-        { label: "生成视觉页面", detail: imageTotal ? `${formatProgress(imagePageCount, imageTotal)} 页已完成` : "等待生成", state: imagePageCount ? (imageTotal && imagePageCount >= imageTotal ? "done" : "active") : job?.id ? "active" : "pending" },
-        { label: "组装图片 PPT", detail: imageDeckReady ? "PPT 已组装完成" : "等待组装", state: imageDeckReady ? "done" : imagePageCount ? "active" : "pending" },
-        { label: "下载图片版", detail: imageDeckReady ? "可下载交付物" : "等待交付", state: imageDeckReady ? "done" : "pending" }
+        { label: "确认方案", detail: codexPptDecisionReady ? "大纲、风格和生图后端已确认" : "需要弹出确认界面", state: codexPptDecisionReady ? "done" : job?.id ? "active" : "pending" },
+        { label: "确认样张", detail: sampleApproved ? "样张已确认" : sampleReady ? "样张已生成，等待确认" : "等待生成 1 页样张", state: sampleApproved ? "done" : sampleReady ? "active" : codexPptDecisionReady ? "active" : "pending" },
+        { label: "后台生成", detail: backgroundComplete ? "已完成" : backgroundActive ? "后台处理中" : "确认完成后自动处理", state: backgroundComplete ? "done" : backgroundActive ? "active" : "pending" },
+        { label: "下载图片版", detail: imageDeckReady ? "图片版 PPT 可下载" : "后台完成后开放下载", state: imageDeckReady ? "done" : backgroundActive ? "active" : "pending" }
       ]
     },
     routeB: {
