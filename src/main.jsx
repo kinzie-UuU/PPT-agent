@@ -1427,12 +1427,24 @@ function App() {
   return (
     <div className="workspace-shell">
       <header className="topbar">
-        <div>
-          <span className="brand">PPT 智能体工作台</span>
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M12 2.6c5.2 0 9.4 4.2 9.4 9.4s-4.2 9.4-9.4 9.4S2.6 17.2 2.6 12 6.8 2.6 12 2.6Z" />
+              <path d="M7.7 13.5 13.4 6.8h3l-5.7 6.7h3.7l-3.8 3.7H7.7v-3.7Z" />
+            </svg>
+          </span>
+          <span className="brand-name">PPT Agent</span>
+          <span className="topbar-pill"><span className={topbarStateClass} />本地已连接</span>
+          <span className="topbar-pill"><span className="pill-check" />模型正常</span>
         </div>
-        <div className="topbar-status">
-          <span className={topbarStateClass} />
-          <span>{topbarMessage}</span>
+        <div className="topbar-actions">
+          <button className="topbar-tool" type="button">健康检查</button>
+          <button className="topbar-icon" type="button" aria-label="设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.4A3.6 3.6 0 1 1 12 15.6 3.6 3.6 0 0 1 12 8.4Zm7.2 3.6c0-.5-.1-1-.2-1.5l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2.5-1.4L13.8 2h-4l-.4 3.2A7 7 0 0 0 7 6.6l-2.5-1-2 3.4 2 1.5a7.5 7.5 0 0 0 0 3l-2 1.5 2 3.4 2.5-1c.7.6 1.5 1 2.4 1.3l.4 3.3h4l.4-3.3a7 7 0 0 0 2.5-1.4l2.4 1 2-3.4-2-1.5c.1-.5.2-1 .2-1.5Z" /></svg>
+          </button>
+          <span className="topbar-avatar">A</span>
+          <button className="topbar-mode" type="button">本地模式</button>
         </div>
       </header>
 
@@ -2168,37 +2180,62 @@ function DualRouteWorkbench({
 }
 
 function RouteLane({ accent = "visual", actions = [], badge, metrics = [], status = "pending", steps = [], summary, title }) {
+  const primaryAction = actions.find((action) => action.primary) || actions[0];
+  const secondaryActions = actions.filter((action) => action !== primaryAction);
+  const completionMetric = metrics[1] || metrics[0] || ["进度", "-"];
+  const completionTitle = accent === "visual" && status === "ready"
+    ? "图片版 PPT 已完成"
+    : accent === "editable" && status === "ready"
+      ? "可编辑 PPT 已完成"
+      : accent === "editable"
+        ? "可编辑重建尚未开始"
+        : "图片版 PPT 生成中";
   return (
     <section className={`route-lane ${accent} ${status}`}>
       <div className="route-lane-head">
+        <span className="route-icon" aria-hidden="true">
+          {accent === "visual" ? (
+            <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5V5Zm2 2v10h10V7H7Zm1.5 8 2.8-3.2 2 2.2 1.2-1.3L17 15H8.5Zm1.2-5.4a1.4 1.4 0 1 1 2.8 0 1.4 1.4 0 0 1-2.8 0Z" /></svg>
+          ) : (
+            <svg viewBox="0 0 24 24"><path d="M6 4h12v16H6V4Zm2 2v12h8V6H8Zm1.5 2.5h5v1.6h-5V8.5Zm0 3.2h5v1.6h-5v-1.6Zm0 3.2h3.2v1.6H9.5v-1.6Z" /></svg>
+          )}
+        </span>
         <div>
           <span>{badge}</span>
-          <h3>{title}</h3>
+          <h3>{title} <em>{routeStatusLabel(status)}</em></h3>
           <p>{summary}</p>
         </div>
-        <strong>{routeStatusLabel(status)}</strong>
       </div>
       <div className="route-stepper">
         {steps.map((step, index) => (
           <div className={`route-step ${step.state}`} key={step.label}>
             <i>{String(index + 1).padStart(2, "0")}</i>
             <span>{step.label}</span>
+            <small>{step.detail}</small>
           </div>
         ))}
       </div>
-      <div className="route-metrics">
-        {metrics.map(([label, value]) => (
-          <span key={label}><b>{value}</b>{label}</span>
-        ))}
-      </div>
-      <div className="route-actions">
-        {actions.map((action) => action.href ? (
-          <a className={action.primary ? "btn primary" : "btn"} href={action.href} key={action.label}>{action.label}</a>
-        ) : (
-          <button className={action.primary ? "btn primary" : "btn"} type="button" onClick={action.onClick} disabled={action.disabled} key={action.label}>
-            {action.label}
-          </button>
-        ))}
+      <div className="route-completion">
+        <div>
+          <b>{completionTitle}</b>
+          <span>当前为 {completionMetric[1]} {completionMetric[0]}</span>
+        </div>
+        <div className="route-actions">
+          {secondaryActions.map((action) => action.href ? (
+            <a className="btn" href={action.href} key={action.label}>{action.label}</a>
+          ) : (
+            <button className="btn" type="button" onClick={action.onClick} disabled={action.disabled} key={action.label}>
+              {action.label}
+            </button>
+          ))}
+          {primaryAction ? primaryAction.href ? (
+            <a className="btn primary" href={primaryAction.href}>{primaryAction.label}</a>
+          ) : (
+            <button className="btn primary" type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
+              {primaryAction.label}
+            </button>
+          ) : null}
+        </div>
       </div>
     </section>
   );
@@ -2257,10 +2294,10 @@ function buildDualRouteState(job = null) {
         ? "图片版 PPT 已组装，可先下载交付或作为可编辑重建输入。"
         : "先把源稿重绘成视觉统一的图片页面，再组装成图片型 PPT。",
       steps: [
-        { label: "上传材料", state: job?.id || sourcePages ? "done" : "pending" },
-        { label: "生成视觉页面", state: imagePageCount ? (imageTotal && imagePageCount >= imageTotal ? "done" : "active") : job?.id ? "active" : "pending" },
-        { label: "组装图片 PPT", state: imageDeckReady ? "done" : imagePageCount ? "active" : "pending" },
-        { label: "下载图片版", state: imageDeckReady ? "done" : "pending" }
+        { label: "上传材料", detail: sourcePages ? "材料已上传完成" : "等待材料", state: job?.id || sourcePages ? "done" : "pending" },
+        { label: "生成视觉页面", detail: imageTotal ? `${formatProgress(imagePageCount, imageTotal)} 页已完成` : "等待生成", state: imagePageCount ? (imageTotal && imagePageCount >= imageTotal ? "done" : "active") : job?.id ? "active" : "pending" },
+        { label: "组装图片 PPT", detail: imageDeckReady ? "PPT 已组装完成" : "等待组装", state: imageDeckReady ? "done" : imagePageCount ? "active" : "pending" },
+        { label: "下载图片版", detail: imageDeckReady ? "可下载交付物" : "等待交付", state: imageDeckReady ? "done" : "pending" }
       ]
     },
     routeB: {
@@ -2272,11 +2309,11 @@ function buildDualRouteState(job = null) {
         ? "按需进入 OCR、页面理解和逐页对象级重建；完整交付仍需人工复核。"
         : "等待图片版 PPT 完成后再开启，避免把两套 Skill 混成黑盒。",
       steps: [
-        { label: "选择图片版", state: imageDeckReady ? "done" : "locked" },
-        { label: "OCR / 页面理解", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
-        { label: "逐页重建", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
-        { label: "人工复核", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
-        { label: "下载可编辑版", state: finalReady ? "done" : "pending" }
+        { label: "选择图片版", detail: imageDeckReady ? "选择已完成的图片版" : "等待图片版", state: imageDeckReady ? "done" : "locked" },
+        { label: "OCR / 页面理解", detail: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "识别文字与版式" : "等待识别", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
+        { label: "逐页重建", detail: editableTotal ? `${formatProgress(recordedEditablePages || finalPages, editableTotal)} 可编辑页` : "重建为可编辑元素", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
+        { label: "人工复核", detail: reviewReady ? "校对与调整内容" : "等待人工复核", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
+        { label: "下载可编辑版", detail: finalReady ? "生成可编辑 PPT" : "等待最终交付", state: finalReady ? "done" : "pending" }
       ]
     }
   };
