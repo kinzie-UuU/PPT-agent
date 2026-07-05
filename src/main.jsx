@@ -5303,54 +5303,55 @@ function WorkflowDeliverySummary({ artifactBundle, authorizationBusy = "", bundl
         status={status}
       />
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
-      {links.length ? (
-        <div className="workflow-delivery-link-groups">
-          <div className={`workflow-delivery-link-group final ${finalDownloadState.state}`}>
-            <div className="workflow-delivery-link-group-head">
-              <b>最终可编辑 PPT</b>
-              <span>{finalDownloadState.message}</span>
-            </div>
-            <div className="workflow-delivery-links">
-              {finalLinks.length ? (
-                finalLinks.map((link) => (
-                  <WorkflowDeliveryArtifactLinkV2
-                    finalGate={finalGate}
-                    key={`${link.key}-${link.pageId || ""}`}
-                    link={link}
-                  />
-                ))
-              ) : (
-                <span className="workflow-delivery-missing-link">等待生成新的最终可编辑 PPT</span>
-              )}
-            </div>
-          </div>
-          {evidenceLinks.length ? (
-            <div className="workflow-delivery-link-group evidence">
-              <div className="workflow-delivery-link-group-head">
-                <b>中间产物与证据</b>
-                <span>图片型 PPT 是 codex-ppt 中间产物，不是最终交付。</span>
-              </div>
-              <div className="workflow-delivery-links">
-                {evidenceLinks.map((link) => (
-                  <WorkflowDeliveryArtifactLinkV2
-                    finalGate={finalGate}
-                    key={`${link.key}-${link.pageId || ""}`}
-                    link={link}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {status.nextActions.length ? (
-        <div className="workflow-delivery-actions">
-          {status.nextActions.map((action) => <span key={action}>{action}</span>)}
-        </div>
-      ) : null}
+      <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
       <details className="workflow-delivery-advanced-details">
         <summary>高级证据与修复详情</summary>
         <div className="workflow-delivery-advanced-grid">
+          {links.length ? (
+            <div className="workflow-delivery-link-groups">
+              <div className={`workflow-delivery-link-group final ${finalDownloadState.state}`}>
+                <div className="workflow-delivery-link-group-head">
+                  <b>最终可编辑 PPT</b>
+                  <span>{finalDownloadState.message}</span>
+                </div>
+                <div className="workflow-delivery-links">
+                  {finalLinks.length ? (
+                    finalLinks.map((link) => (
+                      <WorkflowDeliveryArtifactLinkV2
+                        finalGate={finalGate}
+                        key={`${link.key}-${link.pageId || ""}`}
+                        link={link}
+                      />
+                    ))
+                  ) : (
+                    <span className="workflow-delivery-missing-link">等待生成新的最终可编辑 PPT</span>
+                  )}
+                </div>
+              </div>
+              {evidenceLinks.length ? (
+                <div className="workflow-delivery-link-group evidence">
+                  <div className="workflow-delivery-link-group-head">
+                    <b>中间产物与证据</b>
+                    <span>图片型 PPT 是 codex-ppt 中间产物，不是最终交付。</span>
+                  </div>
+                  <div className="workflow-delivery-links">
+                    {evidenceLinks.map((link) => (
+                      <WorkflowDeliveryArtifactLinkV2
+                        finalGate={finalGate}
+                        key={`${link.key}-${link.pageId || ""}`}
+                        link={link}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {status.nextActions.length ? (
+            <div className="workflow-delivery-actions">
+              {status.nextActions.map((action) => <span key={action}>{action}</span>)}
+            </div>
+          ) : null}
           <div className="workflow-delivery-head">
             <div>
               <b>{status.title}</b>
@@ -5556,6 +5557,22 @@ function workflowFactNumber(status = {}, label = "") {
   return Number.isFinite(value) ? value : 0;
 }
 
+function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onOpenWorkflow }) {
+  const imageDeck = (artifactBundle?.links || []).find((link) => link.key === "image-deck");
+  const productReady = Boolean(finalGate?.productReady);
+  if (productReady || !imageDeck?.href) return null;
+  return (
+    <div className="workflow-delivery-user-hint">
+      <div>
+        <b>不想等可编辑版？</b>
+        <span>图片版 PPT 已经可以作为阶段交付。可编辑版未通过前，先下载图片版给客户看也可以。</span>
+      </div>
+      <a className="btn primary" href={imageDeck.href}>下载图片版 PPT</a>
+      <button className="btn" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>回到工作台</button>
+    </div>
+  );
+}
+
 function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onApproveReview, onOpenPageTasks, onOpenWorkflow, onRecomposeFinal, reviewBusy = false, status = {} }) {
   const checks = finalGate?.checks || {};
   const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
@@ -5591,6 +5608,14 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
     { label: "可编辑性", ok: checks.editabilityPassed === true && checks.noFullSlideRaster === true, value: checks.editabilityPassed && checks.noFullSlideRaster ? "通过" : "未通过" },
     { label: "视觉复核", ok: checks.manualReviewRecorded === true, value: checks.manualReviewRecorded ? "已复核" : reviewReady ? "待确认" : "待修复" }
   ];
+  const failedLabels = items.filter((item) => !item.ok).map((item) => item.label);
+  const checkSummary = productReady
+    ? "所有交付检查都已通过。"
+    : reviewReady
+      ? "只差最后一步：人工确认视觉内容。"
+      : failedLabels.length
+        ? `未通过项：${failedLabels.join(" / ")}`
+        : "等待交付检查结果。";
   return (
     <section className={`workflow-simple-delivery ${productReady ? "ready" : reviewReady ? "review" : blocked ? "blocked" : "pending"}`}>
       <div className="workflow-simple-delivery-head">
@@ -5601,13 +5626,7 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
         </div>
         <span>{finalDownloadState.message || status.title || "等待检查"}</span>
       </div>
-      <div className="workflow-simple-delivery-checks">
-        {items.map((item) => (
-          <span className={item.ok ? "pass" : reviewReady && item.label === "视觉复核" ? "review" : "fail"} key={item.label}>
-            <b>{item.value}</b>{item.label}
-          </span>
-        ))}
-      </div>
+      <div className={`workflow-simple-delivery-strip ${productReady ? "pass" : reviewReady ? "review" : "fail"}`}>{checkSummary}</div>
       <div className="workflow-simple-delivery-actions">
         {productReady ? (
           <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看最终文件</button>

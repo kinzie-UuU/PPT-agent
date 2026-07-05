@@ -4847,37 +4847,23 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   font-size: 12px;
 }
 
-.workflow-simple-delivery-checks {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.workflow-simple-delivery-checks span {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--line);
+.workflow-simple-delivery-strip {
+  padding: 10px 12px;
+  border: 1px solid rgba(180,35,24,.18);
   border-radius: 7px;
   background: #fff;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.workflow-simple-delivery-checks b {
-  overflow: hidden;
   color: var(--red);
-  font-size: 15px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 850;
+  line-height: 1.45;
 }
 
-.workflow-simple-delivery-checks .pass b {
+.workflow-simple-delivery-strip.pass {
+  border-color: rgba(22,138,91,.2);
   color: var(--green);
 }
 
-.workflow-simple-delivery-checks .review b {
+.workflow-simple-delivery-strip.review {
+  border-color: rgba(40,84,216,.22);
   color: var(--blue);
 }
 
@@ -4885,6 +4871,32 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.workflow-delivery-user-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(22,138,91,.2);
+  border-radius: 8px;
+  background: #f4fbf7;
+}
+
+.workflow-delivery-user-hint div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.workflow-delivery-user-hint b {
+  color: var(--green);
+}
+
+.workflow-delivery-user-hint span {
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .workflow-delivery-advanced-details {
@@ -9070,12 +9082,9 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
 
   .dual-cleanup-head,
   .dual-cleanup-row,
-  .workflow-simple-delivery-head {
+  .workflow-simple-delivery-head,
+  .workflow-delivery-user-hint {
     display: grid;
-  }
-
-  .workflow-simple-delivery-checks {
-    grid-template-columns: 1fr;
   }
 
   .workflow-simple-delivery-head > span {
