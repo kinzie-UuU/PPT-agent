@@ -1666,86 +1666,20 @@ function App() {
           )}
 
           {activeStep === "generate" && (
-            <>
-              <DualRouteDashboard
-                busy={workflowBusy || generationProgress.active}
-                files={files}
-                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                job={workflowJob}
-                jobs={workflowJobs}
-                notes={form.notes}
-                noCostApprovalSummary={noCostApprovalSummary}
-                onApproveNoCostGates={approveNoCostCodexGates}
-                onCreateWorkflow={startSkillFirstWorkflow}
-                onNotesChange={(value) => update("notes", value)}
-                onSelectJob={selectWorkflowJob}
-                onUploadFiles={uploadFiles}
-              />
-            <SectionCard title="生成可编辑 PPT" desc="确认大纲、视觉方向和生成方式后，创建 PPT 重制任务并重建可编辑 PPTX。">
-              <DualRouteWorkbench
-                busy={workflowBusy || generationProgress.active}
-                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                job={workflowJob}
-                noCostApprovalSummary={noCostApprovalSummary}
-                onApproveNoCostGates={approveNoCostCodexGates}
-                onCreateWorkflow={startSkillFirstWorkflow}
-                onOpenArtifacts={() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onOpenDelivery={() => setActiveStep("export")}
-                onOpenEditable={() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onOpenMaterials={() => setActiveStep("materials")}
-                onOpenVisual={() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              />
-              <WorkflowUserGuidePanel
-                busy={workflowBusy || generationProgress.active}
-                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                job={workflowJob}
-                onCreateWorkflow={startSkillFirstWorkflow}
-                onGoMaterials={() => setActiveStep("materials")}
-                onGoNext={() => document.getElementById("workflow-agent-simple")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              />
-              <div className="readiness">
-                <Metric label="资料文件" value={fileIds.length} />
-                <Metric label="大纲状态" value={outlinePlan?.layoutSequence?.length ? "已确认" : "未确认"} />
-                <Metric label="需求完整度" value={`${completion}%`} />
-              </div>
-              {generationProgress.active ? <GenerationProgress progress={generationProgress} /> : null}
-              <div className="action-grid single-action">
-                {workflowJob?.id ? (
-                  <button className="primary-action" onClick={noCostApprovalSummary.readyCount ? approveNoCostCodexGates : () => document.getElementById("workflow-compliance-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })} disabled={workflowBusy || generationProgress.active}>
-                    <b>{noCostApprovalSummary.readyCount ? "确认就绪关卡（不生成图片）" : "继续当前工作流"}</b>
-                    <span>{noCostApprovalSummary.readyCount ? `可无费用确认：${noCostApprovalSummary.labelText}。确认后再生成产品级样张。` : "沿用下面的引导步骤继续当前任务，不重复创建工作流。"}</span>
-                  </button>
-                ) : (
-                  <button className="primary-action" onClick={startSkillFirstWorkflow} disabled={workflowBusy || generationProgress.active || (!fileIds.length && !form.notes.trim() && !outlinePlan?.layoutSequence?.length)}>
-                    <b>{workflowBusy ? "正在创建重制任务" : "创建 PPT 重制任务"}</b>
-                    <span>先确认视觉方向，再进入可编辑重建；最终文件通过交付检查后才开放下载。</span>
-                  </button>
-                )}
-              </div>
-              <details className="workflow-advanced-panel workflow-agent-advanced">
-                <summary>
-                  <span>高级详情 / 任务与证据</span>
-                  <small>查看 worker、页面任务、产物、校验和恢复动作。</small>
-                </summary>
-                <WorkflowRebuildPanel
-                  busy={workflowBusy}
-                  files={files}
-                  hasBrief={Boolean(form.notes.trim() || outlinePlan?.layoutSequence?.length)}
-                  job={workflowJob}
-                  jobs={workflowJobs}
-                  onRefresh={refreshWorkflowJob}
-                  onRefreshList={() => loadWorkflowJobs({ activeId: workflowJob?.id || "" })}
-                  onRunPipeline={startSkillFirstWorkflow}
-                  onRunNextAction={runWorkflowNextAction}
-                  onRunStep={runWorkflowStep}
-                  onSelectJob={selectWorkflowJob}
-                  onToggleArchive={toggleWorkflowArchive}
-                  onToggleArchivedVisibility={setWorkflowArchiveVisibility}
-                  showArchived={workflowShowArchived}
-                />
-              </details>
-            </SectionCard>
-            </>
+            <DualRouteDashboard
+              busy={workflowBusy || generationProgress.active}
+              files={files}
+              hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+              job={workflowJob}
+              jobs={workflowJobs}
+              notes={form.notes}
+              noCostApprovalSummary={noCostApprovalSummary}
+              onApproveNoCostGates={approveNoCostCodexGates}
+              onCreateWorkflow={startSkillFirstWorkflow}
+              onNotesChange={(value) => update("notes", value)}
+              onSelectJob={selectWorkflowJob}
+              onUploadFiles={uploadFiles}
+            />
           )}
 
           {activeStep === "preview" && (

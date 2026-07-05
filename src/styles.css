@@ -11180,11 +11180,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   align-items: start;
 }
 
-.main-stage:has(.dual-dashboard) > .section-card,
-.dual-dashboard ~ .section-card {
-  display: none;
-}
-
 .dual-dashboard-left,
 .dual-dashboard-main,
 .dual-dashboard-right {
