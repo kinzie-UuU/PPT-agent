@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, getErrorMessage, isConnectionError } from "./api/client.js";
 import { deriveWorkflowDeliveryStatus } from "./workflow/deliveryStatus.js";
@@ -4811,8 +4811,6 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
   const finalDownloadState = getFinalDownloadState(finalGate);
   const [manualReviewBusy, setManualReviewBusy] = useState(false);
   const [manualReviewError, setManualReviewError] = useState("");
-  const [pageReviewBusy, setPageReviewBusy] = useState("");
-  const [pageReviewError, setPageReviewError] = useState("");
 
   async function approveFinalManualReview() {
     if (!job?.id || manualReviewBusy) return;
@@ -4843,23 +4841,13 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
   }
 
   async function markPageVisualReview(pageId, status) {
-    if (!job?.id || !pageId || pageReviewBusy) return null;
-    setPageReviewBusy(pageId);
-    setPageReviewError("");
-    try {
-      const result = await api.markWorkflowPageReview(job.id, pageId, {
-        status,
-        reviewer: "operator",
-        note: `Marked ${pageId} as ${status} from page visual review workbench.`
-      });
-      await onRefreshDelivery?.();
-      return result?.artifacts?.pageVisualReview?.marks?.[pageId] || { pageId, status };
-    } catch (error) {
-      setPageReviewError(getErrorMessage(error));
-      return null;
-    } finally {
-      setPageReviewBusy("");
-    }
+    if (!job?.id || !pageId) return null;
+    const result = await api.markWorkflowPageReview(job.id, pageId, {
+      status,
+      reviewer: "operator",
+      note: `Marked ${pageId} as ${status} from page visual review workbench.`
+    });
+    return result?.artifacts?.pageVisualReview?.marks?.[pageId] || { pageId, status };
   }
 
   return (
@@ -4877,7 +4865,6 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
       <WorkflowPageVisualReviewWorkbench
         artifactBundle={artifactBundle}
-        busyPageId={pageReviewBusy}
         onApproveFinalReview={approveFinalManualReview}
         onMarkPage={markPageVisualReview}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
@@ -4885,7 +4872,6 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
         pageVisualReview={job?.artifacts?.pageVisualReview || null}
         reviewBusy={manualReviewBusy}
       />
-      {pageReviewError ? <p className="workflow-error">{pageReviewError}</p> : null}
       <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
     </div>
   );
@@ -5149,41 +5135,73 @@ function getFinalDownloadState(finalGate = null) {
   };
 }
 
-function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId = "", onApproveFinalReview, onMarkPage, onOpenPageTasks, pageEvidence = null, pageVisualReview = null, reviewBusy = false }) {
+function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFinalReview, onMarkPage, onOpenPageTasks, pageEvidence = null, pageVisualReview = null, reviewBusy = false }) {
   const persistedMarks = pageVisualReview?.marks || {};
   const [marks, setMarks] = useState(persistedMarks);
+  const [pendingPageMarks, setPendingPageMarks] = useState({});
+  const [pageMarkErrors, setPageMarkErrors] = useState({});
+  const rollbackPageMarksRef = useRef({});
   useEffect(() => {
     setMarks(persistedMarks);
   }, [pageVisualReview?.updatedAt]);
   const pages = Array.isArray(pageEvidence?.pages) ? pageEvidence.pages : [];
   if (!pages.length) return null;
   const linkIndex = buildWorkflowArtifactLinkIndex(artifactBundle?.links || []);
+  const savingPages = Object.keys(pendingPageMarks).filter((pageId) => pendingPageMarks[pageId]);
+  const failedSaves = Object.keys(pageMarkErrors).filter((pageId) => pageMarkErrors[pageId]);
   const reviewedPages = pages.filter((page) => ["pass", "rerun"].includes(String(marks[page.pageId]?.status || marks[page.pageId] || ""))).length;
   const failedPages = pages.filter((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "rerun").length;
   const allPassed = Boolean(pages.length && pages.every((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "pass"));
-  const canRecordFinalReview = Boolean(pageEvidence?.complete && allPassed && onApproveFinalReview);
-  async function markPage(pageId, value) {
-    const previous = marks[pageId] || null;
-    setMarks((current) => ({
-      ...current,
-      [pageId]: {
-        ...(typeof previous === "object" ? previous : {}),
-        pageId,
-        status: value,
-        pending: true
-      }
-    }));
-    const saved = await onMarkPage?.(pageId, value);
-    if (saved) {
-      setMarks((current) => ({ ...current, [pageId]: saved }));
-    } else {
-      setMarks((current) => {
-        const next = { ...current };
-        if (previous) next[pageId] = previous;
-        else delete next[pageId];
-        return next;
+  const canRecordFinalReview = Boolean(pageEvidence?.complete && allPassed && !savingPages.length && !failedSaves.length && onApproveFinalReview);
+  function markPage(pageId, value) {
+    if (!pageId || pendingPageMarks[pageId]) return;
+    setMarks((current) => {
+      rollbackPageMarksRef.current[pageId] = current[pageId] || null;
+      return {
+        ...current,
+        [pageId]: {
+          ...(typeof current[pageId] === "object" ? current[pageId] : {}),
+          pageId,
+          status: value,
+          pending: true
+        }
+      };
+    });
+    setPendingPageMarks((current) => ({ ...current, [pageId]: true }));
+    setPageMarkErrors((current) => {
+      const next = { ...current };
+      delete next[pageId];
+      return next;
+    });
+    Promise.resolve(onMarkPage?.(pageId, value))
+      .then((saved) => {
+        setMarks((current) => ({
+          ...current,
+          [pageId]: saved || {
+            ...(typeof current[pageId] === "object" ? current[pageId] : {}),
+            pageId,
+            status: value
+          }
+        }));
+      })
+      .catch((error) => {
+        setPageMarkErrors((current) => ({ ...current, [pageId]: getErrorMessage(error) }));
+        setMarks((current) => {
+          const next = { ...current };
+          const previous = rollbackPageMarksRef.current[pageId] || null;
+          if (previous) next[pageId] = previous;
+          else delete next[pageId];
+          return next;
+        });
+      })
+      .finally(() => {
+        setPendingPageMarks((current) => {
+          const next = { ...current };
+          delete next[pageId];
+          return next;
+        });
+        delete rollbackPageMarksRef.current[pageId];
       });
-    }
   }
   return (
     <div className="workflow-page-review-workbench">
@@ -5193,7 +5211,7 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
           <span>逐页看三张图：原始页、图片版、可编辑页。能接受就通过，不接受就不通过。</span>
         </div>
         <div className="workflow-page-review-actions">
-          <small>{reviewedPages}/{pages.length} 页已判断{failedPages ? `，${failedPages} 页不通过` : ""}</small>
+          <small>{reviewedPages}/{pages.length} 页已判断{failedPages ? `，${failedPages} 页不通过` : ""}{savingPages.length ? `，${savingPages.length} 页保存中` : ""}{failedSaves.length ? `，${failedSaves.length} 页保存失败` : ""}</small>
           <button className="btn primary" type="button" onClick={onApproveFinalReview} disabled={!canRecordFinalReview || reviewBusy}>
             {reviewBusy ? "记录中..." : "全部通过，记录复核"}
           </button>
@@ -5203,7 +5221,8 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
         {pages.map((page) => (
           <WorkflowPageVisualReviewRow
             key={page.pageId}
-            busy={busyPageId === page.pageId}
+            busy={Boolean(pendingPageMarks[page.pageId])}
+            error={pageMarkErrors[page.pageId] || ""}
             links={linkIndex.get(page.pageId) || {}}
             mark={marks[page.pageId]?.status || marks[page.pageId] || ""}
             onMark={markPage}
@@ -5221,7 +5240,7 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
   );
 }
 
-function WorkflowPageVisualReviewRow({ busy = false, links = {}, mark = "", onMark, page = {} }) {
+function WorkflowPageVisualReviewRow({ busy = false, error = "", links = {}, mark = "", onMark, page = {} }) {
   const pageId = page.pageId || "";
   const original = links["rendered-page"];
   const imagePage = links["visual-page"];
@@ -5243,6 +5262,7 @@ function WorkflowPageVisualReviewRow({ busy = false, links = {}, mark = "", onMa
         <button type="button" className={mark === "pass" ? "active pass" : ""} onClick={() => onMark?.(pageId, "pass")} disabled={busy || !complete}>{busy ? "保存中..." : "通过"}</button>
         <button type="button" className={mark === "rerun" ? "active danger" : "danger"} onClick={() => onMark?.(pageId, "rerun")} disabled={busy}>不通过</button>
       </div>
+      {error ? <small className="workflow-page-review-error">{error}</small> : null}
     </div>
   );
 }
