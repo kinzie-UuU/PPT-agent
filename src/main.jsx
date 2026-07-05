@@ -347,7 +347,7 @@ function App() {
       ]
     }
   ]);
-  const [activeStep, setActiveStep] = useState("materials");
+  const [activeStep, setActiveStep] = useState("generate");
   const [rightPanelMode, setRightPanelMode] = useState("agent");
   const [focusPreview, setFocusPreview] = useState(false);
   const [connection, setConnection] = useState({ state: "checking", message: "正在检查本地服务..." });
@@ -370,6 +370,20 @@ function App() {
 
   useEffect(() => {
     api.styleReferences().then((data) => setStyleReferences(data.references || [])).catch(() => {});
+    api.workflowJobsMeta()
+      .then((meta) => {
+        const id = meta?.primaryWorkflowJobId || "";
+        if (!id) return null;
+        setPrimaryWorkflow((current) => current?.id ? current : { id, found: true });
+        return api.workflowJob(id);
+      })
+      .then((primaryJob) => {
+        if (primaryJob?.id) {
+          setWorkflowJob((current) => current?.id ? current : primaryJob);
+          setWorkflowJobs((current) => uniqueWorkflowJobs([primaryJob, ...current]));
+        }
+      })
+      .catch(() => {});
     loadWorkflowJobs({ restoreLatest: true });
     api.config().then((data) => {
       setApiConfig((current) => ({ ...current, ...data, apiKey: "" }));
@@ -1401,7 +1415,8 @@ function App() {
   const editBlocked = Boolean(job?.editReadiness && job.editReadiness.ready === false);
   const hasEditableContext = Boolean(job && currentSlide && !editBlocked);
   const allowAdvancedEdit = activeStep === "preview" && hasEditableContext;
-  const showRightPanel = (activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed";
+  const useDualRouteDashboard = activeStep === "generate";
+  const showRightPanel = !useDualRouteDashboard && ((activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed");
   const visibleRightPanelMode = rightPanelMode === "closed"
     ? "status"
     : (!allowAdvancedEdit && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
@@ -1421,7 +1436,9 @@ function App() {
         </div>
       </header>
 
-      <WorkflowStrip activeStep={activeStep} completion={completion} rightPanelMode={rightPanelMode} setActiveStep={setActiveStep} setRightPanelMode={toggleSettingsPanel} stepState={stepState} />
+      {!useDualRouteDashboard ? (
+        <WorkflowStrip activeStep={activeStep} completion={completion} rightPanelMode={rightPanelMode} setActiveStep={setActiveStep} setRightPanelMode={toggleSettingsPanel} stepState={stepState} />
+      ) : null}
 
       <div className={`workspace-grid ${activeStep !== "preview" ? "no-left" : ""} ${!showRightPanel ? "solo-stage" : ""}`}>
         {activeStep === "preview" && (
@@ -1449,12 +1466,14 @@ function App() {
           />
         )}
         <main className="main-stage">
-          <WorkflowPrimaryJobNotice
-            currentJob={workflowJob}
-            onOpenDelivery={() => setActiveStep("export")}
-            onOpenPrimary={() => primaryWorkflow?.id && selectWorkflowJob(primaryWorkflow.id)}
-            primaryWorkflow={primaryWorkflow}
-          />
+          {activeStep !== "generate" ? (
+            <WorkflowPrimaryJobNotice
+              currentJob={workflowJob}
+              onOpenDelivery={() => setActiveStep("export")}
+              onOpenPrimary={() => primaryWorkflow?.id && selectWorkflowJob(primaryWorkflow.id)}
+              primaryWorkflow={primaryWorkflow}
+            />
+          ) : null}
           {activeStep === "materials" && (
             <SectionCard className="intake-card">
               <div className="chat-intake">
@@ -1625,7 +1644,37 @@ function App() {
           )}
 
           {activeStep === "generate" && (
+            <>
+              <DualRouteDashboard
+                busy={workflowBusy || generationProgress.active}
+                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                job={workflowJob}
+                jobs={workflowJobs}
+                noCostApprovalSummary={noCostApprovalSummary}
+                onApproveNoCostGates={approveNoCostCodexGates}
+                onCreateWorkflow={startSkillFirstWorkflow}
+                onOpenArtifacts={() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                onOpenDelivery={() => setActiveStep("export")}
+                onOpenEditable={() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                onOpenMaterials={() => setActiveStep("materials")}
+                onOpenVisual={() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                onRefresh={refreshWorkflowJob}
+                onSelectJob={selectWorkflowJob}
+              />
             <SectionCard title="生成可编辑 PPT" desc="确认大纲、视觉方向和生成方式后，创建 PPT 重制任务并重建可编辑 PPTX。">
+              <DualRouteWorkbench
+                busy={workflowBusy || generationProgress.active}
+                hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+                job={workflowJob}
+                noCostApprovalSummary={noCostApprovalSummary}
+                onApproveNoCostGates={approveNoCostCodexGates}
+                onCreateWorkflow={startSkillFirstWorkflow}
+                onOpenArtifacts={() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                onOpenDelivery={() => setActiveStep("export")}
+                onOpenEditable={() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                onOpenMaterials={() => setActiveStep("materials")}
+                onOpenVisual={() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              />
               <WorkflowUserGuidePanel
                 busy={workflowBusy || generationProgress.active}
                 hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
@@ -1676,6 +1725,7 @@ function App() {
                 />
               </details>
             </SectionCard>
+            </>
           )}
 
           {activeStep === "preview" && (
@@ -1849,6 +1899,401 @@ function App() {
       </div>
     </div>
   );
+}
+
+function DualRouteDashboard({
+  busy = false,
+  hasInput = false,
+  job = null,
+  jobs = [],
+  noCostApprovalSummary = null,
+  onApproveNoCostGates,
+  onCreateWorkflow,
+  onOpenArtifacts,
+  onOpenDelivery,
+  onOpenEditable,
+  onOpenMaterials,
+  onOpenVisual,
+  onRefresh,
+  onSelectJob
+}) {
+  const state = buildDualRouteState(job);
+  const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
+  const sourcePages = state.routeA.sourceLabel;
+  const editablePages = state.routeB.editableLabel;
+  const imageDeckHref = job?.id && state.routeA.imageDeckReady
+    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1`
+    : "";
+  const finalHref = job?.id && state.routeB.finalReady
+    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
+    : "";
+  const primaryAction = !job?.id
+    ? onCreateWorkflow
+    : noCostApprovalSummary?.readyCount
+      ? onApproveNoCostGates
+      : state.routeA.imageDeckReady
+        ? onOpenEditable
+        : onOpenVisual;
+  const primaryLabel = !job?.id
+    ? "新建任务"
+    : noCostApprovalSummary?.readyCount
+      ? "确认就绪关卡"
+      : state.routeA.imageDeckReady
+        ? "继续转可编辑 PPT"
+        : "继续生成图片版 PPT";
+  const canRunPrimary = !busy && (job?.id || hasInput);
+  const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
+  const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
+
+  return (
+    <div className="dual-dashboard">
+      <aside className="dual-dashboard-left">
+        <button className="dual-new-task" type="button" onClick={onOpenMaterials}>+ 新建任务</button>
+        <div className="dual-task-head">
+          <h2>任务列表</h2>
+          <div><span className="active">进行中</span><span>已完成</span><span>已失败</span></div>
+        </div>
+        <div className="dual-task-list">
+          {taskRows.length ? taskRows.map((item) => {
+            const active = item?.id && item.id === job?.id;
+            const rowState = buildDualRouteState(item);
+            const pages = rowState.routeA.visualLabel || workflowJobLabel(item);
+            return (
+              <button className={`dual-task-row ${active ? "active" : ""}`} type="button" key={item.id} onClick={() => item.id && onSelectJob?.(item.id)}>
+                <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
+                <span>{pages} · {rowState.routeB.editableLabel} 可编辑</span>
+                <em>{routeStatusLabel(rowState.routeB.status)}</em>
+              </button>
+            );
+          }) : <p>暂无任务，先上传材料创建。</p>}
+        </div>
+      </aside>
+
+      <section className="dual-dashboard-main">
+        <div className="dual-task-titlebar">
+          <div>
+            <h1>{currentTitle}</h1>
+            <span>{job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务"} · {sourcePages}</span>
+          </div>
+          <button className="btn" type="button" onClick={onRefresh} disabled={!job?.id || busy}>任务详情</button>
+        </div>
+        <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
+        <RouteLane
+          accent="visual"
+          badge="路线 A"
+          title="图片版 PPT"
+          summary={state.routeA.summary}
+          status={state.routeA.status}
+          steps={state.routeA.steps}
+          metrics={[
+            ["源页", state.routeA.sourceLabel],
+            ["图片页", state.routeA.visualLabel],
+            ["图片 PPT", state.routeA.imageDeckReady ? "已组装" : "待组装"]
+          ]}
+          actions={[
+            imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
+            { label: "查看问题", onClick: onOpenArtifacts, disabled: !job?.id },
+            { label: state.routeA.imageDeckReady ? "查看图片页证据" : "继续图片阶段", onClick: onOpenVisual, disabled: !job?.id || busy }
+          ].filter(Boolean)}
+        />
+        <RouteLane
+          accent="editable"
+          badge="路线 B"
+          title="可编辑 PPT"
+          summary={state.routeB.summary}
+          status={state.routeB.status}
+          steps={state.routeB.steps}
+          metrics={[
+            ["可编辑页", editablePages],
+            ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
+            ["最终交付", state.routeB.finalReady ? "可下载" : "未完成"]
+          ]}
+          actions={[
+            finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
+            { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: !finalHref },
+            { label: "打开交付复核", onClick: onOpenDelivery, disabled: !job?.id }
+          ].filter(Boolean)}
+        />
+        <div className="dual-progress-overview">
+          <span><b>{state.routeA.visualLabel}</b>图片页</span>
+          <span><b>{editablePages}</b>可编辑页</span>
+          <span><b>{state.routeB.reviewReady ? "已复核" : "待复核"}</b>人工复核</span>
+          <span className={state.routeB.reviewReady ? "ready" : "warn"}><b>{state.routeB.reviewReady ? "可交付" : "完整可编辑交付未完成"}</b>最终状态</span>
+        </div>
+      </section>
+
+      <aside className="dual-dashboard-right">
+        <div className="dual-side-card next">
+          <h2>下一步建议</h2>
+          <strong>{state.nextAction}</strong>
+          <ul>
+            <li className={state.routeA.imageDeckReady ? "done" : "active"}>图片版已经完成，可以下载交付</li>
+            <li className={state.routeB.finalReady ? "done" : "active"}>如需可编辑版，点击继续处理</li>
+            <li>可编辑重建会消耗更多时间和资源</li>
+          </ul>
+        </div>
+        <div className="dual-side-card">
+          <h2>当前状态</h2>
+          <p><span className="dot green" />图片版：{routeStatusLabel(state.routeA.status)}</p>
+          <p><span className="dot blue" />可编辑版：{routeStatusLabel(state.routeB.status)}</p>
+        </div>
+        <div className="dual-side-card logs">
+          <div className="dual-side-tabs"><b>日志</b><span>证据</span><span>高级诊断</span></div>
+          {events.length ? events.map((event, index) => (
+            <p key={`${event.type || "event"}-${index}`}>
+              <span className={`dot ${index % 2 ? "blue" : "green"}`} />
+              {formatEventTime(event.createdAt || event.time || event.timestamp)} {uiZh(event.message || event.type || "workflow event")}
+            </p>
+          )) : (
+            <p><span className="dot blue" />等待任务日志</p>
+          )}
+          <button className="btn wide" type="button" onClick={onOpenArtifacts} disabled={!job?.id}>查看全部日志</button>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function DualRouteWorkbench({
+  busy = false,
+  hasInput = false,
+  job = null,
+  noCostApprovalSummary = null,
+  onApproveNoCostGates,
+  onCreateWorkflow,
+  onOpenArtifacts,
+  onOpenDelivery,
+  onOpenEditable,
+  onOpenMaterials,
+  onOpenVisual
+}) {
+  const state = buildDualRouteState(job);
+  const canStart = hasInput && !busy;
+  const canContinue = Boolean(job?.id && !busy);
+  const imageDeckHref = job?.id && state.routeA.imageDeckReady
+    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1`
+    : "";
+  const finalHref = job?.id && state.routeB.finalReady
+    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
+    : "";
+  const primaryActionLabel = !job?.id
+    ? "创建图片版 PPT 任务"
+    : noCostApprovalSummary?.readyCount
+      ? "确认就绪关卡"
+      : state.routeA.imageDeckReady
+        ? "继续转可编辑 PPT"
+        : "继续生成图片版 PPT";
+  const primaryAction = !job?.id
+    ? onCreateWorkflow
+    : noCostApprovalSummary?.readyCount
+      ? onApproveNoCostGates
+      : state.routeA.imageDeckReady
+        ? onOpenEditable
+        : onOpenVisual;
+  const primaryDisabled = !job?.id ? !canStart : !canContinue;
+
+  return (
+    <div className="dual-route-workbench">
+      <div className="dual-route-hero">
+        <div>
+          <span>阶段交付</span>
+          <h2>先完成图片版 PPT，再按需进入可编辑重建</h2>
+          <p>{state.message}</p>
+        </div>
+        <div className="dual-route-actions">
+          <button className="btn primary" type="button" onClick={primaryAction} disabled={primaryDisabled}>
+            {busy ? "处理中..." : primaryActionLabel}
+          </button>
+          {imageDeckHref ? <a className="btn" href={imageDeckHref}>下载图片版 PPT</a> : null}
+          {finalHref ? <a className="btn" href={finalHref}>下载可编辑 PPT</a> : null}
+          {!job?.id ? <button className="btn ghost" type="button" onClick={onOpenMaterials}>补充材料</button> : null}
+        </div>
+      </div>
+
+      <div className="dual-route-grid">
+        <RouteLane
+          accent="visual"
+          badge="路线 A"
+          title="图片版 PPT"
+          summary={state.routeA.summary}
+          status={state.routeA.status}
+          steps={state.routeA.steps}
+          metrics={[
+            ["源页", state.routeA.sourceLabel],
+            ["图片页", state.routeA.visualLabel],
+            ["图片 PPT", state.routeA.imageDeckReady ? "已组装" : "待组装"]
+          ]}
+          actions={[
+            imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
+            { label: state.routeA.imageDeckReady ? "查看图片页证据" : "继续图片阶段", onClick: onOpenVisual, disabled: !job?.id || busy },
+            { label: "查看问题", onClick: onOpenArtifacts, disabled: !job?.id }
+          ].filter(Boolean)}
+        />
+        <RouteLane
+          accent="editable"
+          badge="路线 B"
+          title="可编辑 PPT"
+          summary={state.routeB.summary}
+          status={state.routeB.status}
+          steps={state.routeB.steps}
+          metrics={[
+            ["可编辑页", state.routeB.editableLabel],
+            ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
+            ["最终交付", state.routeB.finalReady ? "可下载" : "未完成"]
+          ]}
+          actions={[
+            finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
+            { label: state.routeA.imageDeckReady ? "继续转可编辑 PPT" : "等待图片版完成", onClick: onOpenEditable, disabled: !state.routeA.imageDeckReady || busy },
+            { label: "打开交付复核", onClick: onOpenDelivery, disabled: !job?.id }
+          ].filter(Boolean)}
+        />
+      </div>
+
+      <div className="dual-route-next">
+        <div>
+          <b>下一步建议</b>
+          <span>{state.nextAction}</span>
+        </div>
+        <div>
+          <b>当前任务</b>
+          <span>{job?.input?.sourceOriginalName || job?.input?.sourceBrief || "先上传材料或输入需求"}</span>
+        </div>
+        <div>
+          <b>高级信息</b>
+          <span>worker、provider、artifact 和日志继续保留在下方高级诊断区。</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RouteLane({ accent = "visual", actions = [], badge, metrics = [], status = "pending", steps = [], summary, title }) {
+  return (
+    <section className={`route-lane ${accent} ${status}`}>
+      <div className="route-lane-head">
+        <div>
+          <span>{badge}</span>
+          <h3>{title}</h3>
+          <p>{summary}</p>
+        </div>
+        <strong>{routeStatusLabel(status)}</strong>
+      </div>
+      <div className="route-stepper">
+        {steps.map((step, index) => (
+          <div className={`route-step ${step.state}`} key={step.label}>
+            <i>{String(index + 1).padStart(2, "0")}</i>
+            <span>{step.label}</span>
+          </div>
+        ))}
+      </div>
+      <div className="route-metrics">
+        {metrics.map(([label, value]) => (
+          <span key={label}><b>{value}</b>{label}</span>
+        ))}
+      </div>
+      <div className="route-actions">
+        {actions.map((action) => action.href ? (
+          <a className={action.primary ? "btn primary" : "btn"} href={action.href} key={action.label}>{action.label}</a>
+        ) : (
+          <button className={action.primary ? "btn primary" : "btn"} type="button" onClick={action.onClick} disabled={action.disabled} key={action.label}>
+            {action.label}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function buildDualRouteState(job = null) {
+  const artifacts = job?.artifacts || {};
+  const sourcePages = artifactCountNumber(artifacts.renderedPages || artifacts.sourcePages || artifacts.source);
+  const visualPages = artifactCountNumber(artifacts.visualImages);
+  const codexTasks = Array.isArray(job?.codexPptSlideTasks?.tasks) ? job.codexPptSlideTasks.tasks : [];
+  const recordedVisualPages = codexTasks.filter((task) => task.status === "recorded").length;
+  const imagePageCount = Math.max(visualPages, recordedVisualPages);
+  const expectedPages = Number(
+    job?.input?.sourcePageCount
+    || artifacts.source?.pageCount
+    || artifacts.ocrTextHints?.pageCount
+    || artifacts.editableFinal?.summary?.expectedPages
+    || sourcePages
+    || imagePageCount
+    || 0
+  );
+  const imageDeckReady = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const editableTasks = Array.isArray(job?.editableWorkerTasks?.tasks) ? job.editableWorkerTasks.tasks : [];
+  const recordedEditablePages = editableTasks.filter((task) => task.status === "recorded").length
+    || Number(artifacts.pageEvidence?.summary?.readyPages || artifacts.editableFinal?.summary?.recordedPages || 0);
+  const finalPages = Number(artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
+  const finalReady = Boolean(artifacts.editableFinal?.path && (!expectedPages || finalPages >= expectedPages));
+  const reviewReady = artifacts.manualReview?.status === "approved";
+  const routeAReady = Boolean(imageDeckReady);
+  const routeBStarted = Boolean(recordedEditablePages || finalPages || artifacts.editableRun);
+  const routeBReady = Boolean(finalReady && reviewReady);
+  const routeAStatus = routeAReady ? "ready" : job?.id ? "active" : "pending";
+  const routeBStatus = routeBReady ? "ready" : routeBStarted ? "active" : routeAReady ? "optional" : "locked";
+  const imageTotal = expectedPages || imagePageCount || sourcePages || 0;
+  const editableTotal = expectedPages || editableTasks.length || finalPages || 0;
+
+  return {
+    message: imageDeckReady
+      ? `图片版 PPT 已形成阶段交付；可继续进入可编辑重建。当前可编辑进度 ${formatProgress(recordedEditablePages || finalPages, editableTotal)}。`
+      : job?.id
+        ? "当前先推进图片版 PPT。完成图片页和图片型 PPT 后，再决定是否转成可编辑 PPT。"
+        : "上传材料后先创建图片版 PPT 任务，可编辑重建作为第二阶段按需开启。",
+    nextAction: !job?.id
+      ? "先上传材料并创建图片版 PPT 任务。"
+      : !imageDeckReady
+        ? "优先完成路线 A：生成视觉页面并组装图片版 PPT。"
+        : !routeBReady
+          ? "图片版已可作为阶段交付；如需要对象级编辑，再继续路线 B。"
+          : "可编辑 PPT 已完成交付门禁，可进入下载与复核。",
+    routeA: {
+      status: routeAStatus,
+      imageDeckReady,
+      sourceLabel: sourcePages ? `${sourcePages} 页` : "待解析",
+      visualLabel: imageTotal ? formatProgress(imagePageCount, imageTotal) : imagePageCount ? `${imagePageCount} 页` : "待生成",
+      summary: imageDeckReady
+        ? "图片版 PPT 已组装，可先下载交付或作为可编辑重建输入。"
+        : "先把源稿重绘成视觉统一的图片页面，再组装成图片型 PPT。",
+      steps: [
+        { label: "上传材料", state: job?.id || sourcePages ? "done" : "pending" },
+        { label: "生成视觉页面", state: imagePageCount ? (imageTotal && imagePageCount >= imageTotal ? "done" : "active") : job?.id ? "active" : "pending" },
+        { label: "组装图片 PPT", state: imageDeckReady ? "done" : imagePageCount ? "active" : "pending" },
+        { label: "下载图片版", state: imageDeckReady ? "done" : "pending" }
+      ]
+    },
+    routeB: {
+      status: routeBStatus,
+      finalReady,
+      reviewReady,
+      editableLabel: editableTotal ? formatProgress(recordedEditablePages || finalPages, editableTotal) : routeBStarted ? `${recordedEditablePages || finalPages} 页` : "未开始",
+      summary: routeAReady
+        ? "按需进入 OCR、页面理解和逐页对象级重建；完整交付仍需人工复核。"
+        : "等待图片版 PPT 完成后再开启，避免把两套 Skill 混成黑盒。",
+      steps: [
+        { label: "选择图片版", state: imageDeckReady ? "done" : "locked" },
+        { label: "OCR / 页面理解", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
+        { label: "逐页重建", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
+        { label: "人工复核", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
+        { label: "下载可编辑版", state: finalReady ? "done" : "pending" }
+      ]
+    }
+  };
+}
+
+function formatProgress(done = 0, total = 0) {
+  const current = Math.max(0, Number(done || 0));
+  const max = Math.max(0, Number(total || 0));
+  return max ? `${Math.min(current, max)}/${max}` : `${current}`;
+}
+
+function routeStatusLabel(status = "") {
+  if (status === "ready") return "已完成";
+  if (status === "active") return "进行中";
+  if (status === "optional") return "可选继续";
+  if (status === "locked") return "等待前置";
+  return "待开始";
 }
 
 function WorkflowStrip({ activeStep, completion, rightPanelMode, setActiveStep, setRightPanelMode, stepState }) {

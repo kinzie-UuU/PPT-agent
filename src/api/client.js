@@ -221,6 +221,10 @@ export const api = {
     const response = await fetch(`/api/workflow-jobs${suffix}`, { cache: "no-store", signal: actualSignal });
     return readJson(response);
   },
+  async workflowJobsMeta(signal) {
+    const response = await fetch("/api/workflow-jobs/meta", { cache: "no-store", signal });
+    return readJson(response);
+  },
   async createWorkflowJob(body) {
     return this.create("/api/workflow-jobs", body);
   },

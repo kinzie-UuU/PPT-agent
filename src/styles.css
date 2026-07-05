@@ -11074,6 +11074,603 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   margin: 0;
 }
 
+.dual-dashboard {
+  display: grid;
+  grid-template-columns: 284px minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
+}
+
+.main-stage:has(.dual-dashboard) > .section-card,
+.dual-dashboard ~ .section-card {
+  display: none;
+}
+
+.dual-dashboard-left,
+.dual-dashboard-main,
+.dual-dashboard-right {
+  min-width: 0;
+}
+
+.dual-dashboard-left,
+.dual-dashboard-right {
+  position: sticky;
+  top: 144px;
+  display: grid;
+  gap: 14px;
+}
+
+.dual-new-task {
+  min-height: 46px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--blue);
+  color: #fff;
+  font-weight: 900;
+}
+
+.dual-task-head,
+.dual-side-card,
+.dual-task-titlebar,
+.dual-progress-overview {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dual-task-head {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.dual-task-head h2,
+.dual-side-card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dual-task-head div {
+  display: flex;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.dual-task-head .active {
+  color: var(--blue);
+}
+
+.dual-task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dual-task-row {
+  display: grid;
+  gap: 7px;
+  min-height: 86px;
+  padding: 13px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dual-task-row.active {
+  border-color: rgba(40,84,216,.34);
+  background: #f6f9ff;
+}
+
+.dual-task-row b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dual-task-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dual-task-row em {
+  justify-self: start;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.dual-dashboard-main {
+  display: grid;
+  gap: 18px;
+}
+
+.dual-task-titlebar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+  padding: 20px;
+}
+
+.dual-task-titlebar h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  line-height: 1.15;
+}
+
+.dual-task-titlebar span {
+  color: var(--muted);
+}
+
+.dual-stage-alert {
+  padding: 11px 14px;
+  border: 1px solid rgba(154,106,22,.28);
+  border-radius: 8px;
+  background: #fff9ec;
+  color: #7a4c06;
+  font-weight: 800;
+}
+
+.dual-dashboard .route-lane {
+  padding: 20px;
+  box-shadow: none;
+}
+
+.dual-dashboard .route-lane.visual.ready {
+  border-color: rgba(22,138,91,.72);
+  box-shadow: inset 0 0 0 1px rgba(22,138,91,.25);
+}
+
+.dual-dashboard .route-lane.editable {
+  border-color: rgba(40,84,216,.55);
+  box-shadow: inset 0 0 0 1px rgba(40,84,216,.18);
+}
+
+.dual-dashboard .route-lane-head h3 {
+  font-size: 24px;
+}
+
+.dual-dashboard .route-lane-head p {
+  font-size: 14px;
+}
+
+.dual-dashboard .route-stepper {
+  gap: 10px;
+  padding: 6px 0 2px;
+}
+
+.dual-dashboard .route-step {
+  min-height: 68px;
+  justify-content: center;
+}
+
+.dual-dashboard .route-actions {
+  justify-content: flex-end;
+}
+
+.dual-progress-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  padding: 16px;
+}
+
+.dual-progress-overview span {
+  display: grid;
+  gap: 4px;
+  padding: 6px 18px;
+  color: var(--muted);
+  text-align: center;
+  border-right: 1px solid var(--line);
+}
+
+.dual-progress-overview span:last-child {
+  border-right: 0;
+}
+
+.dual-progress-overview b {
+  color: var(--blue);
+  font-size: 22px;
+}
+
+.dual-progress-overview span:first-child b,
+.dual-progress-overview .ready b {
+  color: var(--green);
+}
+
+.dual-progress-overview .warn b {
+  color: var(--amber);
+}
+
+.dual-side-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.dual-side-card.next strong {
+  padding: 13px;
+  border: 1px solid rgba(40,84,216,.36);
+  border-radius: 6px;
+  background: #f5f8ff;
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.dual-side-card ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+}
+
+.dual-side-card li {
+  position: relative;
+  padding-left: 16px;
+  line-height: 1.45;
+}
+
+.dual-side-card li::before {
+  position: absolute;
+  left: 0;
+  top: .62em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  content: "";
+}
+
+.dual-side-card li.done::before {
+  background: var(--green);
+}
+
+.dual-side-card li.active::before {
+  background: var(--blue);
+}
+
+.dual-side-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.dot.green {
+  background: var(--green);
+}
+
+.dot.blue {
+  background: var(--blue);
+}
+
+.dual-side-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dual-side-tabs b,
+.dual-side-tabs span {
+  text-align: center;
+}
+
+.dual-side-tabs b {
+  color: var(--blue);
+}
+
+.dual-side-tabs span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.dual-side-card.logs .btn {
+  margin-top: 6px;
+}
+
+@media (max-width: 1180px) {
+  .dual-dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .dual-dashboard-left,
+  .dual-dashboard-right {
+    position: static;
+  }
+
+  .dual-task-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .dual-task-list,
+  .dual-progress-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .dual-task-titlebar {
+    display: grid;
+  }
+
+  .dual-dashboard .route-actions {
+    justify-content: flex-start;
+  }
+
+  .dual-progress-overview span {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .dual-progress-overview span:last-child {
+    border-bottom: 0;
+  }
+}
+
+.dual-route-workbench {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.dual-route-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  padding: 18px;
+  border: 1px solid rgba(40,84,216,.18);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+}
+
+.dual-route-hero span,
+.route-lane-head span {
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.dual-route-hero h2 {
+  margin: 5px 0 6px;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.dual-route-hero p,
+.route-lane-head p,
+.dual-route-next span {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.dual-route-actions,
+.route-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.dual-route-actions .btn,
+.route-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  text-decoration: none;
+}
+
+.dual-route-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.route-lane {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.route-lane.visual.ready {
+  border-color: rgba(22,138,91,.28);
+  background: #f8fcfa;
+}
+
+.route-lane.editable.optional,
+.route-lane.editable.active {
+  border-color: rgba(40,84,216,.24);
+  background: #f8fbff;
+}
+
+.route-lane.locked {
+  background: #fbfcfe;
+}
+
+.route-lane-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.route-lane-head h3 {
+  margin: 3px 0 5px;
+  font-size: 18px;
+}
+
+.route-lane-head strong {
+  flex-shrink: 0;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.route-lane.ready .route-lane-head strong {
+  background: #e9f8f0;
+  color: var(--green);
+}
+
+.route-lane.active .route-lane-head strong,
+.route-lane.optional .route-lane-head strong {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.route-stepper {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.route-lane.editable .route-stepper {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.route-step {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.route-step i {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.route-step span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-step.done {
+  border-color: rgba(22,138,91,.2);
+  background: #f1fbf6;
+}
+
+.route-step.done span,
+.route-step.done i {
+  color: var(--green);
+}
+
+.route-step.active {
+  border-color: rgba(40,84,216,.24);
+  background: #f3f7ff;
+}
+
+.route-step.active span,
+.route-step.active i {
+  color: var(--blue);
+}
+
+.route-step.locked {
+  opacity: .58;
+}
+
+.route-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.route-metrics span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.route-metrics b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dual-route-next {
+  display: grid;
+  grid-template-columns: 1.1fr .9fr 1fr;
+  gap: 10px;
+}
+
+.dual-route-next div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dual-route-next b {
+  display: block;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 1180px) {
+  .dual-route-hero,
+  .dual-route-grid,
+  .dual-route-next {
+    grid-template-columns: 1fr;
+  }
+
+  .dual-route-actions,
+  .route-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .route-stepper,
+  .route-lane.editable .route-stepper,
+  .route-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
 .export-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; }
 .format-list { display: grid; gap: 10px; align-content: start; }
 .format-option {
