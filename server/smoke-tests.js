@@ -1015,7 +1015,7 @@ assert.ok(!fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8"
 assert.ok(frontendSource.includes("deliveryWorkerBatchSize"));
 assert.ok(frontendSource.includes("deliverySelectedWorkerPageIds"));
 assert.ok(frontendSource.includes("latestDeliveryRun"));
-assert.ok(frontendSource.includes("WorkflowAgentWorkerRunStatus"));
+assert.ok(frontendSource.includes("WorkflowAgentWorkerRunStatusClean"));
 assert.ok(frontendSource.includes("本批正在重建"));
 assert.ok(frontendSource.includes("查看日志"));
 assert.ok(frontendSource.includes("本次运行"));
@@ -1045,8 +1045,7 @@ const workflowArtifactsSource = fs.readFileSync(path.join(process.cwd(), "server
 assert.ok(workflowArtifactsSource.includes("draft-final-pptx"));
 assert.ok(workflowArtifactsSource.includes("assertDraftFinalPptxDownloadable"));
 assert.ok(workflowArtifactsSource.includes("Draft final PPTX is only available for partial sample results."));
-assert.ok(frontendSource.includes("draft-final-pptx"));
-assert.ok(frontendSource.includes("finalLinks"));
+assert.ok(frontendSource.includes("getFinalDownloadState"));
 assert.ok(frontendSource.includes("小样本草稿"));
 assert.ok(workflowArtifactsSource.includes("asset-contact-sheet"));
 assert.ok(workflowArtifactsSource.includes("split_assets_contact.png"));

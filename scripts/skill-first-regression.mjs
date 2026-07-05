@@ -221,7 +221,7 @@ function checkApiSurface(files) {
     mustInclude(files.frontend, "默认本批");
     mustInclude(files.frontend, "成功页会保留");
     mustInclude(files.frontend, "latestDeliveryRun");
-    mustInclude(files.frontend, "WorkflowAgentWorkerRunStatus");
+    mustInclude(files.frontend, "WorkflowAgentWorkerRunStatusClean");
     mustInclude(files.frontend, "当前主验收任务");
     mustInclude(files.frontend, "非主验收任务");
     mustInclude(files.frontend, "已完成可编辑页");
