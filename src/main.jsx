@@ -1979,7 +1979,7 @@ function DualRouteDashboard({
             </div>
           </section>
         ) : null}
-        <RouteLane
+        <DualRouteLane
           accent="visual"
           badge="路线 A"
           title="图片版 PPT"
@@ -1995,7 +1995,7 @@ function DualRouteDashboard({
             imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
           ].filter(Boolean)}
         />
-        <RouteLane
+        <DualRouteLane
           accent="editable"
           badge="路线 B"
           title="可编辑 PPT"
@@ -2040,120 +2040,7 @@ function DualRouteDashboard({
   );
 }
 
-function DualRouteWorkbench({
-  busy = false,
-  hasInput = false,
-  job = null,
-  noCostApprovalSummary = null,
-  onApproveNoCostGates,
-  onCreateWorkflow,
-  onOpenArtifacts,
-  onOpenDelivery,
-  onOpenEditable,
-  onOpenMaterials,
-  onOpenVisual
-}) {
-  const state = buildDualRouteState(job);
-  const canStart = hasInput && !busy;
-  const canContinue = Boolean(job?.id && !busy);
-  const imageDeckHref = job?.id && state.routeA.imageDeckReady
-    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1`
-    : "";
-  const finalHref = job?.id && state.routeB.finalReady
-    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
-    : "";
-  const primaryActionLabel = !job?.id
-    ? "创建图片版 PPT 任务"
-    : noCostApprovalSummary?.readyCount
-      ? "确认就绪关卡"
-      : state.routeA.imageDeckReady
-        ? "继续转可编辑 PPT"
-        : "继续生成图片版 PPT";
-  const primaryAction = !job?.id
-    ? onCreateWorkflow
-    : noCostApprovalSummary?.readyCount
-      ? onApproveNoCostGates
-      : state.routeA.imageDeckReady
-        ? onOpenEditable
-        : onOpenVisual;
-  const primaryDisabled = !job?.id ? !canStart : !canContinue;
-
-  return (
-    <div className="dual-route-workbench">
-      <div className="dual-route-hero">
-        <div>
-          <span>阶段交付</span>
-          <h2>先完成图片版 PPT，再按需进入可编辑重建</h2>
-          <p>{state.message}</p>
-        </div>
-        <div className="dual-route-actions">
-          <button className="btn primary" type="button" onClick={primaryAction} disabled={primaryDisabled}>
-            {busy ? "处理中..." : primaryActionLabel}
-          </button>
-          {imageDeckHref ? <a className="btn" href={imageDeckHref}>下载图片版 PPT</a> : null}
-          {finalHref ? <a className="btn" href={finalHref}>下载可编辑 PPT</a> : null}
-          {!job?.id ? <button className="btn ghost" type="button" onClick={onOpenMaterials}>补充材料</button> : null}
-        </div>
-      </div>
-
-      <div className="dual-route-grid">
-        <RouteLane
-          accent="visual"
-          badge="路线 A"
-          title="图片版 PPT"
-          summary={state.routeA.summary}
-          status={state.routeA.status}
-          steps={state.routeA.steps}
-          metrics={[
-            ["源页", state.routeA.sourceLabel],
-            ["图片页", state.routeA.visualLabel],
-            ["图片 PPT", state.routeA.imageDeckReady ? "已组装" : "待组装"]
-          ]}
-          actions={[
-            imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
-            { label: state.routeA.imageDeckReady ? "查看图片页证据" : "继续图片阶段", onClick: onOpenVisual, disabled: !job?.id || busy },
-            { label: "查看问题", onClick: onOpenArtifacts, disabled: !job?.id }
-          ].filter(Boolean)}
-        />
-        <RouteLane
-          accent="editable"
-          badge="路线 B"
-          title="可编辑 PPT"
-          summary={state.routeB.summary}
-          status={state.routeB.status}
-          steps={state.routeB.steps}
-          metrics={[
-            ["可编辑页", state.routeB.editableLabel],
-            ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
-            ["最终交付", state.routeB.finalReady ? "可下载" : "未完成"]
-          ]}
-          actions={[
-            finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
-            { label: state.routeA.imageDeckReady ? "继续转可编辑 PPT" : "等待图片版完成", onClick: onOpenEditable, disabled: !state.routeA.imageDeckReady || busy },
-            { label: "打开交付复核", onClick: onOpenDelivery, disabled: !job?.id }
-          ].filter(Boolean)}
-        />
-      </div>
-
-      <div className="dual-route-next">
-        <div>
-          <b>下一步建议</b>
-          <span>{state.nextAction}</span>
-        </div>
-        <div>
-          <b>当前任务</b>
-          <span>{job?.input?.sourceOriginalName || job?.input?.sourceBrief || "先上传材料或输入需求"}</span>
-        </div>
-        <div>
-          <b>高级信息</b>
-          <span>worker、provider、artifact 和日志继续保留在下方高级诊断区。</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RouteLane({ accent = "visual", actions = [], badge, metrics = [], status = "pending", steps = [], summary, title }) {
+function DualRouteLane({ accent = "visual", actions = [], badge, metrics = [], status = "pending", steps = [], summary, title }) {
   const primaryAction = actions.find((action) => action.primary) || actions[0];
   const secondaryActions = actions.filter((action) => action !== primaryAction);
   const completionMetric = metrics[1] || metrics[0] || ["进度", "-"];
@@ -2166,6 +2053,7 @@ function RouteLane({ accent = "visual", actions = [], badge, metrics = [], statu
       : accent === "editable"
         ? "可编辑重建尚未开始"
         : "图片版 PPT 生成中";
+
   return (
     <section className={`route-lane ${accent} ${status}`}>
       <div className="route-lane-head">
@@ -2189,6 +2077,11 @@ function RouteLane({ accent = "visual", actions = [], badge, metrics = [], statu
             <span>{step.label}</span>
             <small>{step.detail}</small>
           </div>
+        ))}
+      </div>
+      <div className="route-metrics">
+        {metrics.map(([label, value]) => (
+          <span key={label}><b>{value}</b>{label}</span>
         ))}
       </div>
       <div className="route-completion">
