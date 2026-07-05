@@ -2779,53 +2779,10 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   font-size: 12px;
 }
 
-.workflow-rebuild-panel {
-  display: grid;
-  gap: 12px;
-  margin-top: 14px;
-  padding: 13px;
-  border: 1px solid rgba(40,84,216,.2);
-  border-radius: 8px;
-  background: #f7f9ff;
-}
-.workflow-rebuild-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.workflow-rebuild-head b {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--ink);
-  font-size: 14px;
-}
-.workflow-rebuild-head span,
 .workflow-note {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
-}
-.workflow-rebuild-actions,
-.workflow-step-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-.workflow-rebuild-actions .btn {
-  min-height: 34px;
-  padding: 0 11px;
-  font-size: 12px;
-}
-.workflow-rebuild-actions select {
-  max-width: 320px;
-  min-height: 34px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--ink);
-  font-size: 12px;
 }
 
 .workflow-agent-simple {
@@ -6446,7 +6403,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   background: #eef1f6;
   color: #8891a2;
 }
-.workflow-rebuild-meta,
 .workflow-artifact-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -9605,16 +9561,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-review-validation > div {
     display: grid;
   }
-}
-.workflow-step-actions button {
-  min-height: 30px;
-  padding: 0 9px;
-  border: 1px solid rgba(40,84,216,.24);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--blue);
-  font-size: 12px;
-  font-weight: 800;
 }
 .workflow-worker-console {
   display: grid;
@@ -13701,7 +13647,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-guided-action,
   .workflow-agent-simple-head,
   .workflow-agent-next,
-  .workflow-rebuild-head,
   .workflow-delivery-portal-head,
   .workflow-agent-dashboard-head,
   .workflow-delivery-head,
@@ -13752,7 +13697,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-agent-recovery-meta button {
     width: 100%;
   }
-  .workflow-rebuild-meta,
   .workflow-event-list div,
   .workflow-artifact-grid,
   .workflow-overview-card .workflow-artifact-grid,
