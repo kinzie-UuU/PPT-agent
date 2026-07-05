@@ -14,6 +14,8 @@ import { ensureVisualProjectForJob, generateVisualProjectSlides, writeEditableSc
 import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
 import { cutoutImage } from "./matting.js";
 import { findLegacyStyleEvidence } from "./workflowApprovals.js";
+import { cleanPublicError } from "./workflowWorkerBatchRunner.js";
+import { deriveWorkflowDeliveryStatus } from "../shared/workflowDeliveryStatus.js";
 
 const EASTERN = "\u4e1c\u65b9\u81ea\u7136\u98ce";
 const TECH = "\u84dd\u767d\u79d1\u6280\u98ce";
@@ -28,6 +30,28 @@ assert.equal(getTemplatePack(EASTERN).slug, "skill-first-no-legacy-template");
 assert.equal(getTemplatePackPrompt(TECH), "");
 assert.equal(findLegacyStyleEvidence({ styleBrief: "轻盈渐变风" }), "轻盈渐变风");
 assert.equal(findLegacyStyleEvidence({ styleBrief: "Premium clean business presentation" }), "");
+
+const derivedWorkerStatus = deriveWorkflowDeliveryStatus({
+  sourceMeta: { pageCount: 4 },
+  artifacts: {
+    renderedPages: [{}, {}, {}, {}],
+    visualImages: [{}, {}, {}, {}],
+    imageDeck: { pageCount: 4 },
+    editableRun: { path: "run" },
+    editableWorkerTasks: [
+      { pageId: "page_001", status: "recorded" },
+      { pageId: "page_002", status: "ready" },
+      { pageId: "page_004", status: "ready" }
+    ],
+    externalImageSpendAuthorizations: []
+  }
+});
+assert.equal(derivedWorkerStatus.nextStep.id, "start-page-workers");
+assert.deepEqual(derivedWorkerStatus.nextStep.pages, ["page_002", "page_004"]);
+assert.equal(derivedWorkerStatus.nextStep.pageSelection, "page_002,page_004");
+assert.equal(derivedWorkerStatus.nextStep.externalImageCalls, 16);
+assert.equal(derivedWorkerStatus.nextStep.authorization.required, true);
+assert.equal(derivedWorkerStatus.nextStep.authorization.persisted, false);
 
 const brief = buildMaterialBrief([
   {
@@ -1042,6 +1066,111 @@ assert.ok(apiClientSource.includes("workflowEditablePreparePreflight"));
 assert.ok(frontendSource.includes("WorkflowEditablePreparePreflightPanel"));
 assert.ok(frontendSource.includes("workflow-editable-prepare-preflight"));
 assert.ok(frontendSource.includes("image-to-editable-ppt 准备"));
+assert.ok(frontendSource.includes("WorkflowEditableFailureRecoveryCard"));
+assert.ok(frontendSource.includes("workflow-editable-failure-card"));
+assert.ok(frontendSource.includes("resetLatestFailurePages"));
+assert.ok(frontendSource.includes("resetLatestDeliveryFailurePages"));
+assert.ok(frontendSource.includes("workflowWorkerTaskAction(job.id, pageId, \"reset\""));
+assert.ok(frontendSource.includes("重置失败页"));
+assert.ok(frontendSource.includes("4. 重新合成 final"));
+assert.ok(fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8").includes(".workflow-editable-failure-flow"));
+assert.ok(frontendSource.includes("deliveryWorkerRunBundle"));
+assert.ok(frontendSource.includes("previewLatestFailureWorkerStart"));
+assert.ok(frontendSource.includes("startLatestFailureWorker"));
+assert.ok(frontendSource.includes("latestDeliveryFailurePageSelection"));
+assert.ok(frontendSource.includes("if (!job?.id || !latestDeliveryFailurePageSelection) return null;"));
+assert.ok(frontendSource.includes("pages: latestDeliveryFailurePageSelection"));
+assert.ok(frontendSource.includes("workflowPageSelectionsMatch(preflightPageSelection, latestDeliveryFailurePageSelection)"));
+assert.ok(frontendSource.includes("pages: startBody.pages || latestDeliveryFailurePageSelection"));
+assert.ok(frontendSource.includes("预检通过后重跑"));
+assert.ok(frontendSource.includes("workflowWorkerPageSelection(status)"));
+assert.ok(frontendSource.includes("workflowPreflightPageSelection(workerPreflightBundle)"));
+assert.ok(frontendSource.includes("confirmLlmProviderRecovered: Boolean(llmRecovery.required ? llmRecovery.confirmed : false)"));
+assert.ok(frontendSource.includes("deliveryLlmRecoveredConfirmed"));
+assert.ok(frontendSource.includes("onToggleLlmRecovered"));
+assert.ok(frontendSource.includes("确认页面重建模型服务可用"));
+assert.ok(frontendSource.includes("setWorkerPreflightBundle(null)"));
+assert.ok(frontendSource.includes("!workerPreflight || !llmRecovery.required"));
+assert.ok(frontendSource.includes("workflowPageSelectionsMatch"));
+assert.ok(frontendSource.includes("normalizeWorkflowPageSelection"));
+assert.ok(apiClientSource.includes("finalizeWorkflowEditableRun"));
+assert.ok(frontendSource.includes("recomposeEditableFinal"));
+assert.ok(frontendSource.includes("WorkflowEditableFinalizeAction"));
+assert.ok(frontendSource.includes("allowPartialSample: isPartial"));
+assert.ok(frontendSource.includes("不调用外部 API"));
+assert.ok(frontendSource.includes("重新合成小样本 PPT"));
+assert.ok(frontendSource.includes("重新合成最终 PPT"));
+assert.ok(fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8").includes(".workflow-editable-finalize-action"));
+assert.ok(frontendSource.includes("deliveryWorkerBatchSize"));
+assert.ok(frontendSource.includes("deliverySelectedWorkerPageIds"));
+assert.ok(frontendSource.includes("latestDeliveryRun"));
+assert.ok(frontendSource.includes("WorkflowAgentWorkerRunStatus"));
+assert.ok(frontendSource.includes("本批正在重建"));
+assert.ok(frontendSource.includes("查看日志"));
+assert.ok(frontendSource.includes("本次运行"));
+assert.ok(frontendSource.includes("授权本批 ${selectedBatchImageCalls} 次图片额度"));
+assert.ok(frontendSource.includes("确认并启动 ${selectedBatchCount || \"\"} 页重建"));
+assert.ok(fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8").includes(".workflow-agent-dashboard-batch"));
+assert.ok(fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8").includes(".workflow-agent-worker-run"));
+assert.ok(frontendSource.includes("launchChecklist"));
+assert.ok(frontendSource.includes("workflow-agent-dashboard-checklist"));
+assert.ok(frontendSource.includes("启动前确认清单"));
+assert.ok(frontendSource.includes("将记录 ${imageCalls} 次 gpt-image-2 图片 API 额度授权"));
+assert.ok(frontendSource.includes("这一步只记录授权账本，不会立刻启动 worker"));
+assert.ok(frontendSource.includes("后续启动 image-to-editable-ppt 页面 worker 会真实调用外部模型/图片服务"));
+assert.ok(frontendSource.includes("已取消页面任务额度授权"));
+const workflowNextActionSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowNextAction.js"), "utf8");
+assert.ok(workflowNextActionSource.includes("tryBuildFastEditablePageWorkerPreflight"));
+assert.ok(workflowNextActionSource.includes("listWorkflowEditableWorkerTasks"));
+assert.ok(workflowNextActionSource.includes("lightweight: true"));
+assert.ok(workflowNextActionSource.includes("editable/page-workers"));
+assert.ok(workflowNextActionSource.includes("启动页面 worker 前，需要先记录 gpt-image-2 图片额度授权。"));
+assert.ok(workflowNextActionSource.includes("不会自动静默消耗外部 API"));
+assert.ok(workflowNextActionSource.includes("requiresExternalImageConfirmation: true"));
+assert.ok(workflowNextActionSource.includes("generateWorkflowVisualSample(jobId, authorizedBody)"));
+assert.ok(workflowNextActionSource.includes("generateWorkflowVisualImages(jobId, authorizedBody)"));
+assert.ok(frontendSource.includes("待处理页面"));
+const workflowArtifactsSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowArtifacts.js"), "utf8");
+assert.ok(workflowArtifactsSource.includes("draft-final-pptx"));
+assert.ok(workflowArtifactsSource.includes("assertDraftFinalPptxDownloadable"));
+assert.ok(workflowArtifactsSource.includes("Draft final PPTX is only available for partial sample results."));
+assert.ok(frontendSource.includes("draft-final-pptx"));
+assert.ok(frontendSource.includes("isDraftFinal"));
+assert.ok(frontendSource.includes("小样本草稿"));
+assert.ok(workflowArtifactsSource.includes("asset-contact-sheet"));
+assert.ok(workflowArtifactsSource.includes("split_assets_contact.png"));
+assert.ok(frontendSource.includes("WorkflowPageVisualReviewWorkbench"));
+assert.ok(frontendSource.includes("逐页人工复核"));
+assert.ok(frontendSource.includes("目标图、可编辑 PPT 预览、页面校验和资产分离结果"));
+assert.ok(frontendSource.includes("记录人工复核"));
+assert.ok(frontendSource.includes("markWorkflowPageReview"));
+assert.ok(frontendSource.includes("pageVisualReview"));
+assert.ok(frontendSource.includes("需要重跑"));
+const workflowManualReviewSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowManualReview.js"), "utf8");
+assert.ok(workflowManualReviewSource.includes("recordWorkflowPageVisualReview"));
+assert.ok(workflowManualReviewSource.includes("readyForFinalReview"));
+assert.ok(workflowManualReviewSource.includes("Page evidence is incomplete"));
+assert.ok(indexSource.includes("/api/workflow-jobs/:id/review/pages/:pageId"));
+assert.ok(indexSource.includes("sourceName: workflowSourceName(job)"));
+assert.ok(indexSource.includes("sourcePages,"));
+assert.ok(indexSource.includes("finalPages,"));
+assert.ok(indexSource.includes("isSample: Boolean(sourcePages && finalPages && finalPages < sourcePages)"));
+assert.ok(indexSource.includes("function workflowSourceName"));
+assert.ok(indexSource.includes("const includeInternal = isTruthyQuery(req.query?.includeInternal)"));
+assert.ok(indexSource.includes("buildPrimaryWorkflowListItem(primaryWorkflow)"));
+assert.ok(indexSource.includes("job: null"));
+assert.ok(frontendSource.includes("job?.sourceName || job?.input?.sourceOriginalName"));
+assert.ok(frontendSource.includes("job?.sourcePages || job?.sourceMeta?.pageCount"));
+assert.ok(frontendSource.includes("job?.finalPages || job?.artifacts?.editableFinal"));
+const workflowWorkerBatchRunnerSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowWorkerBatchRunner.js"), "utf8");
+assert.ok(workflowWorkerBatchRunnerSource.includes("buildRunnerFailureAnalysis"));
+assert.ok(workflowWorkerBatchRunnerSource.includes("canRetryPages"));
+assert.ok(workflowWorkerBatchRunnerSource.includes("const sanitized = sanitizeRunner(run)"));
+assert.ok(workflowWorkerBatchRunnerSource.includes("cleanPublicError"));
+assert.ok(workflowWorkerBatchRunnerSource.includes("页面 worker 命令未完成，页面产物没有记录。"));
+assert.equal(cleanPublicError("Command failed: C:\\Program Files\\nodejs\\node.exe script.mjs --api-key sk-1234567890abcdef"), "页面 worker 命令未完成，页面产物没有记录。");
+assert.equal(cleanPublicError('HTTP 400 {"error":{"message":"raw provider body with Bearer abcdefghijklmnop and sk-1234567890abcdef"}}'), "页面 worker 失败，原始错误已隐藏；请查看失败分析或受控日志。");
+assert.equal(cleanPublicError("Worker command exited with code 1. Page artifacts were not recorded."), "页面 worker 命令未完成，页面产物没有记录。");
 assert.ok(fs.readFileSync(path.join(process.cwd(), "server", "workflowOcr.js"), "utf8").includes("maxPages"));
 assert.ok(fs.readFileSync(path.join(process.cwd(), "server", "workflowOcr.js"), "utf8").includes("normalizePages"));
 assert.ok(fs.readFileSync(path.join(process.cwd(), "server", "workflowWorkerBatchRunner.js"), "utf8").includes("getTextHintEvidence"));

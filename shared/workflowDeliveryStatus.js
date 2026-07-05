@@ -15,7 +15,10 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   const ocrPages = numberOrZero(artifacts.ocrTextHints?.pageCount);
   const promptPages = countArray(artifacts.editableWorkerPrompts);
   const failedTaskSet = new Set(tasks.filter(isFailedEditableWorkerTask));
-  const readyPages = tasks.filter((task) => task.status === "ready" && !failedTaskSet.has(task)).length;
+  const readyTasks = tasks.filter((task) => task.status === "ready" && !failedTaskSet.has(task));
+  const readyPageIds = readyTasks.map((task) => normalizeWorkflowPageId(task.pageId || task.id || task.taskId)).filter(Boolean);
+  const readyPageNumbers = readyPageIds.map(workflowPageNumber).filter((pageNumber) => pageNumber > 0);
+  const readyPages = readyTasks.length;
   const runningPages = tasks.filter((task) => (task.status === "running" || task.status === "claimed") && !failedTaskSet.has(task)).length;
   const taskRecordedPages = tasks.filter((task) => task.status === "recorded").length;
   const failedPages = failedTaskSet.size;
@@ -77,7 +80,15 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     validationPassed,
     editablePassed
   });
-  const nextActions = buildNextActions(nextStep, {
+  const effectiveNextStep = nextStep.id === "start-page-workers"
+    ? attachEditableWorkerStartDetails(nextStep, {
+      artifacts,
+      readyPageIds,
+      readyPageNumbers,
+      readyPages
+    })
+    : nextStep;
+  const nextActions = buildNextActions(effectiveNextStep, {
     sourcePages,
     processedPages,
     partialDeck,
@@ -96,7 +107,7 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     summary: summaryForLevel(level, { hasFinal, partialDeck, processedPages, sourcePages, validationPassed, editablePassed }),
     facts,
     warnings: uniqueStrings(warnings),
-    nextStep,
+    nextStep: effectiveNextStep,
     nextActions
   };
 }
@@ -181,6 +192,74 @@ function makeNextStep(id, label, reason) {
   return { id, label, reason };
 }
 
+function attachEditableWorkerStartDetails(nextStep, { artifacts = {}, readyPageIds = [], readyPageNumbers = [], readyPages = 0 } = {}) {
+  const pages = readyPageIds.length ? readyPageIds : readyPageNumbers.map((pageNumber) => `page_${String(pageNumber).padStart(3, "0")}`);
+  const pageNumbers = readyPageNumbers.length ? readyPageNumbers : pages.map(workflowPageNumber).filter((pageNumber) => pageNumber > 0);
+  const imageCallsPerPage = 8;
+  const externalImageCalls = Math.max(0, readyPages || pages.length) * imageCallsPerPage;
+  const authorization = getEditableWorkerAuthorizationPreview(artifacts, pageNumbers, externalImageCalls);
+  const batchPlan = buildEditableWorkerBatchPlan(pages, imageCallsPerPage);
+  return {
+    ...nextStep,
+    pageSelection: pages.join(","),
+    pages,
+    externalImageCalls,
+    externalImageCallsPerPage: imageCallsPerPage,
+    batchPlan,
+    authorization
+  };
+}
+
+function buildEditableWorkerBatchPlan(pages = [], imageCallsPerPage = 8) {
+  const cleanPages = pages.filter(Boolean);
+  const defaultBatchPages = cleanPages.slice(0, Math.min(2, cleanPages.length));
+  return {
+    totalPages: cleanPages.length,
+    pageSelection: cleanPages.join(","),
+    defaultBatchSize: defaultBatchPages.length,
+    defaultBatchPages,
+    defaultBatchPageSelection: defaultBatchPages.join(","),
+    defaultBatchExternalImageCalls: defaultBatchPages.length * imageCallsPerPage,
+    externalImageCallsPerPage: imageCallsPerPage,
+    whyBatch: "默认先跑 2 页，确认模型、额度和页面证据稳定后再继续剩余页面。",
+    preserveSuccessfulPages: true,
+    requiresExplicitConfirmation: true
+  };
+}
+
+function getEditableWorkerAuthorizationPreview(artifacts = {}, pageNumbers = [], requiredImageCalls = 0) {
+  const requiredPages = new Set(pageNumbers);
+  const authorizations = Array.isArray(artifacts.externalImageSpendAuthorizations)
+    ? artifacts.externalImageSpendAuthorizations
+    : [];
+  const matching = authorizations
+    .filter((item) => item?.scope === "editable-workers")
+    .filter((item) => authorizationCoversPages(item, requiredPages))
+    .filter((item) => numberOrZero(item.imageCalls) >= requiredImageCalls)
+    .sort((left, right) => String(right.confirmedAt || "").localeCompare(String(left.confirmedAt || "")))[0] || null;
+  return {
+    required: requiredPages.size > 0,
+    persisted: Boolean(matching),
+    scope: "editable-workers",
+    imageCalls: requiredImageCalls,
+    pageSelection: pageNumbers.map((pageNumber) => `page_${String(pageNumber).padStart(3, "0")}`).join(","),
+    pages: pageNumbers,
+    warning: matching ? "" : `No persisted external image spend authorization found for editable-workers pages ${pageNumbers.join(",")}.`
+  };
+}
+
+function authorizationCoversPages(authorization = {}, requiredPages = new Set()) {
+  if (!requiredPages.size) return false;
+  const pages = Array.isArray(authorization.pages)
+    ? authorization.pages.map(Number).filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0)
+    : String(authorization.pageSelection || "").split(",").map(workflowPageNumber).filter((pageNumber) => pageNumber > 0);
+  const available = new Set(pages);
+  for (const pageNumber of requiredPages) {
+    if (!available.has(pageNumber)) return false;
+  }
+  return true;
+}
+
 function titleForLevel(level) {
   if (level === "ready") return "可以交付";
   if (level === "warning") return "草稿需要复核";
@@ -211,7 +290,21 @@ function hasArtifact(artifact = {}) {
   return Boolean(artifact?.path);
 }
 
+function normalizeWorkflowPageId(value = "") {
+  const match = String(value || "").match(/(\d+)/);
+  if (!match) return "";
+  return `page_${String(Number(match[1])).padStart(3, "0")}`;
+}
+
+function workflowPageNumber(value = "") {
+  const match = String(value || "").match(/(\d+)/);
+  const pageNumber = match ? Number(match[1]) : 0;
+  return Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber : 0;
+}
+
 function isFailedEditableWorkerTask(task = {}) {
+  const status = String(task.status || "");
+  if (status === "ready" || status === "pending") return false;
   return task.status === "failed"
     || task.validationStatus === "failed"
     || (task.status === "recorded" && task.evidence?.validationPassed === false)

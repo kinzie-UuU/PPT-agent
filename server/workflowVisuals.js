@@ -218,9 +218,11 @@ async function createVisualImageForPage(job, page, promptRecord, options = {}) {
     };
   }
   if (options.useSourceImageReference !== false && page.path && fsSync.existsSync(page.path)) {
+    const styleLock = buildCodexPptStyleLock(job, options);
     return editImageWithProvider({
       prompt: promptRecord.prompt,
       sourceImagePath: page.path,
+      referenceImagePaths: styleLock.referenceImages,
       width: VISUAL_IMAGE_W,
       height: VISUAL_IMAGE_H,
       prefix: options.prefix || `workflow_visual_${job.id}_${page.pageId}`
@@ -299,19 +301,23 @@ export async function writeVisualPrompts(job, renderedPages, options = {}) {
 }
 
 export function buildVisualPromptsPayload(job = {}, renderedPages = [], options = {}) {
-  const styleBrief = cleanText(options.styleBrief || options.style || "Unified premium business presentation system: clear slide hierarchy, precise alignment, consistent spacing, restrained palette, strong title/content regions, and enough designed visual density to look finished. Preserve visible brand/logo blocks, short titles, cover subtitles, charts, icons, and major content anchors from the source page. Avoid inventing long readable copy.");
+  const styleLock = buildCodexPptStyleLock(job, options);
+  const styleBrief = cleanText(options.styleBrief || options.style || styleLock.styleBrief);
   return {
     version: 1,
     jobId: job.id,
     styleBrief,
+    styleLock,
     createdAt: new Date().toISOString(),
     pages: renderedPages.map((page) => ({
       pageId: page.pageId,
       pageNumber: page.pageNumber,
       sourcePagePath: page.path || page.sourcePagePath || "",
+      styleReferenceImages: styleLock.referenceImages,
       prompt: [
         `Create one polished 16:9 full-slide presentation visual at ${VISUAL_IMAGE_W}x${VISUAL_IMAGE_H}; no letterbox, no crop, no extra border.`,
         `Use this deck-wide style: ${styleBrief}`,
+        buildStyleLockPrompt(styleLock),
         `This is page ${page.pageNumber} of ${renderedPages.length}.`,
         page.outlineTitle ? `Slide title: ${page.outlineTitle}.` : "",
         page.outlinePurpose ? `Slide purpose: ${page.outlinePurpose}.` : "",
@@ -325,6 +331,69 @@ export function buildVisualPromptsPayload(job = {}, renderedPages = [], options 
       ].filter(Boolean).join(" ")
     }))
   };
+}
+
+export function buildCodexPptStyleLock(job = {}, options = {}) {
+  const sample = job.artifacts?.visualSample || {};
+  const styleArtifact = job.artifacts?.codexPptStyle || {};
+  const samplePath = cleanText(sample.path || "");
+  const sampleReady = Boolean(
+    samplePath
+    && fsSync.existsSync(samplePath)
+    && sample.sha256
+    && sample.dryRun !== true
+    && sample.provider !== "passthrough"
+  );
+  const referenceImages = sampleReady && options.useStyleReference !== false ? [samplePath] : [];
+  const styleBrief = cleanText(
+    options.styleBrief
+    || options.style
+    || styleArtifact.styleBrief
+    || "Unified premium business presentation system with one locked visual identity: consistent Chinese typography hierarchy, fixed restrained palette, shared grid, repeated title/content zones, stable icon/card/chart language, and role-specific layouts."
+  );
+  return {
+    version: 1,
+    locked: sampleReady,
+    source: sampleReady ? "approved-visual-sample" : "style-text-only",
+    styleBrief,
+    referenceImages,
+    approvedSample: sampleReady ? {
+      path: samplePath,
+      pageId: sample.pageId || "",
+      pageNumber: sample.pageNumber || null,
+      sha256: sample.sha256 || "",
+      provider: sample.provider || "",
+      model: sample.model || "",
+      imageInputMode: sample.imageInputMode || ""
+    } : null,
+    tokens: {
+      typography: "Use one clean Chinese business font mood across the deck; keep title, subtitle, section label, body label, chart label, and footer sizes visually consistent from slide to slide.",
+      palette: "Use one restrained palette across all pages: neutral light backgrounds, one primary brand accent, one secondary accent, and consistent low-saturation support colors.",
+      grid: "Use a stable 16:9 grid, aligned title zone, consistent outer margins, repeated footer/logo handling, and predictable card/chart spacing.",
+      components: "Reuse the same card radius, line weights, icon style, callout treatment, chart/table framing, and image mask language.",
+      density: "Keep comparable visual density for comparable slide roles; do not switch between unrelated poster, dashboard, magazine, and template styles unless the role explicitly requires a controlled variation."
+    },
+    requirements: [
+      "Match the approved sample's typography mood, color discipline, spacing rhythm, and component finish.",
+      "Vary composition by slide role, but do not change the deck's font family mood, title hierarchy, palette, icon language, or card/chart treatment.",
+      "Prefer consistent readable Chinese headings over decorative or mixed random fonts.",
+      "If the source page has mixed or messy styling, normalize it into the locked deck style instead of copying the inconsistency."
+    ]
+  };
+}
+
+function buildStyleLockPrompt(styleLock = {}) {
+  const parts = [
+    "STYLE LOCK: all slides must share one visual identity.",
+    `Typography: ${styleLock.tokens?.typography || ""}`,
+    `Palette: ${styleLock.tokens?.palette || ""}`,
+    `Grid: ${styleLock.tokens?.grid || ""}`,
+    `Components: ${styleLock.tokens?.components || ""}`,
+    `Density: ${styleLock.tokens?.density || ""}`,
+    ...(styleLock.locked ? ["An approved sample slide is attached as a style-only reference; match its typography mood, palette discipline, spacing rhythm, and component finish. Do not copy its exact layout unless this page has the same role."] : ["No approved sample image is available yet; follow the style contract strictly and keep every page consistent."]),
+    ...(Array.isArray(styleLock.requirements) ? styleLock.requirements : [])
+  ];
+  return parts.filter(Boolean).join(" ");
 }
 
 export function getRenderedPages(job) {
@@ -443,6 +512,21 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
       sourceQa
     });
   }
+  const styleConsistency = buildDeckStyleConsistencyReport(pages);
+  const driftByPage = new Map((styleConsistency.driftPages || []).map((page) => [page.pageId, page]));
+  for (const page of pages) {
+    const drift = driftByPage.get(page.pageId);
+    if (!drift) continue;
+    page.status = page.status === "failed" ? "failed" : "review";
+    page.manualReviewRequired = true;
+    page.manualReviewReasons = [...new Set([...(page.manualReviewReasons || []), "deck-style-drift", ...drift.reasons])];
+    page.styleConsistency = {
+      status: "review",
+      reasons: drift.reasons,
+      metrics: drift.metrics,
+      deltas: drift.deltas
+    };
+  }
   const reviewPages = pages.filter((page) => page.manualReviewRequired);
   const failedPages = pages.filter((page) => page.visualQa?.status === "failed");
   const report = {
@@ -456,12 +540,103 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
       reviewCount: reviewPages.length,
       failedCount: failedPages.length,
       manualReviewRequired: reviewPages.length > 0,
-      primaryReason: reviewPages[0]?.manualReviewReasons?.[0] || ""
+      primaryReason: reviewPages[0]?.manualReviewReasons?.[0] || "",
+      styleConsistency
     },
     pages
   };
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   return { path: reportPath, report, summary: report.summary };
+}
+
+function buildDeckStyleConsistencyReport(pages = []) {
+  const candidates = (Array.isArray(pages) ? pages : [])
+    .map((page) => ({
+      pageId: page.pageId,
+      pageNumber: page.pageNumber,
+      metrics: extractStyleMetrics(page.visualQa)
+    }))
+    .filter((page) => page.metrics);
+  if (candidates.length < 3) {
+    return {
+      status: "insufficient-data",
+      checkedPages: candidates.length,
+      driftCount: 0,
+      driftPages: [],
+      message: "Need at least 3 generated pages for deck-level style consistency QA."
+    };
+  }
+  const baseline = {
+    brightness: median(candidates.map((page) => page.metrics.brightness)),
+    saturationDensity: median(candidates.map((page) => page.metrics.saturationDensity)),
+    edgeDensity: median(candidates.map((page) => page.metrics.edgeDensity)),
+    textLikeScore: median(candidates.map((page) => page.metrics.textLikeScore)),
+    titleEdgeDensity: median(candidates.map((page) => page.metrics.titleEdgeDensity))
+  };
+  const driftPages = candidates
+    .map((page) => {
+      const deltas = {
+        brightness: round(Math.abs(page.metrics.brightness - baseline.brightness)),
+        saturationDensity: round(Math.abs(page.metrics.saturationDensity - baseline.saturationDensity)),
+        edgeDensity: round(Math.abs(page.metrics.edgeDensity - baseline.edgeDensity)),
+        textLikeScore: round(Math.abs(page.metrics.textLikeScore - baseline.textLikeScore)),
+        titleEdgeDensity: round(Math.abs(page.metrics.titleEdgeDensity - baseline.titleEdgeDensity))
+      };
+      const reasons = [
+        ...(deltas.brightness > 0.22 ? ["style-brightness-drift"] : []),
+        ...(deltas.saturationDensity > 0.35 ? ["style-color-drift"] : []),
+        ...(deltas.edgeDensity > 0.085 ? ["style-density-drift"] : []),
+        ...(deltas.textLikeScore > 0.04 ? ["style-text-density-drift"] : []),
+        ...(deltas.titleEdgeDensity > 0.08 ? ["style-title-density-drift"] : [])
+      ];
+      return {
+        pageId: page.pageId,
+        pageNumber: page.pageNumber,
+        reasons,
+        metrics: page.metrics,
+        deltas
+      };
+    })
+    .filter((page) => page.reasons.length);
+  return {
+    status: driftPages.length ? "review" : "pass",
+    checkedPages: candidates.length,
+    driftCount: driftPages.length,
+    driftPages,
+    baseline,
+    thresholds: {
+      brightness: 0.22,
+      saturationDensity: 0.35,
+      edgeDensity: 0.085,
+      textLikeScore: 0.04,
+      titleEdgeDensity: 0.08
+    },
+    message: driftPages.length
+      ? `${driftPages.length} page(s) visually drift from the deck baseline and need human review or rerun.`
+      : "Deck-level pixel consistency QA did not detect obvious style drift."
+  };
+}
+
+function extractStyleMetrics(qa = null) {
+  if (!qa || qa.status === "failed" || !qa.full) return null;
+  return {
+    brightness: Number(qa.full.brightness || 0),
+    saturationDensity: Number(qa.full.saturationDensity || 0),
+    edgeDensity: Number(qa.full.edgeDensity || 0),
+    textLikeScore: Number(qa.full.textLikeScore || 0),
+    titleEdgeDensity: Number(qa.titleArea?.edgeDensity || 0)
+  };
+}
+
+function median(values = []) {
+  const numbers = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!numbers.length) return 0;
+  const middle = Math.floor(numbers.length / 2);
+  return numbers.length % 2 ? numbers[middle] : round((numbers[middle - 1] + numbers[middle]) / 2);
+}
+
+function round(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
 function detectSourceTextLoss(sourceQa = null, visualQa = null) {

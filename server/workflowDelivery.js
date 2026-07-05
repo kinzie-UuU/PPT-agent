@@ -26,7 +26,11 @@ export async function getWorkflowDeliveryStatus(id) {
     finalValidation: finalValidation.data || null
   };
   const status = deriveWorkflowDeliveryStatus(enrichedJob);
-  const pageEvidence = await scanWorkflowPageEvidence(enrichedJob).catch((error) => ({
+  const coverage = buildCoverage(enrichedJob);
+  const pageEvidenceOptions = {
+    skipPowerPointOpenability: !isFullDeliveryCoverageCandidate(coverage)
+  };
+  const pageEvidence = await scanWorkflowPageEvidence(enrichedJob, pageEvidenceOptions).catch((error) => ({
     ok: false,
     complete: false,
     totalPages: 0,
@@ -46,7 +50,7 @@ export async function getWorkflowDeliveryStatus(id) {
     jobId: job.id,
     status: deliveryStatus,
     finalGate,
-    coverage: buildCoverage(enrichedJob),
+    coverage,
     sourceMeta: {
       artifact: job.artifacts?.sourceMeta || null,
       exists: sourceMeta.exists,
@@ -66,6 +70,12 @@ export async function getWorkflowDeliveryStatus(id) {
     pageEvidence,
     finalEvidence
   };
+}
+
+function isFullDeliveryCoverageCandidate(coverage = {}) {
+  const sourcePages = numberOrZero(coverage.sourcePages);
+  const finalPages = numberOrZero(coverage.finalPages);
+  return Boolean(sourcePages && finalPages && finalPages >= sourcePages);
 }
 
 export function alignDeliveryStatusWithFinalGate(status = {}, finalGate = {}, job = {}) {
@@ -156,15 +166,18 @@ function inferBlockedGateRecoveryStep(finalGate = {}, job = {}) {
   if (!readyPages.length) return null;
   if (!/页面任务证据不完整|final visual qa|editable-preview-missing|asset-contact-sheet-missing|重跑|rerun/i.test(text)) return null;
   const pageNumbers = readyPages.map(pageNumberFromPageId).filter(Boolean);
+  const externalImageCallsPerPage = getEditableWorkerExternalImageCallsPerPage();
+  const externalImageCalls = Math.max(0, readyPages.length * externalImageCallsPerPage);
+  const batchPlan = buildBlockedGateEditableBatchPlan(readyPages, externalImageCallsPerPage);
   const authorization = getExternalImageAuthorizationStatus(job, {
     scope: "editable-workers",
-    imageCalls: readyPages.length,
+    imageCalls: externalImageCalls,
     pageSelection: readyPages.join(","),
     pageNumbers
   });
   const authorizationText = authorization.persisted
     ? "页面级额度授权账本已记录"
-    : `缺少页面级额度授权账本（${readyPages.join(", ")}，${readyPages.length} 次调用）`;
+    : `缺少页面级额度授权账本（${readyPages.join(", ")}，${externalImageCalls} 次调用）`;
   const description = `${readyPages.join(", ")} 已重置为就绪状态；${authorizationText}；启动 image-to-editable-ppt 页面 worker 前还需要确保 LLM provider 可用。`;
   return {
     id: "start-page-workers",
@@ -173,7 +186,9 @@ function inferBlockedGateRecoveryStep(finalGate = {}, job = {}) {
     description,
     pageSelection: readyPages.join(","),
     pages: readyPages,
-    externalImageCalls: readyPages.length,
+    externalImageCalls,
+    externalImageCallsPerPage,
+    batchPlan,
     authorization: {
       required: true,
       persisted: Boolean(authorization.persisted),
@@ -186,9 +201,35 @@ function inferBlockedGateRecoveryStep(finalGate = {}, job = {}) {
   };
 }
 
+function buildBlockedGateEditableBatchPlan(pages = [], imageCallsPerPage = 8) {
+  const cleanPages = pages.filter(Boolean);
+  const defaultBatchPages = cleanPages.slice(0, Math.min(2, cleanPages.length));
+  return {
+    totalPages: cleanPages.length,
+    pageSelection: cleanPages.join(","),
+    defaultBatchSize: defaultBatchPages.length,
+    defaultBatchPages,
+    defaultBatchPageSelection: defaultBatchPages.join(","),
+    defaultBatchExternalImageCalls: defaultBatchPages.length * imageCallsPerPage,
+    externalImageCallsPerPage: imageCallsPerPage,
+    whyBatch: "默认先跑 2 页，确认模型、额度和页面证据稳定后再继续剩余页面。",
+    preserveSuccessfulPages: true,
+    requiresExplicitConfirmation: true
+  };
+}
+
 function pageNumberFromPageId(pageId = "") {
   const match = String(pageId || "").match(/^page_0*(\d+)$/i);
   return match ? Number(match[1]) : 0;
+}
+
+function getEditableWorkerExternalImageCallsPerPage() {
+  const value = Number(
+    process.env.PPT_EXTERNAL_IMAGE_CALLS_PER_PAGE
+      || process.env.PPT_MAX_VISUAL_ASSET_JOBS
+      || 8
+  );
+  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 8;
 }
 
 export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, finalEvidence = {}) {
@@ -337,6 +378,8 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
 }
 
 function isFailedEditableWorkerTask(task = {}) {
+  const status = String(task.status || "");
+  if (status === "ready" || status === "pending") return false;
   return task.status === "failed"
     || task.validationStatus === "failed"
     || (task.status === "recorded" && task.evidence?.validationPassed === false)

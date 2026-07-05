@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -176,20 +176,51 @@ async function runOnce({ jobId, pageId, agentId, workerCommand, baseUrl, timeout
   ];
   if (acceptOfflineTextHints) args.push("--accept-offline-text-hints");
   if (offlineTextHintsReason) args.push("--offline-text-hints-reason", offlineTextHintsReason);
-  const { stdout, stderr } = await execFileAsync(process.execPath, args, {
-    cwd: PROJECT_ROOT,
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 1024 * 1024 * 20,
+  await runStreaming(process.execPath, args, {
+    timeoutMs,
     env: {
       ...process.env,
       PPT_TOOL_PROJECT_ROOT: PROJECT_ROOT,
       PYTHONIOENCODING: "utf-8"
     }
   });
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
+}
+
+async function runStreaming(command, args, { timeoutMs, env }) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env
+    });
+    let stderrTail = "";
+    const timer = timeoutMs > 0
+      ? setTimeout(() => child.kill("SIGTERM"), timeoutMs)
+      : null;
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stderrTail = `${stderrTail}${text}`.slice(-2000);
+      process.stderr.write(chunk);
+    });
+    child.once("error", (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const error = new Error(`Worker command exited with code ${code ?? ""}${signal ? ` signal ${signal}` : ""}`.trim());
+      error.code = code;
+      error.signal = signal;
+      error.stderr = stderrTail;
+      reject(error);
+    });
+  });
 }
 
 async function api(baseUrl, route, { method = "GET", body = null } = {}) {

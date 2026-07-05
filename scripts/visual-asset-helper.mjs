@@ -3,7 +3,7 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 
@@ -27,7 +27,9 @@ async function main() {
   if (!fsSync.existsSync(specPath)) throw new Error(`Visual asset spec not found: ${specPath}`);
 
   const spec = await readJson(specPath);
-  const jobs = normalizeJobs(spec.jobs || spec.assets || []);
+  const maxJobs = clampInteger(args["max-jobs"] || spec.maxJobs || spec.max_jobs || process.env.PPT_EXTERNAL_IMAGE_CALL_BUDGET || process.env.PPT_MAX_VISUAL_ASSET_JOBS, 0, 500, 0);
+  const allJobs = normalizeJobs(spec.jobs || spec.assets || []);
+  const jobs = maxJobs > 0 ? allJobs.slice(0, maxJobs) : allJobs;
   if (!jobs.length) throw new Error("visual-asset-jobs.json must include at least one job.");
 
   const dryRun = Boolean(args["dry-run"] || spec.dryRun);
@@ -43,10 +45,16 @@ async function main() {
 
   const batchLines = [];
   const planned = [];
+  const staleGeneratedIndexes = [];
   for (const job of jobs) {
     const promptFile = path.join(promptDir, `${job.id}.prompt.txt`);
-    await fs.writeFile(promptFile, job.prompt, "utf8");
     const outName = job.out || `${job.id}.png`;
+    const generated = path.join(outDir, outName);
+    const generatedExists = fsSync.existsSync(generated);
+    const previousPrompt = fsSync.existsSync(promptFile) ? fsSync.readFileSync(promptFile, "utf8") : "";
+    if (generatedExists && previousPrompt !== job.prompt) {
+      staleGeneratedIndexes.push(planned.length);
+    }
     const batchJob = {
       prompt: job.prompt,
       out: outName,
@@ -79,19 +87,41 @@ async function main() {
     planned.push({
       id: job.id,
       role: job.role,
+      prompt: job.prompt,
       promptFile,
-      generated: path.join(outDir, outName),
+      generated,
       importDest: job.dest,
+      sourceBoxPx: coerceAssetJobBox(job),
       processSheet: Boolean(job.processSheet)
     });
   }
   await fs.writeFile(jsonlPath, `${batchLines.join("\n")}\n`, "utf8");
 
-  const existingGenerated = planned.map((item) => fsSync.existsSync(item.generated));
+  const staleGenerated = new Set(staleGeneratedIndexes);
+  const existingGenerated = planned.map((item, index) => fsSync.existsSync(item.generated) && !staleGenerated.has(index));
   const allGeneratedExist = !dryRun && planned.length > 0 && existingGenerated.every(Boolean);
   const missingGeneratedIndexes = existingGenerated
     .map((exists, index) => exists ? -1 : index)
     .filter((index) => index >= 0);
+  const adoptGeneratedAfterMs = parseTimestampMs(args["adopt-generated-after"] || spec.adoptGeneratedAfter || spec.adopt_generated_after);
+  if (adoptGeneratedAfterMs > 0) {
+    const adopted = planned.filter((item) => wasGeneratedAfter(item.generated, adoptGeneratedAfterMs));
+    if (!dryRun) await writeCurrentPromptFiles(adopted);
+    const report = {
+      ok: true,
+      dryRun,
+      mode: "adopt-generated-after",
+      pageDir,
+      spec: specPath,
+      adoptGeneratedAfterMs,
+      adopted: adopted.map((item) => item.id),
+      staleDetected: staleGeneratedIndexes.map((index) => planned[index]?.id).filter(Boolean),
+      regenerationRequested: missingGeneratedIndexes.map((index) => planned[index]?.id).filter(Boolean)
+    };
+    await writeReport(pageDir, args.report || spec.report, report);
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
   let runJsonlPath = jsonlPath;
   let partialResume = false;
   if (!dryRun && !force && existingGenerated.some(Boolean) && !allGeneratedExist) {
@@ -99,7 +129,7 @@ async function main() {
     runJsonlPath = pathWithinPage(pageDir, args["pending-jsonl"] || spec.pendingJsonl || path.join("prompts", "visual-asset-batch.pending.jsonl"));
     await fs.writeFile(runJsonlPath, `${missingGeneratedIndexes.map((index) => batchLines[index]).join("\n")}\n`, "utf8");
   }
-  const shouldForceBatch = force;
+  const shouldForceBatch = force || staleGeneratedIndexes.length > 0;
   const imageModel = String(spec.model || args.model || process.env.IMAGE_TO_EDITABLE_PPT_IMAGE_MODEL || process.env.OPENAI_IMAGE_MODEL || process.env.CLOUD_IMAGE_MODEL || "gpt-image-2").trim();
   const defaultSize = imageModel && !imageModel.includes("gpt-image-2") ? "auto" : "";
   const batchArgs = ["image", "batch", "--input", runJsonlPath, "--out-dir", outDir, "--concurrency", String(spec.concurrency || args.concurrency || 2)];
@@ -116,14 +146,26 @@ async function main() {
   if (dryRun) batchArgs.push("--dry-run");
   let localFallback = false;
   let reusedExistingOutputs = false;
+  let batchStartedAtMs = 0;
   try {
     if (allGeneratedExist && !force) {
       reusedExistingOutputs = true;
       console.warn("All visual asset outputs already exist; reusing them for import.");
     } else {
+      batchStartedAtMs = Date.now();
       await runEditppt(batchArgs);
     }
   } catch (error) {
+    const partiallyGenerated = !dryRun && batchStartedAtMs > 0
+      ? planned.filter((item) => wasGeneratedAfter(item.generated, batchStartedAtMs))
+      : [];
+    if (partiallyGenerated.length) {
+      await writeCurrentPromptFiles(partiallyGenerated);
+      error.message = [
+        error.message || "editppt image asset generation failed",
+        `Recorded ${partiallyGenerated.length} successfully regenerated asset prompt sidecar(s); retry will only request remaining stale/missing outputs.`
+      ].join("\n");
+    }
     if (dryRun || !allowLocalFallback || !canUseLocalAssetSeparation(jobs)) {
       error.message = [
         error.message || "editppt image asset generation failed",
@@ -139,7 +181,17 @@ async function main() {
 
   const imported = [];
   const processed = [];
+  const postprocessed = [];
   if (!dryRun) {
+    await writeCurrentPromptFiles(planned);
+    for (const item of planned) {
+      const result = await removeCheckerboardTransparencyGrid(item.generated).catch((error) => ({
+        ok: false,
+        path: item.generated,
+        error: error.message || "checkerboard postprocess failed"
+      }));
+      postprocessed.push(result);
+    }
     for (const job of jobs) {
       const generatedPath = path.join(outDir, job.out || `${job.id}.png`);
       if (!fsSync.existsSync(generatedPath)) throw new Error(`Generated image not found for ${job.id}: ${generatedPath}`);
@@ -156,6 +208,7 @@ async function main() {
         processed.push({ id: job.id, assetSheetSource: sheet, assetsDir: job.processSheet.assetsDir || job.processSheet.assets_dir || "" });
       }
     }
+    await augmentImagegenJobIndex(pageDir, jobs, planned);
   }
 
   const report = {
@@ -166,19 +219,29 @@ async function main() {
     jsonl: jsonlPath,
     runJsonl: runJsonlPath,
     outDir,
+    maxJobs,
+    requestedJobs: allJobs.length,
+    plannedJobs: jobs.length,
     planned,
     imported,
     processed,
+    postprocessed,
     localFallback,
     allowLocalFallback,
     reusedExistingOutputs,
-    partialResume
+    partialResume,
+    staleDetected: staleGeneratedIndexes.map((index) => planned[index]?.id).filter(Boolean),
+    regenerationRequested: missingGeneratedIndexes.map((index) => planned[index]?.id).filter(Boolean),
+    staleRegenerated: dryRun ? [] : staleGeneratedIndexes.map((index) => planned[index]?.id).filter(Boolean)
   };
-  await fs.writeFile(pathWithinPage(pageDir, args.report || spec.report || path.join("logs", "visual-asset-helper-report.json")), JSON.stringify(report, null, 2), "utf8").catch(async () => {
-    await fs.mkdir(path.join(pageDir, "logs"), { recursive: true });
-    await fs.writeFile(path.join(pageDir, "logs", "visual-asset-helper-report.json"), JSON.stringify(report, null, 2), "utf8");
-  });
+  await writeReport(pageDir, args.report || spec.report, report);
   console.log(JSON.stringify(report, null, 2));
+}
+
+function clampInteger(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function appendProcessSheetArgs(args, options = {}) {
@@ -203,6 +266,37 @@ function appendProcessSheetArgs(args, options = {}) {
   if (options.squareAssets || options.square_assets) args.push("--square-assets");
 }
 
+async function writeCurrentPromptFiles(planned = []) {
+  for (const item of planned) {
+    await fs.writeFile(item.promptFile, item.prompt, "utf8");
+  }
+}
+
+function wasGeneratedAfter(filePath, startedAtMs) {
+  try {
+    if (!fsSync.existsSync(filePath)) return false;
+    return fsSync.statSync(filePath).mtimeMs >= startedAtMs - 1000;
+  } catch {
+    return false;
+  }
+}
+
+function parseTimestampMs(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) return number;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function writeReport(pageDir, reportPath, report) {
+  const target = pathWithinPage(pageDir, reportPath || path.join("logs", "visual-asset-helper-report.json"));
+  await fs.writeFile(target, JSON.stringify(report, null, 2), "utf8").catch(async () => {
+    await fs.mkdir(path.join(pageDir, "logs"), { recursive: true });
+    await fs.writeFile(path.join(pageDir, "logs", "visual-asset-helper-report.json"), JSON.stringify(report, null, 2), "utf8");
+  });
+}
+
 function normalizeJobs(jobs) {
   if (!Array.isArray(jobs)) return [];
   return jobs.map((job, index) => {
@@ -218,6 +312,79 @@ function normalizeJobs(jobs) {
       images: Array.isArray(job.images) ? job.images : []
     };
   });
+}
+
+async function augmentImagegenJobIndex(pageDir, jobs = [], planned = []) {
+  const file = path.join(pageDir, "imagegen-jobs.json");
+  if (!fsSync.existsSync(file)) return;
+  let index = {};
+  try {
+    index = JSON.parse(fsSync.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return;
+  }
+  const records = Array.isArray(index.jobs) ? index.jobs : [];
+  if (!records.length) return;
+  const plannedById = new Map(planned.map((item) => [normalizeId(item.id), item]));
+  const jobById = new Map(jobs.map((item) => [normalizeId(item.id), item]));
+  let changed = false;
+  for (const record of records) {
+    const id = normalizeId(record.job_id || record.id || "");
+    const plannedItem = plannedById.get(id);
+    const job = jobById.get(id) || {};
+    if (!plannedItem) continue;
+    const sourceBox = coerceBox(record.source_box_px)
+      || coerceBox(plannedItem.sourceBoxPx)
+      || coerceAssetJobBox(job);
+    if (sourceBox && !arraysEqual(record.source_box_px, sourceBox)) {
+      record.source_box_px = sourceBox;
+      changed = true;
+    }
+    if (!record.prompt_excerpt && plannedItem.prompt) {
+      record.prompt_excerpt = String(plannedItem.prompt).replace(/\s+/g, " ").trim().slice(0, 360);
+      changed = true;
+    }
+    const dest = normalizeMaybeRelativePath(job.dest || plannedItem.importDest || record.output || "");
+    if (dest && record.output !== dest) {
+      record.output = dest;
+      changed = true;
+    }
+  }
+  if (changed) {
+    index.updated_at = new Date().toISOString();
+    await fs.writeFile(file, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+  }
+}
+
+function normalizeMaybeRelativePath(value) {
+  try {
+    return value ? normalizeRelativePath(value) : "";
+  } catch {
+    return "";
+  }
+}
+
+function coerceBox(value) {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const box = value.map(Number);
+  return box.every(Number.isFinite) && box[2] > 0 && box[3] > 0 ? box : null;
+}
+
+function coerceAssetJobBox(job = {}) {
+  return coerceBox(
+    job.source_box_px
+    || job.source_region_box_px
+    || job.source_region_px
+    || job.intended_placement_px
+    || job.sourceBoxPx
+    || job.box_px
+    || job.target_box_px
+  );
+}
+
+function arraysEqual(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  return left.every((item, index) => Number(item) === Number(right[index]));
 }
 
 function resolveExistingDir(value) {
@@ -253,18 +420,106 @@ function normalizeRelativePath(value) {
 
 async function runEditppt(args) {
   const editpptEnv = normalizeEditpptApiEnv(process.env);
-  const { stdout, stderr } = await execFileAsync(EDITPPT_PYTHON, ["-m", "editppt.cli", ...args], {
+  await new Promise((resolve, reject) => {
+    const child = spawn(EDITPPT_PYTHON, ["-m", "editppt.cli", ...args], {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...editpptEnv,
+        PYTHONPATH: [CLI_PATH, editpptEnv.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        PYTHONIOENCODING: "utf-8"
+      }
+    });
+    let stderrTail = "";
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      stderrTail = `${stderrTail}${text}`.slice(-2000);
+      process.stderr.write(chunk);
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const error = new Error(`editppt ${args.join(" ")} exited with code ${code ?? ""}${signal ? ` signal ${signal}` : ""}`.trim());
+      error.code = code;
+      error.signal = signal;
+      error.stderr = stderrTail;
+      reject(error);
+    });
+  });
+}
+
+async function removeCheckerboardTransparencyGrid(filePath = "") {
+  if (!filePath || !fsSync.existsSync(filePath)) return { ok: false, path: filePath, skipped: true, reason: "missing" };
+  const code = `
+import json, sys
+from pathlib import Path
+from PIL import Image
+
+path = Path(sys.argv[1])
+im = Image.open(path).convert("RGBA")
+sample = im.copy()
+sample.thumbnail((300, 180))
+pixels = sample.load()
+sw, sh = sample.size
+
+def grayish(px):
+    r, g, b, a = px
+    return a > 220 and abs(r - g) < 4 and abs(g - b) < 4 and 175 <= r <= 255
+
+gray = 0
+adj = 0
+alt = 0
+total = max(1, sw * sh)
+for y in range(sh):
+    for x in range(sw):
+        p = pixels[x, y]
+        if grayish(p):
+            gray += 1
+        if x + 1 < sw and grayish(p) and grayish(pixels[x + 1, y]):
+            adj += 1
+            if abs(p[0] - pixels[x + 1, y][0]) > 12:
+                alt += 1
+        if y + 1 < sh and grayish(p) and grayish(pixels[x, y + 1]):
+            adj += 1
+            if abs(p[0] - pixels[x, y + 1][0]) > 12:
+                alt += 1
+
+gray_ratio = gray / total
+alt_ratio = alt / max(1, adj)
+score = gray_ratio * alt_ratio
+if not (gray_ratio >= 0.4 and alt_ratio >= 0.09 and score >= 0.045):
+    print(json.dumps({"ok": True, "path": str(path), "changed": False, "grayRatio": round(gray_ratio, 3), "alternationRatio": round(alt_ratio, 3), "score": round(score, 3)}, ensure_ascii=False))
+    raise SystemExit(0)
+
+data = list(im.getdata())
+out = []
+changed = 0
+for r, g, b, a in data:
+    if a > 220 and abs(r - g) < 6 and abs(g - b) < 6 and 175 <= r <= 255:
+        out.append((r, g, b, 0))
+        changed += 1
+    else:
+        out.append((r, g, b, a))
+im.putdata(out)
+im.save(path)
+print(json.dumps({"ok": True, "path": str(path), "changed": True, "changedPixels": changed, "totalPixels": len(data), "grayRatio": round(gray_ratio, 3), "alternationRatio": round(alt_ratio, 3), "score": round(score, 3)}, ensure_ascii=False))
+`;
+  const { stdout } = await execFileAsync(EDITPPT_PYTHON, ["-c", code, filePath], {
     cwd: PROJECT_ROOT,
     windowsHide: true,
     encoding: "utf8",
+    timeout: 120000,
     env: {
-      ...editpptEnv,
-      PYTHONPATH: [CLI_PATH, editpptEnv.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      ...process.env,
       PYTHONIOENCODING: "utf-8"
     }
   });
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
+  return JSON.parse(String(stdout || "{}"));
 }
 
 function normalizeEditpptApiEnv(env = {}) {
@@ -289,7 +544,7 @@ function normalizeOpenAiCompatibleBaseUrl(value = "") {
 
 function canUseLocalAssetSeparation(jobs) {
   return Array.isArray(jobs) && jobs.length > 0 && jobs.every((job) => {
-    const box = job.source_box_px || job.sourceBoxPx || job.box_px;
+    const box = job.source_box_px || job.source_region_box_px || job.sourceBoxPx || job.box_px;
     return job.local_cleanup || (Array.isArray(box) && box.length === 4 && box.every((item) => Number.isFinite(Number(item))));
   });
 }
@@ -342,7 +597,7 @@ async function localAssetSeparation(pageDir, jobs, outDir) {
     const source = resolveInputImage(pageDir, job.image || "source.png");
     const outName = job.out || `${job.id}.png`;
     const generatedPath = path.join(outDir, outName);
-    const box = job.source_box_px || job.sourceBoxPx || job.box_px;
+    const box = job.source_box_px || job.source_region_box_px || job.sourceBoxPx || job.box_px;
     const script = job.local_cleanup ? cleanupScript : cropScript;
     const args = job.local_cleanup ? ["-c", script, source, generatedPath] : ["-c", script, source, generatedPath, JSON.stringify(box)];
     await execFileAsync(EDITPPT_PYTHON, args, {

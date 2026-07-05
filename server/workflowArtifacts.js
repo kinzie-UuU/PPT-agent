@@ -17,6 +17,7 @@ export async function listWorkflowArtifactLinks(id) {
     jobId: job.id,
     links: decorateArtifactLinks([
       makeLink(job, "final-pptx", "最终 PPTX", artifacts.editableFinal?.path, { download: true }),
+      makeDraftFinalLink(job, artifacts, finalGate),
       makeLink(job, "validation", "Validation JSON", artifacts.editableFinal?.validation?.path),
       makeLink(job, "source-meta", "Source Meta", artifacts.sourceMeta?.path),
       makeLink(job, "codex-ppt-outline", "codex-ppt Outline JSON", artifacts.codexPptOutline?.path),
@@ -40,6 +41,7 @@ export async function listWorkflowArtifactLinks(id) {
       ...artifactArrayLinks(job, "rendered-page", "源稿页面图", artifacts.renderedPages),
       ...artifactArrayLinks(job, "visual-page", "视觉页面图", artifacts.visualImages),
       ...artifactArrayLinks(job, "rebuild-preview", "重建预览图", reviewArtifacts.previews),
+      ...artifactArrayLinks(job, "asset-contact-sheet", "资产分离总览图", reviewArtifacts.contactSheets),
       ...artifactArrayLinks(job, "final-compare", "最终对比图", getFinalCompareArtifacts(job)),
       ...artifactArrayLinks(job, "page-validation", "页面 Validation", reviewArtifacts.validations),
       ...artifactArrayLinks(job, "page-result", "页面 Result", reviewArtifacts.results),
@@ -53,7 +55,7 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
   const job = await readWorkflowJob(id);
   const artifacts = job.artifacts || {};
   const normalizedKey = cleanKey(key);
-  if (["rebuild-preview", "page-validation", "page-result", "page-pptx"].includes(normalizedKey)) {
+  if (["rebuild-preview", "asset-contact-sheet", "page-validation", "page-result", "page-pptx"].includes(normalizedKey)) {
     await mirrorReviewArtifacts(job);
   }
   let filePath = "";
@@ -64,6 +66,12 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
     await assertFinalPptxDownloadable(id);
     filePath = artifacts.editableFinal?.path || "";
     fileName = "editable-final.pptx";
+    inline = false;
+  } else if (normalizedKey === "draft-final-pptx") {
+    await assertDraftFinalPptxDownloadable(id);
+    filePath = artifacts.editableFinal?.path || "";
+    const finalPages = artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || "";
+    fileName = finalPages ? `editable-sample-${finalPages}p-draft.pptx` : "editable-sample-draft.pptx";
     inline = false;
   } else if (normalizedKey === "validation") {
     filePath = artifacts.editableFinal?.validation?.path || "";
@@ -141,6 +149,10 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
     const page = findPageArtifact(getMirroredReviewArtifacts(job, "preview.png"), pageId);
     filePath = page?.path || "";
     fileName = path.basename(filePath || `${cleanPageId(pageId)}-preview.png`);
+  } else if (normalizedKey === "asset-contact-sheet") {
+    const page = findPageArtifact(getMirroredReviewArtifacts(job, "split_assets_contact.png"), pageId);
+    filePath = page?.path || "";
+    fileName = path.basename(filePath || `${cleanPageId(pageId)}-asset-contact-sheet.png`);
   } else if (normalizedKey === "final-compare") {
     const page = findPageArtifact(getFinalCompareArtifacts(job), pageId);
     filePath = page?.path || "";
@@ -189,6 +201,20 @@ async function assertFinalPptxDownloadable(id) {
   }
 }
 
+async function assertDraftFinalPptxDownloadable(id) {
+  const delivery = await getWorkflowDeliveryStatus(id);
+  const gate = delivery.finalGate || {};
+  const checks = gate.checks || {};
+  const sourcePages = Number(checks.sourcePages || delivery.coverage?.sourcePages || 0);
+  const finalPages = Number(checks.finalPages || delivery.coverage?.finalPages || 0);
+  if (!finalPages || !sourcePages || finalPages >= sourcePages) {
+    const error = new Error("Draft final PPTX is only available for partial sample results.");
+    error.status = 404;
+    error.code = "WORKFLOW_DRAFT_FINAL_NOT_AVAILABLE";
+    throw error;
+  }
+}
+
 function artifactArrayLinks(job, key, label, records = [], options = {}) {
   return (Array.isArray(records) ? records : []).map((record) => makeLink(job, key, `${label} ${record.pageId || record.pageNumber || ""}`.trim(), record.path, {
     ...options,
@@ -231,8 +257,31 @@ function makeLink(job, key, label, filePath, options = {}) {
   }
 }
 
+function makeDraftFinalLink(job, artifacts = {}, finalGate = null) {
+  const checks = finalGate?.checks || {};
+  const sourcePages = Number(checks.sourcePages || 0);
+  const finalPages = Number(checks.finalPages || artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
+  if (!artifacts.editableFinal?.path || !sourcePages || !finalPages || finalPages >= sourcePages) return null;
+  const link = makeLink(job, "draft-final-pptx", `小样本草稿 PPTX（${finalPages}/${sourcePages}）`, artifacts.editableFinal.path, { download: true });
+  return link ? {
+    ...link,
+    draft: true,
+    downloadable: true,
+    warning: `当前只覆盖 ${finalPages}/${sourcePages} 页，不能作为完整产品交付。`
+  } : null;
+}
+
 function decorateArtifactLinks(links = [], finalGate = null) {
   return (Array.isArray(links) ? links : []).map((link) => {
+    if (link?.key === "draft-final-pptx") {
+      return {
+        ...link,
+        exists: true,
+        downloadable: true,
+        blocked: false,
+        nextAction: "继续重建剩余页面后，再生成最终产品级 PPT。"
+      };
+    }
     if (!link || link.key !== "final-pptx") {
       return link?.size ? { ...link, exists: true } : link;
     }
@@ -316,7 +365,7 @@ async function mirrorReviewArtifacts(job) {
   const runDir = path.resolve(job.artifacts?.editableRun?.path || "");
   const tasks = Array.isArray(job.artifacts?.editableWorkerTasks) ? job.artifacts.editableWorkerTasks : [];
   const targetRoot = path.join(job.rootDir, "review-artifacts");
-  const result = { previews: [], validations: [], results: [], pptx: [] };
+  const result = { previews: [], contactSheets: [], validations: [], results: [], pptx: [] };
   if (!runDir || !fsSync.existsSync(runDir)) return result;
   for (const task of tasks) {
     if (task.status !== "recorded") continue;
@@ -324,10 +373,12 @@ async function mirrorReviewArtifacts(job) {
     if (!pageId) continue;
     const sourcePageDir = path.resolve(String(task.pageDir || ""));
     if (!isInsidePath(sourcePageDir, runDir)) continue;
+    if (!isRealPathInside(sourcePageDir, runDir)) continue;
     if (path.basename(sourcePageDir).toLowerCase() !== pageId) continue;
     const targetDir = path.join(targetRoot, pageId);
     await fs.mkdir(targetDir, { recursive: true });
     await mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName: "preview.png", targetName: "preview.png", bucket: result.previews });
+    await mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName: "split_assets_contact.png", targetName: "split_assets_contact.png", bucket: result.contactSheets });
     await mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName: "validation.json", targetName: "validation.json", bucket: result.validations });
     await mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName: "page_result.json", targetName: "page_result.json", bucket: result.results });
     await mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName: "page.pptx", targetName: "page.pptx", bucket: result.pptx });
@@ -338,13 +389,26 @@ async function mirrorReviewArtifacts(job) {
 async function mirrorNamedArtifact({ pageId, sourcePageDir, targetDir, sourceName, targetName, bucket }) {
   const sourcePath = path.join(sourcePageDir, sourceName);
   if (!fsSync.existsSync(sourcePath) || !fsSync.statSync(sourcePath).isFile()) return;
+  if (!isRealPathInside(sourcePath, sourcePageDir)) return;
+  if (!isRealPathInside(targetDir, path.dirname(targetDir))) return;
   const targetPath = path.join(targetDir, targetName);
+  if (fsSync.existsSync(targetPath) && !isRealPathInside(targetPath, targetDir)) return;
   const sourceStat = fsSync.statSync(sourcePath);
   const targetStat = fsSync.existsSync(targetPath) ? fsSync.statSync(targetPath) : null;
   if (!targetStat || targetStat.size !== sourceStat.size || targetStat.mtimeMs < sourceStat.mtimeMs) {
     await fs.copyFile(sourcePath, targetPath);
   }
   bucket.push({ pageId, path: targetPath, size: sourceStat.size });
+}
+
+function isRealPathInside(candidate, parent) {
+  try {
+    const realCandidate = fsSync.realpathSync(candidate);
+    const realParent = fsSync.realpathSync(parent);
+    return isInsidePath(realCandidate, realParent);
+  } catch {
+    return false;
+  }
 }
 
 function getMirroredReviewArtifacts(job, fileName) {

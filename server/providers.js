@@ -413,7 +413,7 @@ export async function generateImageWithProvider({ prompt, width = 1024, height =
   });
 }
 
-export async function editImageWithProvider({ prompt, sourceImagePath, width = 1024, height = 1024, prefix = "provider_image_edit", config = null } = {}) {
+export async function editImageWithProvider({ prompt, sourceImagePath, referenceImagePaths = [], width = 1024, height = 1024, prefix = "provider_image_edit", config = null } = {}) {
   const imageConfig = config || mergeImageConfig({});
   if (!imageConfig.enabled) throw new Error("Image provider disabled");
   if (!imageConfig.apiKey) throw new Error("Missing image provider API key");
@@ -422,12 +422,17 @@ export async function editImageWithProvider({ prompt, sourceImagePath, width = 1
   const imagePath = String(sourceImagePath || "").trim();
   if (!imagePath || !fsSync.existsSync(imagePath)) throw new Error("Missing source image for image edit");
   const imageBuffer = await fs.readFile(imagePath);
+  const references = normalizeReferenceImagePaths(referenceImagePaths, imagePath);
   const form = new FormData();
   form.append("model", imageConfig.model);
   form.append("prompt", cleanPrompt);
   form.append("size", normalizeImageSize(width, height, imageConfig.model));
   form.append("n", "1");
   form.append("image", new Blob([imageBuffer], { type: mimeTypeForPath(imagePath) }), path.basename(imagePath));
+  for (const referencePath of references) {
+    const referenceBuffer = await fs.readFile(referencePath);
+    form.append("image", new Blob([referenceBuffer], { type: mimeTypeForPath(referencePath) }), path.basename(referencePath));
+  }
   const result = await requestOpenAiCompatible(imageConfig.baseUrl, "/images/edits", {
     method: "POST",
     headers: { Authorization: `Bearer ${imageConfig.apiKey}` },
@@ -451,10 +456,28 @@ export async function editImageWithProvider({ prompt, sourceImagePath, width = 1
     height,
     extra: {
       operation: "image-edit",
-      imageInputMode: "source-page-edit",
-      sourceImagePath: imagePath
+      imageInputMode: references.length ? "source-page-edit-plus-style-reference" : "source-page-edit",
+      sourceImagePath: imagePath,
+      referenceImagePaths: references
     }
   });
+}
+
+function normalizeReferenceImagePaths(value = [], sourceImagePath = "") {
+  const source = path.resolve(String(sourceImagePath || ""));
+  const raw = Array.isArray(value) ? value : [value];
+  const seen = new Set();
+  const result = [];
+  for (const item of raw) {
+    const candidate = String(item || "").trim();
+    if (!candidate || !fsSync.existsSync(candidate) || !fsSync.statSync(candidate).isFile()) continue;
+    const resolved = path.resolve(candidate);
+    if (resolved === source || seen.has(resolved)) continue;
+    if (!/\.(png|jpe?g|webp)$/i.test(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result.slice(0, 2);
 }
 
 async function writeGeneratedImageResult({ data, prefix, timeoutMs, source, idPrefix, imageConfig, resultUrl, endpoint, prompt, width, height, extra = {} }) {

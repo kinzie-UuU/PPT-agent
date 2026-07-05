@@ -22,31 +22,35 @@
 
 ## 当前事实
 
-截至 2026-06-29：
+截至 2026-06-30：
 
 - 当前真实 job：`workflow_20260629-021146Z_619d82`
 - 源文件：`汇川中秋--20260611.pptx`
 - 源页数：20 页
-- 当前已跑通：2/20 页真实小样本闭环
+- 当前已完成：20/20 页 `codex-ppt` 图片型页面和图片型 PPT
+- 当前已跑通：2/20 页 `image-to-editable-ppt / editppt` 可编辑重建小样本
 - 当前最终文件：`workspace/jobs/workflow_20260629-021146Z_619d82/final/editable-final.pptx`
-- 当前交付状态：draft，可作为 2 页测试范围下载，不是完整产品交付
+- 当前交付状态：blocked，不是完整产品交付
+- 当前待重建页集：`page_001,page_002,page_005-page_020`
+- 当前完整页面证据页：`page_003,page_004`
+- 注意：当前 2 页 final 是旧小样本结果，不等于当前已记录页面证据页；最终必须重新合成 20/20。
 - 图片模型：`gpt-image-2`
 - OCR：`paddleocr-local`，`rapidocr-local` fallback
 - 对话模型：由外部 OpenAI-compatible provider 配置，前端不暴露 API Key
 
-当前 2 页小样本已验证：
+当前已验证：
 
-- `codex-ppt` 图片型页面真实生成完成。
-- `image-to-editable-ppt / editppt` 可编辑重建完成。
-- PowerPoint 可打开。
-- 对象级可编辑性检查通过，包含可编辑文字、形状和图片对象。
-- 未发现整页截图冒充可编辑页面。
-- 页面证据和最终证据完整。
-- 人工视觉复核已记录。
+- `codex-ppt` 图片型页面真实生成完成，覆盖 20/20 页。
+- 图片型 PPT 已覆盖源文件 20 页。
+- `image-to-editable-ppt / editppt` 已有 2 页完整页面证据。
+- 已支持逐页人工复核标记；最终人工复核门禁尚未完成。
+- 当前人工复核标记仍是阶段性记录；20/20 最终文件生成后必须重新做最终人工复核。
+- PowerPoint 打开性、对象级可编辑性、整页截图风险仍需在 20/20 最终文件上重新验收。
 
 当前未完成：
 
-- 完整 20/20 页产品级交付尚未完成。
+- 完整 20/20 页可编辑重建尚未完成。
+- 剩余 18 页需要继续跑真实 `image-to-editable-ppt / editppt` 页面 worker。
 - `acceptance.ready=true` 只能在完整页数覆盖、交付门禁 ready 后写入。
 - 继续剩余页前必须再次显式确认 `gpt-image-2` 图片 API 和页面规格模型调用额度。
 
@@ -81,3 +85,12 @@
 3. 强化单页失败恢复：失败原因、影响页、重置页、重跑页、重新合成 final。
 4. 强化人工复核体验：逐页对比 `codex-ppt` 目标图、可编辑 PPT 预览图、校验结果和资产分离图。
 5. 持续清理普通用户前端，把旧模板和旧本地生成器留在高级诊断而不是主流程。
+## 2026-06-30 当前产品边界补充
+
+- 当前主验收样本仍是 `汇川中秋--20260611.pptx`，源文件 20 页。
+- `codex-ppt` 图片型页面和图片型 PPT 已完成 20/20。
+- `image-to-editable-ppt / editppt` 可编辑重建当前仍只有 2/20 小样本，不是完整产品交付。
+- `draft-final-pptx` 只开放当前小样本草稿下载，文件名 `editable-sample-2p-draft.pptx`；它不能替代最终产品级 `editable-final.pptx`。
+- `final-pptx` 最终产品级下载必须继续受交付门禁控制；当前 blocked 状态下接口应返回 409。
+- 剩余页真实执行必须走分批受控启动，默认先跑 2 页；用户明确确认外部 API 额度和模型恢复后，才允许启动真实 `image-to-editable-ppt` 页面 worker。
+- 普通用户前端应优先显示五步主流程、当前主任务、小样本/最终文件状态、下一步动作、失败恢复和运行状态；worker、provider、artifact、manifest、hash 等细节默认进入高级/诊断区。

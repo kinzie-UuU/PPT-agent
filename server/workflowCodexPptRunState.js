@@ -30,6 +30,8 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
       sourcePagePath: page.path || "",
       prompt: prompt.prompt || "",
       styleBrief: prompts.styleBrief || "",
+      styleLock: prompts.styleLock || null,
+      styleReferenceImages: Array.isArray(prompt.styleReferenceImages) ? prompt.styleReferenceImages : [],
       backend: compactBackend(backend),
       sampleGenerationMethod: buildSampleGenerationMethod(job),
       workerContract: {
@@ -66,6 +68,7 @@ export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts
     style: artifactPointer(job.artifacts?.codexPptStyle),
     backend: compactBackend(backend),
     sampleGenerationMethod: buildSampleGenerationMethod(job),
+    styleLock: prompts.styleLock || null,
     selectedPages: selected,
     slideCount: slidePrompts.length,
     slides: slidePrompts.map((prompt) => ({

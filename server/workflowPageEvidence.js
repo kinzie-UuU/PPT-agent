@@ -29,7 +29,7 @@ const REQUIRED_MANIFEST_KEYS = [
   "asset_provenance"
 ];
 
-export async function scanWorkflowPageEvidence(jobOrId) {
+export async function scanWorkflowPageEvidence(jobOrId, options = {}) {
   const job = typeof jobOrId === "string" ? await readWorkflowJob(jobOrId) : jobOrId;
   const runDir = job?.artifacts?.editableRun?.path || "";
   const openableRepairOk = job?.artifacts?.editableFinal?.openableRepair?.ok === true;
@@ -44,7 +44,10 @@ export async function scanWorkflowPageEvidence(jobOrId) {
   }
   const pageEvidence = [];
   for (const page of pages) {
-    pageEvidence.push(await scanPageEvidence(runDir, page, { openableRepairOk }));
+    pageEvidence.push(await scanPageEvidence(runDir, page, {
+      openableRepairOk,
+      skipPowerPointOpenability: options.skipPowerPointOpenability === true
+    }));
   }
   const summary = summarizePages(pageEvidence);
   return {
@@ -88,10 +91,15 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   if (!pageResultShapeOk) issues.push("page-result-shape-invalid");
 
   const pagePptxOpenability = outputEvidence.page_pptx.exists
-    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path, { page, openableRepairOk: options.openableRepairOk })
+    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path, {
+        page,
+        openableRepairOk: options.openableRepairOk,
+        skipPowerPointOpenability: options.skipPowerPointOpenability
+      })
     : null;
   const pagePptxOpenable = pagePptxOpenability?.openable !== false;
   if (pagePptxOpenability?.openable === false) issues.push("page-pptx-powerpoint-open-failed");
+  if (pagePptxOpenability?.skipped === true) issues.push("page-pptx-openability-skipped");
 
   const manifest = await readJson(outputEvidence.page_manifest.path).catch(() => null);
   const manifestCheck = checkManifestContract(manifest);
@@ -114,7 +122,7 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   if (!resultOk) issues.push("missing-record-evidence");
 
   const requiredArtifactsOk = Object.values(outputEvidence).every((item) => item.exists);
-  const complete = dispatchOk && resultOk && requiredArtifactsOk && validationPassed && pageResultShapeOk && pagePptxOpenable && manifestCheck.ok && allHashesMatched;
+  const complete = dispatchOk && resultOk && requiredArtifactsOk && validationPassed && pageResultShapeOk && pagePptxOpenable && !pagePptxOpenability?.skipped && manifestCheck.ok && allHashesMatched;
   return {
     pageId,
     status: page.status || "",
@@ -146,6 +154,18 @@ async function inspectPagePptxOpenability(filePath, options = {}) {
       openable: true,
       slideCount: 1,
       warnings: [],
+      error: ""
+    };
+  }
+  if (options.skipPowerPointOpenability) {
+    return {
+      version: 1,
+      source: "powerpoint-com-open",
+      available: process.platform === "win32",
+      openable: null,
+      slideCount: 0,
+      skipped: true,
+      warnings: ["powerpoint-open-check-skipped-until-full-delivery"],
       error: ""
     };
   }
@@ -230,6 +250,7 @@ function summarizePages(pages = []) {
     validationPassed: pages.filter((page) => page.validationPassed).length,
     pageResultShape: pages.filter((page) => page.pageResultShapeOk).length,
     pagePptxOpenable: pages.filter((page) => page.pagePptxOpenable).length,
+    pagePptxOpenabilitySkipped: pages.filter((page) => page.pagePptxOpenability?.skipped === true).length,
     manifestContract: pages.filter((page) => page.manifestContractOk).length,
     hashes: pages.filter((page) => page.hashMatched).length,
     completePages: pages.filter((page) => page.complete).length

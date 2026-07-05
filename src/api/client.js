@@ -193,6 +193,9 @@ export const api = {
     const response = await fetch(`/api/workflow-jobs/${id}/artifacts`, { cache: "no-store", signal });
     return readJson(response);
   },
+  async markWorkflowPageReview(id, pageId, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/review/pages/${encodeURIComponent(pageId)}`, body);
+  },
   async correctWorkflowOcrTextHint(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/ocr/text-hints/correct`, body);
   },
@@ -277,8 +280,8 @@ export const api = {
   async buildWorkflowWorkerBriefs(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/editable/worker-briefs`, body);
   },
-  async workflowWorkerRuns(id) {
-    const response = await fetch(`/api/workflow-jobs/${id}/editable/worker-runs`, { cache: "no-store" });
+  async workflowWorkerRuns(id, signal) {
+    const response = await fetch(`/api/workflow-jobs/${id}/editable/worker-runs`, { cache: "no-store", signal });
     return readJson(response);
   },
   async workflowWorkerBatchPreflight(id, body = {}) {
@@ -295,6 +298,9 @@ export const api = {
   },
   async refreshWorkflowEditableRun(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/editable/fresh-run-recovery`, body);
+  },
+  async finalizeWorkflowEditableRun(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/editable/finalize`, body);
   },
   async workflowWorkerTaskAction(id, pageId, action, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/editable/worker-tasks/${pageId}/${action}`, body);

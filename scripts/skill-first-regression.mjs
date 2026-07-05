@@ -42,10 +42,14 @@ async function readProjectFiles() {
     workflowDelivery: await readText("server/workflowDelivery.js"),
     workflowNextAction: await readText("server/workflowNextAction.js"),
     workflowEditable: await readText("server/workflowEditable.js"),
+    workflowManualReview: await readText("server/workflowManualReview.js"),
     workflowCodexPptSlideBatchRunner: await readText("server/workflowCodexPptSlideBatchRunner.js"),
+    workflowVisuals: await readText("server/workflowVisuals.js"),
+    workflowProductVisualReadinessRunner: await readText("server/workflowProductVisualReadinessRunner.js"),
     workflowV1Readiness: await readText("server/workflowV1Readiness.js"),
     workflowWorkerBatchRunner: await readText("server/workflowWorkerBatchRunner.js"),
     workflowFinalEvidence: await readText("server/workflowFinalEvidence.js"),
+    workflowPageEvidence: await readText("server/workflowPageEvidence.js"),
     workflowArtifacts: await readText("server/workflowArtifacts.js"),
     workflowCostEstimate: await readText("server/workflowCostEstimate.js"),
     providers: await readText("server/providers.js"),
@@ -79,6 +83,11 @@ function checkProductGoal(files) {
     mustInclude(files.productGoal, "对话模型");
     mustInclude(files.productGoal, "editable-final.pptx");
     mustInclude(files.productGoal, "acceptance.ready");
+    mustInclude(files.productGoal, "draft-final-pptx");
+    mustInclude(files.productGoal, "editable-sample-2p-draft.pptx");
+    mustInclude(files.productGoal, "final-pptx");
+    mustInclude(files.productGoal, "接口应返回 409");
+    mustInclude(files.productGoal, "默认先跑 2 页");
     mustInclude(files.productGoal, "人工视觉复核");
     mustNotInclude(files.productGoal, "美学设计系统");
     mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
@@ -98,6 +107,10 @@ function checkProductGoalV2(files) {
     mustInclude(files.productGoal, "人工视觉复核");
     mustInclude(files.productGoal, "旧模板");
     mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
+    mustInclude(files.currentAgentPlan, "draft-final-pptx");
+    mustInclude(files.currentAgentPlan, "editable-sample-2p-draft.pptx");
+    mustInclude(files.currentAgentPlan, "默认先跑 2 页");
+    mustInclude(files.currentAgentPlan, "页面重建模型超时");
     mustInclude(files.currentAgentPlan, "当前是 2/15 页小样本");
     mustNotInclude(files.productGoal, "美学设计系统");
     mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
@@ -116,11 +129,19 @@ function checkProductGoalCurrent(files) {
     mustInclude(files.productGoal, "acceptance.ready");
     mustInclude(files.productGoal, "人工视觉复核");
     mustInclude(files.productGoal, "旧模板");
-    mustInclude(files.productGoal, "当前已跑通：2/20 页真实小样本闭环");
-    mustInclude(files.productGoal, "当前交付状态：draft");
+    mustInclude(files.productGoal, "当前已完成：20/20 页 `codex-ppt` 图片型页面和图片型 PPT");
+    mustInclude(files.productGoal, "当前已跑通：2/20 页 `image-to-editable-ppt / editppt` 可编辑重建小样本");
+    mustInclude(files.productGoal, "当前交付状态：blocked，不是完整产品交付");
+    mustInclude(files.productGoal, "剩余 18 页需要继续跑真实 `image-to-editable-ppt / editppt` 页面 worker");
+    mustInclude(files.productGoal, "当前待重建页集：`page_001,page_002,page_005-page_020`");
+    mustInclude(files.productGoal, "当前完整页面证据页：`page_003,page_004`");
+    mustInclude(files.productGoal, "当前 2 页 final 是旧小样本结果，不等于当前已记录页面证据页");
     mustInclude(files.productGoal, "继续生成剩余 18 页");
     mustInclude(files.currentAgentPlan, "PPT Agent 当前状态与后续计划");
-    mustInclude(files.currentAgentPlan, "当前交付状态：draft");
+    mustInclude(files.currentAgentPlan, "当前交付状态：blocked，完整产品交付未完成");
+    mustInclude(files.currentAgentPlan, "当前下一步：继续剩余 18 页 `image-to-editable-ppt / editppt` 页面重建");
+    mustInclude(files.currentAgentPlan, "当前待重建页集：`page_001,page_002,page_005-page_020`");
+    mustInclude(files.currentAgentPlan, "当前完整页面证据页：`page_003,page_004`");
     mustInclude(files.currentAgentPlan, "这不是完整 20 页产品级交付");
     mustNotInclude(files.productGoal, "美学设计系统");
     mustNotInclude(files.productGoal, "旧 PPT 优化重塑");
@@ -146,6 +167,9 @@ function checkFrontendMainFlow(files) {
     mustInclude(files.frontend, "最终对比图");
     mustInclude(files.frontend, "final-compare");
     mustInclude(files.frontend, "WorkflowManualReviewSummary");
+    mustInclude(files.frontend, "本次只记录当前小样本复核");
+    mustInclude(files.frontend, "复核范围");
+    mustInclude(files.frontend, "完整产品交付仍需要跑完全部页面并重新复核");
     mustInclude(files.frontend, "WorkflowFinalVisualQa");
     mustInclude(files.frontend, "可选参考图（非模板）");
     mustInclude(files.styles, "workflow-final-review-callout");
@@ -163,21 +187,107 @@ function checkApiSurface(files) {
     mustInclude(files.apiClient, "workflowDeliveryStatus");
     mustInclude(files.apiClient, "workflowCostEstimate");
     mustInclude(files.apiClient, "latestV1Acceptance");
+    mustInclude(files.serverIndex, "primaryWorkflowState");
+    mustInclude(files.serverIndex, "primaryJobId");
+    mustInclude(files.serverIndex, "recordedEditablePages");
+    mustInclude(files.serverIndex, "workflowRecordedEditablePageCount");
     mustInclude(files.serverIndex, "/api/workflow-jobs/:id/delivery-status");
     mustInclude(files.serverIndex, "/api/workflow-jobs/:id/cost-estimate");
     mustInclude(files.serverIndex, "/api/v1-acceptance/product-visual-sample/prompt-preview");
     mustInclude(files.serverIndex, "/api/v1-acceptance/product-visual-full-deck/approval/approve");
     mustInclude(files.serverIndex, "/api/workflow-jobs/:id/editable/finalize");
+    mustInclude(files.apiClient, "finalizeWorkflowEditableRun");
+    mustInclude(files.frontend, "WorkflowEditableFinalizeAction");
+    mustInclude(files.frontend, "recomposeEditableFinal");
+    mustInclude(files.frontend, "allowPartialSample: isPartial");
+    mustInclude(files.frontend, "不调用外部 API");
+    mustInclude(files.frontend, "重新合成小样本 PPT");
+    mustInclude(files.workflowArtifacts, "draft-final-pptx");
+    mustInclude(files.workflowArtifacts, "assertDraftFinalPptxDownloadable");
+    mustInclude(files.frontend, "小样本草稿");
+    mustInclude(files.styles, ".workflow-editable-finalize-action");
+    mustInclude(files.frontend, "deliveryWorkerBatchSize");
+    mustInclude(files.frontend, "deliverySelectedWorkerPageIds");
+    mustInclude(files.frontend, "batchPlan");
+    mustInclude(files.frontend, "默认本批");
+    mustInclude(files.frontend, "成功页会保留");
+    mustInclude(files.frontend, "latestDeliveryRun");
+    mustInclude(files.frontend, "WorkflowAgentWorkerRunStatus");
+    mustInclude(files.frontend, "当前主验收任务");
+    mustInclude(files.frontend, "非主验收任务");
+    mustInclude(files.frontend, "已完成可编辑页");
+    mustInclude(files.frontend, "当前 final");
+    mustInclude(files.frontend, "workflow-primary-badge");
+    mustInclude(files.frontend, "小样本已复核");
+    mustInclude(files.frontend, "完整复核已记录");
+    mustInclude(files.frontend, "仅小样本草稿");
+    mustInclude(files.frontend, "最终产品级");
+    mustInclude(files.frontend, "本批正在重建");
+    mustInclude(files.frontend, "查看日志");
+    mustInclude(files.frontend, "本次运行");
+    mustInclude(files.frontend, "授权本批 ${selectedBatchImageCalls} 次图片额度");
+    mustInclude(files.styles, ".workflow-agent-dashboard-batch");
+    mustInclude(files.styles, ".workflow-agent-worker-run");
+    mustInclude(files.styles, ".workflow-agent-dashboard-steps strong");
+    mustInclude(files.styles, ".workflow-agent-dashboard-steps small");
+    mustInclude(files.styles, ".workflow-primary-badge");
+    mustInclude(files.frontend, "resetLatestFailurePages");
+    mustInclude(files.frontend, "resetLatestDeliveryFailurePages");
+    mustInclude(files.frontend, "workflowWorkerTaskAction(job.id, pageId, \"reset\"");
+    mustInclude(files.frontend, "recoveryPlan");
+    mustInclude(files.frontend, "成功页保护");
+    mustInclude(files.frontend, "低复杂度模式");
+    mustInclude(files.frontend, "重跑后合成");
+    mustInclude(files.frontend, "重置失败页");
+    mustInclude(files.frontend, "4. 重新合成 final");
+    mustInclude(files.frontend, "不适用：图片 API 过载");
+    mustInclude(files.frontend, "上次失败原因是图片 API 服务过载");
+    mustInclude(files.frontend, "externalImageCallBudget");
+    mustInclude(files.frontend, "confirmExternalImageSpend: true");
+    mustInclude(files.frontend, "本批预计最多使用");
+    mustInclude(files.frontend, "成功页会保留，失败页后续单独重跑");
+    mustInclude(files.styles, ".workflow-editable-failure-flow");
+    mustInclude(files.workflowWorkerBatchRunner, "buildRunnerRecoveryPlan");
+    mustInclude(files.workflowWorkerBatchRunner, "preserveSuccessfulPages");
+    mustInclude(files.workflowWorkerBatchRunner, "lowComplexityRecommended");
+    mustInclude(files.workflowWorkerBatchRunner, "imageProviderRetryRecommended");
+    mustInclude(files.workflowWorkerBatchRunner, "autoFinalize");
+    mustInclude(files.workflowDelivery, "buildBlockedGateEditableBatchPlan");
+    mustInclude(files.workflowDelivery, "defaultBatchPages");
+    mustInclude(files.workflowDelivery, "preserveSuccessfulPages");
+    mustInclude(files.workflowDelivery, "requiresExplicitConfirmation");
+    mustInclude(files.workflowDelivery, "默认先跑 2 页");
+    mustInclude(files.workflowDelivery, "batchPlan");
+    mustInclude(files.workflowDelivery, "externalImageCallsPerPage");
+    mustInclude(files.workflowDelivery, "defaultBatchExternalImageCalls");
+    mustInclude(files.workflowDelivery, "whyBatch");
+    mustInclude(files.workflowDelivery, "pageSelection");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "confirmedExternalImageSpend");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "confirmExternalImageSpend: confirmedExternalImageSpend");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "editImageWithProvider");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "sourceImagePath");
+    mustInclude(files.workflowVisuals, "buildCodexPptStyleLock");
+    mustInclude(files.workflowVisuals, "STYLE LOCK: all slides must share one visual identity.");
+    mustInclude(files.workflowVisuals, "styleReferenceImages");
+    mustInclude(files.workflowVisuals, "referenceImagePaths: styleLock.referenceImages");
+    mustInclude(files.workflowVisuals, "buildDeckStyleConsistencyReport");
+    mustInclude(files.workflowVisuals, "Deck-level pixel consistency QA");
+    mustInclude(files.frontend, "风格一致性");
+    mustInclude(files.workflowProductVisualReadinessRunner, "styleLock");
+    mustInclude(files.workflowProductVisualReadinessRunner, "风格锁");
+    mustInclude(files.providers, "referenceImagePaths");
+    mustInclude(files.providers, "source-page-edit-plus-style-reference");
+    mustInclude(files.frontend, "风格锁");
   });
 }
 
 function checkDeliveryGate(files) {
   return named("Delivery gate blocks unsafe finals", () => {
     mustInclude(files.workflowDelivery, "manualReviewRecorded");
+    mustInclude(files.workflowManualReview, "scope");
+    mustInclude(files.workflowManualReview, "partialSourceCoverage");
+    mustInclude(files.workflowManualReview, "sourcePages");
+    mustInclude(files.workflowManualReview, "finalPages");
     mustInclude(files.workflowDelivery, "powerPointOpenable");
     mustInclude(files.workflowDelivery, "rasterOnlySlides");
     mustInclude(files.workflowDelivery, "rasterBackgroundSlides");
@@ -185,6 +295,10 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowDelivery, "finalEvidenceComplete");
     mustInclude(files.workflowDelivery, "partialSourceCoverage");
     mustInclude(files.workflowDelivery, "fullSourceCoverage");
+    mustInclude(files.workflowDelivery, "isFullDeliveryCoverageCandidate");
+    mustInclude(files.workflowDelivery, "skipPowerPointOpenability");
+    mustInclude(files.workflowPageEvidence, "page-pptx-openability-skipped");
+    mustInclude(files.workflowPageEvidence, "powerpoint-open-check-skipped-until-full-delivery");
     mustInclude(files.workflowDelivery, "不能作为完整产品交付");
     mustInclude(files.workflowDelivery, "final-visual-qa-needs-review");
     mustInclude(files.workflowV1Readiness, "suppressResolvedWorkerBatchFailure");

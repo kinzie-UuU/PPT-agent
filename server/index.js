@@ -29,14 +29,14 @@ import { getProviderConfig, listLlmModels, testImageProvider, testLlmProvider, t
 import { renderWorkflowSource } from "./sourceRenderer.js";
 import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, writeVisualQualityReport } from "./workflowVisuals.js";
 import { correctWorkflowOcrTextHint, runWorkflowOcr } from "./workflowOcr.js";
-import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, testEditableRuntime } from "./workflowEditable.js";
+import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, repairWorkflowEditablePageOpenability, testEditableRuntime } from "./workflowEditable.js";
 import { claimWorkflowEditableWorkerTask, completeWorkflowEditableWorkerTask, heartbeatWorkflowEditableWorkerTask, listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask, syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { buildWorkflowWorkerBriefs, getWorkflowWorkerBriefs } from "./workflowWorkerBriefs.js";
 import { getWorkflowDeliveryStatus } from "./workflowDelivery.js";
 import { listWorkflowArtifactLinks, resolveWorkflowArtifact } from "./workflowArtifacts.js";
 import { buildWorkflowLogBundle } from "./workflowLogBundle.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
-import { approveWorkflowManualReview, approveWorkflowVisualQualityReview, resetWorkflowManualReview } from "./workflowManualReview.js";
+import { approveWorkflowManualReview, approveWorkflowVisualQualityReview, recordWorkflowPageVisualReview, resetWorkflowManualReview } from "./workflowManualReview.js";
 import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
 import { buildSkillFirstOutlineDraft, recordWorkflowCodexPptOutline } from "./workflowOutline.js";
 import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } from "./workflowCodexPptDecisions.js";
@@ -45,7 +45,7 @@ import { getWorkflowCodexPptSlideBatchPreflight, runWorkflowCodexPptSlideBatch }
 import { runProductDoctor } from "./doctor.js";
 import { getFinalVisualQaRetryPreflight, getVisualQualityRetryPreflight, retryFailedWorkflowPages, retryFinalVisualQaWorkflowPages, retryStaleWorkflowPageEvidence, retryWorkflowPage } from "./workflowPageRetry.js";
 import { getWorkflowNextActionPreflight, runWorkflowNextAction } from "./workflowNextAction.js";
-import { getWorkflowEditableWorkerBatchPreflight, getWorkflowEditableWorkerRunLog, getWorkflowPageSpecProviderProbe, listWorkflowEditableWorkerRuns, startWorkflowEditableWorkerBatch } from "./workflowWorkerBatchRunner.js";
+import { cancelWorkflowEditableWorkerRun, getWorkflowEditableWorkerBatchPreflight, getWorkflowEditableWorkerRunLog, getWorkflowPageSpecProviderProbe, listWorkflowEditableWorkerRuns, startWorkflowEditableWorkerBatch } from "./workflowWorkerBatchRunner.js";
 import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
 import { getWorkflowV1Readiness } from "./workflowV1Readiness.js";
 import { getLatestV1AcceptanceReport } from "./workflowV1AcceptanceReport.js";
@@ -71,6 +71,7 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage, limits: { fileSize: 600 * 1024 * 1024 } });
+const DEFAULT_PRIMARY_WORKFLOW_JOB_ID = "workflow_20260629-021146Z_619d82";
 
 await ensureDirs();
 app.use(cors());
@@ -419,9 +420,11 @@ app.delete("/api/style-references/:id", async (req, res, next) => {
 });
 
 app.get("/api/workflow-jobs/meta", (_req, res) => {
+  const primaryJobId = getPrimaryWorkflowJobId();
   res.json({
     ok: true,
     rootDir: workflowRootDir,
+    primaryWorkflowJobId: primaryJobId,
     stages: WORKFLOW_STAGE_ORDER,
     stageStatuses: WORKFLOW_STAGE_STATUS,
     pageStatuses: WORKFLOW_PAGE_STATUS
@@ -433,10 +436,19 @@ app.get("/api/workflow-jobs", async (req, res, next) => {
     const includeInternal = isTruthyQuery(req.query?.includeInternal);
     const includeArchived = isTruthyQuery(req.query?.includeArchived);
     const allJobs = await listWorkflowJobs();
+    const primaryJob = findPrimaryWorkflowJob(allJobs);
     const visibleByInternal = includeInternal ? allJobs : allJobs.filter((job) => !isInternalWorkflowJob(job));
     const jobs = includeArchived ? visibleByInternal : visibleByInternal.filter((job) => !isArchivedWorkflowJob(job));
+    const primaryWorkflow = buildPrimaryWorkflowPayload(primaryJob);
+    const clientJobs = jobs.map((job) => toClientWorkflowJob(job, { primaryWorkflow }));
+    const shouldAddPrimarySummary = primaryWorkflow.found
+      && !includeInternal
+      && (!isArchivedWorkflowJob(primaryJob) || includeArchived)
+      && !clientJobs.some((job) => job.id === primaryWorkflow.id);
+    const publicJobs = shouldAddPrimarySummary ? [buildPrimaryWorkflowListItem(primaryWorkflow), ...clientJobs] : clientJobs;
     res.json({
-      jobs: jobs.map(toClientWorkflowJob),
+      jobs: publicJobs,
+      primaryWorkflow,
       hiddenInternalCount: allJobs.length - visibleByInternal.length,
       hiddenArchivedCount: visibleByInternal.length - jobs.length
     });
@@ -502,7 +514,14 @@ app.get("/api/workflow-jobs/:id", async (req, res, next) => {
       res.status(404).json({ error: "Workflow job not found" });
       return;
     }
-    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+    const allJobs = await listWorkflowJobs();
+    const primaryJob = findPrimaryWorkflowJob(allJobs);
+    if (!canExposeWorkflowJob(job, primaryJob)) {
+      res.status(404).json({ error: "Workflow job not found" });
+      return;
+    }
+    const primaryWorkflow = buildPrimaryWorkflowPayload(primaryJob);
+    res.json(toClientWorkflowJob(job, { includeEvents: true, primaryWorkflow }));
   } catch (error) {
     next(error);
   }
@@ -1498,6 +1517,18 @@ app.post("/api/workflow-jobs/:id/review/reset", async (req, res, next) => {
   }
 });
 
+app.post("/api/workflow-jobs/:id/review/pages/:pageId", async (req, res) => {
+  try {
+    const job = await recordWorkflowPageVisualReview(req.params.id, {
+      ...(req.body || {}),
+      pageId: req.params.pageId
+    });
+    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Page visual review mark failed" });
+  }
+});
+
 app.post("/api/workflow-jobs/:id/visual-quality/review/approve", async (req, res) => {
   try {
     const job = await approveWorkflowVisualQualityReview(req.params.id, req.body || {});
@@ -1566,6 +1597,15 @@ app.post("/api/workflow-jobs/:id/next", async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Workflow next action failed", code: error.code || "" });
+  }
+});
+
+app.get("/api/workflow-jobs/:id/next", async (req, res) => {
+  try {
+    const result = await getWorkflowNextActionPreflight(req.params.id, req.query || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Workflow next action preflight failed", code: error.code || "" });
   }
 });
 
@@ -2174,6 +2214,15 @@ app.post("/api/workflow-jobs/:id/editable/worker-runs", async (req, res) => {
   }
 });
 
+app.post("/api/workflow-jobs/:id/editable/worker-runs/:runId/cancel", async (req, res) => {
+  try {
+    const result = await cancelWorkflowEditableWorkerRun(req.params.id, req.params.runId, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Worker batch cancel failed" });
+  }
+});
+
 app.get("/api/workflow-jobs/:id/editable/worker-briefs", async (req, res) => {
   try {
     const briefs = await getWorkflowWorkerBriefs(req.params.id);
@@ -2242,6 +2291,15 @@ app.post("/api/workflow-jobs/:id/editable/worker-tasks/:pageId/reset", async (re
     res.json(tasks);
   } catch (error) {
     res.status(400).json({ ok: false, error: error.message || "Worker task reset failed" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/editable/worker-tasks/:pageId/repair-openable", async (req, res) => {
+  try {
+    const result = await repairWorkflowEditablePageOpenability(req.params.id, req.params.pageId, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message || "Worker task openable repair failed" });
   }
 });
 
@@ -4671,6 +4729,9 @@ function withExternalImageAuthorization(body = {}, authorization = {}) {
 
 function toClientWorkflowJob(job, options = {}) {
   const includeEvents = Boolean(options.includeEvents);
+  const primaryWorkflow = options.primaryWorkflow || null;
+  const primaryWorkflowId = primaryWorkflow?.id || getPrimaryWorkflowJobId();
+  const isPrimaryWorkflow = Boolean(primaryWorkflowId && job.id === primaryWorkflowId);
   const internal = isInternalWorkflowJob(job);
   const stageValues = Object.values(job.stages || {});
   const pageValues = Array.isArray(job.pages) ? job.pages : [];
@@ -4679,6 +4740,10 @@ function toClientWorkflowJob(job, options = {}) {
   const recordedPages = pageValues.filter((page) => page.status === "recorded").length;
   const lifecycle = job.lifecycle || {};
   const archived = isArchivedWorkflowJob(job);
+  const sourceName = workflowSourceName(job);
+  const sourcePages = workflowSourcePageCount(job);
+  const finalPages = workflowFinalPageCount(job);
+  const recordedEditablePages = workflowRecordedEditablePageCount(job);
   return {
     id: job.id,
     kind: job.kind,
@@ -4693,7 +4758,31 @@ function toClientWorkflowJob(job, options = {}) {
     rootDir: job.rootDir,
     dirs: job.dirs,
     input: job.input || {},
+    sourceName,
+    sourcePages,
+    finalPages,
+    recordedEditablePages,
+    isSample: Boolean(sourcePages && finalPages && finalPages < sourcePages),
+    primaryWorkflowState: {
+      isPrimary: isPrimaryWorkflow,
+      primaryJobId: primaryWorkflowId,
+      primaryFound: primaryWorkflow ? primaryWorkflow.found !== false : true,
+      sourceName: primaryWorkflow?.sourceName || "",
+      sourcePages: primaryWorkflow?.sourcePages || 0,
+      finalPages: primaryWorkflow?.finalPages || 0,
+      recordedEditablePages: primaryWorkflow?.recordedEditablePages || 0,
+      isSample: Boolean(primaryWorkflow?.isSample)
+    },
+    sourceMeta: job.sourceMeta || job.artifacts?.sourceMeta || null,
     artifacts: job.artifacts || {},
+    primaryWorkflow: primaryWorkflow?.id === job.id ? {
+      isPrimary: true,
+      sourceName: primaryWorkflow.sourceName || "",
+      sourcePages: primaryWorkflow.sourcePages || 0,
+      finalPages: primaryWorkflow.finalPages || 0,
+      recordedEditablePages: primaryWorkflow.recordedEditablePages || 0,
+      isSample: Boolean(primaryWorkflow.isSample)
+    } : null,
     constraints: job.constraints || {},
     stages: job.stages || {},
     stageSummary: {
@@ -4714,6 +4803,174 @@ function toClientWorkflowJob(job, options = {}) {
     eventCount: Array.isArray(job.events) ? job.events.length : 0,
     events: includeEvents ? job.events || [] : []
   };
+}
+
+function getPrimaryWorkflowJobId() {
+  const configured = String(globalThis.process?.env?.PPT_AGENT_PRIMARY_JOB_ID || "").trim();
+  return configured || DEFAULT_PRIMARY_WORKFLOW_JOB_ID;
+}
+
+function findPrimaryWorkflowJob(jobs = []) {
+  const primaryId = getPrimaryWorkflowJobId();
+  return jobs.find((job) => job?.id === primaryId) || null;
+}
+
+function canExposeWorkflowJob(job = null, primaryJob = null) {
+  if (!job?.id) return false;
+  if (!isInternalWorkflowJob(job)) return true;
+  return Boolean(primaryJob?.id && job.id === primaryJob.id);
+}
+
+function buildPrimaryWorkflowPayload(job = null) {
+  if (!job?.id) {
+    return {
+      id: getPrimaryWorkflowJobId(),
+      found: false,
+      sourceName: "",
+      sourcePages: 0,
+      finalPages: 0,
+      recordedEditablePages: 0,
+      deliveryLevel: "unknown",
+      deliveryHint: "主验收任务未找到。",
+      isSample: false,
+      job: null
+    };
+  }
+  const sourcePages = workflowSourcePageCount(job);
+  const finalPages = workflowFinalPageCount(job);
+  const recordedEditablePages = workflowRecordedEditablePageCount(job);
+  const deliveryLevel = buildPrimaryWorkflowDeliveryLevel({ sourcePages, finalPages, recordedEditablePages });
+  const payload = {
+    id: job.id,
+    found: true,
+    sourceName: workflowSourceName(job),
+    sourcePages,
+    finalPages,
+    recordedEditablePages,
+    deliveryLevel,
+    deliveryHint: primaryWorkflowDeliveryHint(deliveryLevel),
+    isSample: Boolean(sourcePages && finalPages && finalPages < sourcePages),
+    job: null
+  };
+  return payload;
+}
+
+function buildPrimaryWorkflowListItem(primaryWorkflow = {}) {
+  return {
+    id: primaryWorkflow.id,
+    kind: "ppt-rebuild-workflow",
+    internal: true,
+    archived: false,
+    status: "primary_summary",
+    currentStage: "primary_summary",
+    stageStatus: "",
+    createdAt: "",
+    updatedAt: "",
+    input: { sourceOriginalName: primaryWorkflow.sourceName || "" },
+    sourceName: primaryWorkflow.sourceName || "",
+    sourcePages: primaryWorkflow.sourcePages || 0,
+    finalPages: primaryWorkflow.finalPages || 0,
+    recordedEditablePages: primaryWorkflow.recordedEditablePages || 0,
+    deliveryLevel: primaryWorkflow.deliveryLevel || "",
+    deliveryHint: primaryWorkflow.deliveryHint || "",
+    isSample: Boolean(primaryWorkflow.isSample),
+    primaryWorkflowState: {
+      isPrimary: true,
+      primaryJobId: primaryWorkflow.id,
+      primaryFound: primaryWorkflow.found !== false,
+      sourceName: primaryWorkflow.sourceName || "",
+      sourcePages: primaryWorkflow.sourcePages || 0,
+      finalPages: primaryWorkflow.finalPages || 0,
+      recordedEditablePages: primaryWorkflow.recordedEditablePages || 0,
+      deliveryLevel: primaryWorkflow.deliveryLevel || "",
+      deliveryHint: primaryWorkflow.deliveryHint || "",
+      isSample: Boolean(primaryWorkflow.isSample)
+    },
+    sourceMeta: primaryWorkflow.sourcePages ? { pageCount: primaryWorkflow.sourcePages } : null,
+    artifacts: {},
+    primaryWorkflow: {
+      isPrimary: true,
+      sourceName: primaryWorkflow.sourceName || "",
+      sourcePages: primaryWorkflow.sourcePages || 0,
+      finalPages: primaryWorkflow.finalPages || 0,
+      recordedEditablePages: primaryWorkflow.recordedEditablePages || 0,
+      deliveryLevel: primaryWorkflow.deliveryLevel || "",
+      deliveryHint: primaryWorkflow.deliveryHint || "",
+      isSample: Boolean(primaryWorkflow.isSample)
+    },
+    constraints: {},
+    stages: {},
+    stageSummary: { total: 0, complete: 0, running: 0, failed: 0, pending: 0 },
+    pages: [],
+    pageSummary: { total: 0, recorded: 0, running: 0, failed: 0 },
+    errors: [],
+    eventCount: 0,
+    events: []
+  };
+}
+
+function workflowSourceName(job = {}) {
+  return cleanWorkflowString(
+    job.input?.sourceOriginalName
+    || job.artifacts?.source?.originalName
+    || job.artifacts?.codexPptOutline?.title
+    || job.artifacts?.codexPptStyle?.title
+    || ""
+  );
+}
+
+function buildPrimaryWorkflowDeliveryLevel({ sourcePages = 0, finalPages = 0, recordedEditablePages = 0 } = {}) {
+  if (!sourcePages) return "unknown";
+  if (!finalPages) return recordedEditablePages ? "editable-pages-recorded" : "not-finalized";
+  if (finalPages < sourcePages) return "sample-draft";
+  return "needs-delivery-review";
+}
+
+function primaryWorkflowDeliveryHint(level = "") {
+  const hints = {
+    unknown: "源文件页数未知，请先检查工作流。",
+    "not-finalized": "还没有生成最终可编辑 PPT。",
+    "editable-pages-recorded": "页面已重建，等待合成最终 PPT。",
+    "sample-draft": "已生成小样本 final，完整交付还没覆盖全部页面。",
+    "needs-delivery-review": "20/20 已合成，但还需要交付门禁和人工视觉复核。"
+  };
+  return hints[level] || "请打开交付复核查看当前状态。";
+}
+
+function cleanWorkflowString(value = "") {
+  return String(value || "").trim();
+}
+
+function workflowSourcePageCount(job = {}) {
+  return numberOrZero(job.sourceMeta?.pageCount)
+    || numberOrZero(job.artifacts?.sourceMeta?.pageCount)
+    || countArray(job.artifacts?.renderedPages)
+    || countArray(job.artifacts?.visualImages);
+}
+
+function workflowFinalPageCount(job = {}) {
+  return numberOrZero(job.artifacts?.editableFinal?.summary?.page_count)
+    || numberOrZero(job.artifacts?.editableFinal?.pptxEditability?.slideCount)
+    || numberOrZero(job.finalValidation?.slides);
+}
+
+function workflowRecordedEditablePageCount(job = {}) {
+  const tasks = Array.isArray(job.artifacts?.editableWorkerTasks) ? job.artifacts.editableWorkerTasks : [];
+  if (tasks.length) {
+    return tasks.filter((task) => task?.status === "recorded").length;
+  }
+  const editablePages = Array.isArray(job.artifacts?.editablePages) ? job.artifacts.editablePages : [];
+  if (editablePages.length) return editablePages.length;
+  return workflowFinalPageCount(job);
+}
+
+function countArray(value) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function numberOrZero(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
 }
 
 function isTruthyQuery(value) {

@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
+import zlib from "zlib";
 import { readWorkflowJob } from "./workflowJobs.js";
 import { inspectPowerPointOpenability } from "./pptxEditability.js";
 
@@ -166,6 +167,7 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
     const contactSheetFile = statFile(contactSheetPath);
     const targetDimensions = readPngDimensions(targetPath);
     const previewDimensions = readPngDimensions(previewPath);
+    const assetQuality = inspectPageGeneratedAssetQuality(runDir, pageId);
     const previewToTargetBytes = targetFile.size && previewFile.size
       ? Number((previewFile.size / targetFile.size).toFixed(3))
       : 0;
@@ -181,6 +183,7 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
       const previewRatio = previewDimensions.width / Math.max(1, previewDimensions.height);
       if (Math.abs(targetRatio - previewRatio) > 0.03) issues.push("preview-aspect-ratio-mismatch");
     }
+    if (assetQuality.checkerboardAssets.length) issues.push("asset-checkerboard-background");
     return {
       pageId,
       targetPath: target.path || "",
@@ -191,6 +194,7 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
       previewToTargetBytes,
       targetDimensions,
       previewDimensions,
+      assetQuality,
       contactSheetExists: contactSheetFile.exists,
       issues
     };
@@ -201,6 +205,9 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
   if (pageIssueIds.some((issue) => /target-visual-missing|editable-preview-missing|preview-too-small-simplified|preview-aspect-ratio-mismatch/.test(issue))) {
     blockingIssues.push("final-visual-qa-failed");
   }
+  if (pageIssueIds.some((issue) => /asset-checkerboard-background/.test(issue))) {
+    blockingIssues.push("final-visual-asset-qa-failed");
+  }
   return {
     status: blockingIssues.length ? "failed" : pageIds.length ? "pass" : "not_applicable",
     manualReviewCurrent,
@@ -210,6 +217,211 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
     pageIssues: pageIssueIds,
     pages
   };
+}
+
+function inspectPageGeneratedAssetQuality(runDir = "", pageId = "") {
+  const pageDir = runDir && pageId ? path.join(runDir, "pages", pageId) : "";
+  const manifestFiles = collectManifestImageFiles(pageDir);
+  const files = manifestFiles.length ? manifestFiles : collectPageAssetFiles(pageDir);
+  const checkerboardAssets = [];
+  for (const filePath of [...new Set(files)]) {
+    const result = inspectPngCheckerboard(filePath);
+    if (result.checkerboardLike) {
+      checkerboardAssets.push({
+        path: path.relative(pageDir, filePath).replace(/\\/g, "/"),
+        grayRatio: result.grayRatio,
+        alternationRatio: result.alternationRatio,
+        score: result.score
+      });
+    }
+  }
+  return {
+    checkedAssets: files.length,
+    checkerboardAssets
+  };
+}
+
+function collectManifestImageFiles(pageDir = "") {
+  const manifestPath = path.join(pageDir, "manifest.json");
+  if (!pageDir || !fsSync.existsSync(manifestPath)) return [];
+  let manifest = null;
+  try {
+    manifest = JSON.parse(fsSync.readFileSync(manifestPath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const image of Array.isArray(manifest?.images) ? manifest.images : []) {
+    for (const key of ["path", "src", "asset", "asset_path", "image", "source"]) {
+      const filePath = resolvePageRelativeFile(pageDir, image?.[key]);
+      if (filePath && /\.png$/i.test(filePath) && fsSync.existsSync(filePath)) files.push(filePath);
+    }
+  }
+  return [...new Set(files)];
+}
+
+function collectPageAssetFiles(pageDir = "") {
+  const assetDirs = [
+    path.join(pageDir, "assets", "generated"),
+    path.join(pageDir, "assets")
+  ];
+  const files = [];
+  for (const dir of assetDirs) {
+    if (!dir || !fsSync.existsSync(dir) || !fsSync.statSync(dir).isDirectory()) continue;
+    for (const entry of fsSync.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/\.png$/i.test(entry.name)) continue;
+      files.push(path.join(dir, entry.name));
+    }
+  }
+  return files;
+}
+
+function resolvePageRelativeFile(pageDir = "", value = "") {
+  const raw = String(value || "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+  if (!raw || /^https?:\/\//i.test(raw) || path.isAbsolute(raw) || raw.split("/").includes("..")) return "";
+  const resolved = path.resolve(pageDir, raw);
+  return isInsidePath(resolved, path.resolve(pageDir)) ? resolved : "";
+}
+
+function inspectPngCheckerboard(filePath = "") {
+  const pixels = readPngPixels(filePath);
+  if (!pixels) return { checkerboardLike: false, grayRatio: 0, alternationRatio: 0, score: 0 };
+  const maxWidth = 300;
+  const maxHeight = 180;
+  const stepX = Math.max(1, Math.floor(pixels.width / maxWidth));
+  const stepY = Math.max(1, Math.floor(pixels.height / maxHeight));
+  const sampledWidth = Math.ceil(pixels.width / stepX);
+  const sampledHeight = Math.ceil(pixels.height / stepY);
+  const gray = [];
+  const bright = [];
+  let grayCount = 0;
+  let total = 0;
+  for (let y = 0; y < pixels.height; y += stepY) {
+    const rowGray = [];
+    const rowBright = [];
+    for (let x = 0; x < pixels.width; x += stepX) {
+      const pixel = getPixel(pixels, x, y);
+      const isGray = isOpaqueGrayWhite(pixel);
+      rowGray.push(isGray);
+      rowBright.push(pixel.r);
+      if (isGray) grayCount += 1;
+      total += 1;
+    }
+    gray.push(rowGray);
+    bright.push(rowBright);
+  }
+  let grayAdjacencies = 0;
+  let alternating = 0;
+  for (let y = 0; y < sampledHeight; y += 1) {
+    for (let x = 0; x < sampledWidth; x += 1) {
+      if (x + 1 < sampledWidth && gray[y]?.[x] && gray[y]?.[x + 1]) {
+        grayAdjacencies += 1;
+        if (Math.abs((bright[y]?.[x] || 0) - (bright[y]?.[x + 1] || 0)) > 12) alternating += 1;
+      }
+      if (y + 1 < sampledHeight && gray[y]?.[x] && gray[y + 1]?.[x]) {
+        grayAdjacencies += 1;
+        if (Math.abs((bright[y]?.[x] || 0) - (bright[y + 1]?.[x] || 0)) > 12) alternating += 1;
+      }
+    }
+  }
+  const grayRatio = total ? grayCount / total : 0;
+  const alternationRatio = grayAdjacencies ? alternating / grayAdjacencies : 0;
+  const score = grayRatio * alternationRatio;
+  return {
+    checkerboardLike: grayRatio >= 0.4 && alternationRatio >= 0.1 && score >= 0.05,
+    grayRatio: Number(grayRatio.toFixed(3)),
+    alternationRatio: Number(alternationRatio.toFixed(3)),
+    score: Number(score.toFixed(3))
+  };
+}
+
+function readPngPixels(filePath = "") {
+  if (!filePath || !fsSync.existsSync(filePath)) return null;
+  try {
+    const buffer = fsSync.readFileSync(filePath);
+    if (buffer.length < 24 || buffer[0] !== 0x89 || buffer.toString("ascii", 1, 4) !== "PNG") return null;
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+    const bitDepth = buffer[24];
+    const colorType = buffer[25];
+    if (bitDepth !== 8 || ![2, 6].includes(colorType) || !width || !height) return null;
+    const bytesPerPixel = colorType === 6 ? 4 : 3;
+    const stride = width * bytesPerPixel;
+    const idat = [];
+    let offset = 8;
+    while (offset + 12 <= buffer.length) {
+      const length = buffer.readUInt32BE(offset);
+      const type = buffer.toString("ascii", offset + 4, offset + 8);
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      if (dataEnd > buffer.length) return null;
+      if (type === "IDAT") idat.push(buffer.subarray(dataStart, dataEnd));
+      if (type === "IEND") break;
+      offset = dataEnd + 4;
+    }
+    const inflated = zlib.inflateSync(Buffer.concat(idat));
+    const pixels = Buffer.alloc(width * height * 4);
+    let src = 0;
+    let prev = Buffer.alloc(stride);
+    for (let y = 0; y < height; y += 1) {
+      const filter = inflated[src];
+      src += 1;
+      const row = Buffer.from(inflated.subarray(src, src + stride));
+      src += stride;
+      unfilterPngRow(row, prev, filter, bytesPerPixel);
+      for (let x = 0; x < width; x += 1) {
+        const inOffset = x * bytesPerPixel;
+        const outOffset = (y * width + x) * 4;
+        pixels[outOffset] = row[inOffset];
+        pixels[outOffset + 1] = row[inOffset + 1];
+        pixels[outOffset + 2] = row[inOffset + 2];
+        pixels[outOffset + 3] = bytesPerPixel === 4 ? row[inOffset + 3] : 255;
+      }
+      prev = row;
+    }
+    return { width, height, data: pixels };
+  } catch {
+    return null;
+  }
+}
+
+function unfilterPngRow(row, prev, filter, bytesPerPixel) {
+  for (let i = 0; i < row.length; i += 1) {
+    const left = i >= bytesPerPixel ? row[i - bytesPerPixel] : 0;
+    const up = prev[i] || 0;
+    const upLeft = i >= bytesPerPixel ? prev[i - bytesPerPixel] || 0 : 0;
+    if (filter === 1) row[i] = (row[i] + left) & 0xff;
+    else if (filter === 2) row[i] = (row[i] + up) & 0xff;
+    else if (filter === 3) row[i] = (row[i] + Math.floor((left + up) / 2)) & 0xff;
+    else if (filter === 4) row[i] = (row[i] + paethPredictor(left, up, upLeft)) & 0xff;
+  }
+}
+
+function paethPredictor(left, up, upLeft) {
+  const p = left + up - upLeft;
+  const pa = Math.abs(p - left);
+  const pb = Math.abs(p - up);
+  const pc = Math.abs(p - upLeft);
+  if (pa <= pb && pa <= pc) return left;
+  return pb <= pc ? up : upLeft;
+}
+
+function getPixel(pixels, x, y) {
+  const offset = (y * pixels.width + x) * 4;
+  return {
+    r: pixels.data[offset],
+    g: pixels.data[offset + 1],
+    b: pixels.data[offset + 2],
+    a: pixels.data[offset + 3]
+  };
+}
+
+function isOpaqueGrayWhite(pixel = {}) {
+  return pixel.a > 220
+    && Math.abs(pixel.r - pixel.g) < 4
+    && Math.abs(pixel.g - pixel.b) < 4
+    && pixel.r >= 175
+    && pixel.r <= 255;
 }
 
 function collectVisualQaPageIds(visualImages = [], pageJobs = {}) {
@@ -318,6 +530,7 @@ function collectMissingForegroundAssets(manifest = {}) {
 
 function requiresForegroundAsset(item = {}) {
   const text = JSON.stringify(item);
+  if (/no foreground asset separation required/i.test(text)) return false;
   if (/^shape$/i.test(String(item.type || "")) && STRUCTURAL_TERMS.test(text)) return false;
   if (!FOREGROUND_TERMS.test(text) && !FOREGROUND_ASSET_TERMS.test(text)) return false;
   if (STRUCTURAL_TERMS.test(text) && !FOREGROUND_TERMS.test(text)) return false;

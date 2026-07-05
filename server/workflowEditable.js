@@ -440,15 +440,16 @@ export async function buildWorkflowEditableWorkerPrompts(jobId, options = {}) {
       stderr: result.stderr
     });
   }
+  const promptArtifacts = prompts.map((prompt) => artifactRecord("editable_worker_prompt", prompt.promptFile, {
+    pageId: prompt.pageId,
+    pageDir: prompt.pageDir,
+    runDir,
+    executionMode: prompt.executionMode,
+    dispatchCommandTemplate: prompt.dispatchCommandTemplate
+  }));
   job.artifacts = {
     ...(job.artifacts || {}),
-    editableWorkerPrompts: prompts.map((prompt) => artifactRecord("editable_worker_prompt", prompt.promptFile, {
-      pageId: prompt.pageId,
-      pageDir: prompt.pageDir,
-      runDir,
-      executionMode: prompt.executionMode,
-      dispatchCommandTemplate: prompt.dispatchCommandTemplate
-    })),
+    editableWorkerPrompts: mergePromptArtifacts(job.artifacts?.editableWorkerPrompts, promptArtifacts),
     editableNext: {
       kind: "editable_next",
       runDir,
@@ -467,7 +468,7 @@ export async function listWorkflowEditableWorkerPrompts(jobId, options = {}) {
   const status = await getEditableStatusForRun(runDir, runtime).catch((error) => ({ error: error.message || "status failed" }));
   const next = await getEditableNextForRun(runDir, runtime).catch((error) => ({ error: error.message || "next failed" }));
   const artifactPrompts = Array.isArray(job.artifacts?.editableWorkerPrompts) ? job.artifacts.editableWorkerPrompts : [];
-  const promptRecords = artifactPrompts.length ? artifactPrompts : await discoverPromptFiles(runDir);
+  const promptRecords = mergePromptArtifacts(await discoverPromptFiles(runDir), artifactPrompts);
   const prompts = [];
   const maxContentLength = clampInteger(options.maxContentLength || 60000, 1000, 200000, 60000);
   for (const prompt of promptRecords) {
@@ -497,6 +498,22 @@ export async function listWorkflowEditableWorkerPrompts(jobId, options = {}) {
     next,
     prompts
   };
+}
+
+function mergePromptArtifacts(existing = [], additions = []) {
+  const byPage = new Map();
+  for (const prompt of [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(additions) ? additions : [])]) {
+    const pageId = normalizePageId(prompt?.pageId || path.basename(path.dirname(prompt?.path || prompt?.promptFile || "")));
+    const promptPath = prompt?.path || prompt?.promptFile || "";
+    if (!pageId || !promptPath) continue;
+    byPage.set(pageId, {
+      ...prompt,
+      pageId,
+      path: promptPath,
+      promptFile: promptPath
+    });
+  }
+  return [...byPage.values()].sort((a, b) => a.pageId.localeCompare(b.pageId));
 }
 
 export async function dispatchWorkflowEditablePage(jobId, options = {}) {
@@ -865,6 +882,86 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     powerPointOpenable: powerPointOpenability.openable
   });
   return saveWorkflowJob(job);
+}
+
+export async function repairWorkflowEditablePageOpenability(jobId, pageId, options = {}) {
+  let job = await readWorkflowJob(jobId);
+  const runtime = getEditableRuntimeConfig(options);
+  const runDir = getPreparedRunDir(job);
+  const normalizedPageId = normalizePageId(pageId || options.pageId || options.page || "");
+  if (!normalizedPageId) throw new Error("pageId is required");
+  const pageDir = path.join(runDir, "pages", normalizedPageId);
+  const manifestPath = path.join(pageDir, "manifest.json");
+  const pageOut = path.join(pageDir, "page.pptx");
+  const scriptPath = path.join(process.cwd(), "scripts", "openable-manifest-pptx.mjs");
+  if (!fsSync.existsSync(scriptPath)) throw new Error(`Openable manifest writer not found: ${scriptPath}`);
+  if (!fsSync.existsSync(manifestPath)) throw new Error(`Page manifest not found: ${manifestPath}`);
+  const before = fsSync.existsSync(pageOut)
+    ? await inspectPowerPointOpenability(pageOut).catch((error) => ({
+        version: 1,
+        source: "powerpoint-com-open",
+        available: process.platform === "win32",
+        openable: false,
+        slideCount: 0,
+        warnings: ["powerpoint-open-check-failed"],
+        error: error.message || "PowerPoint open check failed"
+      }))
+    : null;
+  const result = await execFileAsync(process.execPath, [scriptPath, "--manifest", manifestPath, "--out", pageOut], {
+    cwd: process.cwd(),
+    timeout: runtime.timeoutMs || DEFAULT_TIMEOUT_MS,
+    windowsHide: true,
+    encoding: "utf8"
+  });
+  const hashRefresh = await refreshOpenableRepairPageJobHashes(runDir, path.join(runDir, "page_jobs.json"), [{
+    pageId: normalizedPageId,
+    manifestPath,
+    pageOut,
+    stdout: String(result.stdout || "").slice(-2000),
+    stderr: String(result.stderr || "").slice(-2000)
+  }]);
+  const after = await inspectPowerPointOpenability(pageOut).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-open",
+    available: process.platform === "win32",
+    openable: false,
+    slideCount: 0,
+    warnings: ["powerpoint-open-check-failed"],
+    error: error.message || "PowerPoint open check failed"
+  }));
+  job = await readWorkflowJob(jobId);
+  const repairRecord = {
+    kind: "editable_page_openable_repair",
+    pageId: normalizedPageId,
+    pagePptx: pageOut,
+    manifestPath,
+    before,
+    after,
+    hashRefresh,
+    stdout: String(result.stdout || "").slice(-2000),
+    stderr: String(result.stderr || "").slice(-2000),
+    repairedAt: new Date().toISOString()
+  };
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    editablePageOpenableRepairs: [
+      ...(Array.isArray(job.artifacts?.editablePageOpenableRepairs) ? job.artifacts.editablePageOpenableRepairs : []),
+      repairRecord
+    ].slice(-100)
+  };
+  job.events = appendEvent(job.events, "editable.page_openable_repaired", `Repaired page PPTX openability ${normalizedPageId}`, {
+    pageId: normalizedPageId,
+    openable: after.openable,
+    hashRefresh
+  });
+  const saved = await saveWorkflowJob(job);
+  return {
+    ok: true,
+    jobId,
+    pageId: normalizedPageId,
+    repair: repairRecord,
+    job: saved
+  };
 }
 
 async function repairEditablePptxWithOpenableManifestWriter(runDir, finalPath, runtime = {}) {

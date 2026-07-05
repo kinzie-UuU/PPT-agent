@@ -46,11 +46,17 @@ async function main() {
   const rebuildSpec = path.resolve(args.spec || args["rebuild-spec"] || path.join(pageDir, "page-rebuild-spec.json"));
   const skipVisualAssets = Boolean(args["skip-visual-assets"]);
   const requireVisualAssets = Boolean(args["require-visual-assets"]);
+  const sourceFidelityRecovery = isSourceFidelityRecovery(pageDir, rebuildSpec);
   guardRecordedPageOverwrite(pageDir, args);
 
   const ran = [];
-  if (!skipVisualAssets && fsSync.existsSync(visualSpec)) {
-    if (visualAssetOutputsExist(pageDir, visualSpec)) {
+  if (sourceFidelityRecovery) {
+    ran.push("visual-assets:skipped-source-fidelity-recovery");
+  } else if (!skipVisualAssets && fsSync.existsSync(visualSpec)) {
+    const visualAssetDecision = getVisualAssetDecision(pageDir, visualSpec, rebuildSpec);
+    if (visualAssetDecision.skip) {
+      ran.push(visualAssetDecision.reason);
+    } else if (visualAssetOutputsExist(pageDir, visualSpec)) {
       ran.push("visual-assets:skipped-existing");
     } else {
       await runNodeScript("visual-asset-helper.mjs", ["--page-dir", pageDir, "--spec", visualSpec]);
@@ -64,7 +70,16 @@ async function main() {
     throw new Error(`Page rebuild spec not found: ${rebuildSpec}. A real page worker must author page-rebuild-spec.json before this pipeline can assemble artifacts.`);
   }
 
-  await runNodeScript("page-rebuild-assembler.mjs", ["--page-dir", pageDir, "--spec", rebuildSpec]);
+  if (sourceFidelityRecovery) {
+    ran.push("recover-complex-spec:skipped-source-fidelity-recovery");
+  } else {
+    await runNodeScript("recover-complex-page-spec.mjs", ["--page-dir", pageDir, "--spec", rebuildSpec]);
+    ran.push("recover-complex-spec");
+  }
+
+  const assemblerArgs = ["--page-dir", pageDir, "--spec", rebuildSpec];
+  if (args["allow-recorded-overwrite"] || args.allowRecordedOverwrite) assemblerArgs.push("--allow-recorded-overwrite");
+  await runNodeScript("page-rebuild-assembler.mjs", assemblerArgs);
   ran.push("assemble-page");
   verifyOutputs(pageDir);
   verifyPageOutputContract(pageDir);
@@ -77,6 +92,45 @@ async function main() {
     ran,
     outputs: REQUIRED_OUTPUTS.map((name) => path.join(pageDir, name))
   }, null, 2));
+}
+
+function isSourceFidelityRecovery(pageDir = "", specPath = path.join(pageDir, "page-rebuild-spec.json")) {
+  const marker = readJsonIfExists(path.join(pageDir, "page-spec-fallback.json"));
+  const pageRequest = readJsonIfExists(path.join(pageDir, "page_request.json"));
+  const pageId = normalizeId(pageRequest?.page_id || path.basename(pageDir));
+  const expectedJobId = String(process.env.PPT_WORKFLOW_JOB_ID || deriveWorkflowJobId(pageDir) || "").trim();
+  const expectedRunId = String(pageRequest?.run_id || "").trim();
+  return envTruthy(process.env.PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND)
+    && marker?.schemaVersion === 1
+    && marker?.createdBy === "model-page-worker-pipeline"
+    && marker?.fallback === "source-fidelity-background-recovery"
+    && marker?.reason === "visual-asset-budget-exhausted"
+    && normalizeId(marker?.pageId || "") === pageId
+    && normalizeId(marker?.pageDirName || "") === normalizeId(path.basename(pageDir))
+    && String(marker?.specFile || "") === path.basename(specPath)
+    && expectedJobId
+    && String(marker?.jobId || "") === expectedJobId
+    && expectedRunId
+    && String(marker?.runId || "") === expectedRunId;
+}
+
+function envTruthy(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
+}
+
+function readJsonIfExists(filePath = "") {
+  try {
+    if (!filePath || !fsSync.existsSync(filePath)) return null;
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
+}
+
+function deriveWorkflowJobId(pageDir = "") {
+  const normalized = String(pageDir || "").replace(/\\/g, "/");
+  const match = normalized.match(/ppt-tool-editable-runs\/([^/]+)\/[^/]+\/pages\/[^/]+$/i);
+  return match ? match[1] : "";
 }
 
 function guardRecordedPageOverwrite(pageDir, args = {}) {
@@ -197,6 +251,45 @@ function readVisualAssetJobs(visualSpec) {
   } catch {
     return [];
   }
+}
+
+function getVisualAssetDecision(pageDir, visualSpec, rebuildSpec) {
+  if (!fsSync.existsSync(rebuildSpec)) return { skip: false, reason: "" };
+  const spec = readJsonSync(rebuildSpec);
+  const needed = Array.isArray(spec?.needed_visual_asset_jobs) ? spec.needed_visual_asset_jobs : [];
+  if (needed.length) return { skip: false, reason: "" };
+
+  const missing = collectReferencedImagePaths(spec)
+    .map((value) => pageRelativePath(pageDir, value))
+    .filter((filePath) => !fsSync.existsSync(filePath));
+  if (missing.length) return { skip: false, reason: "" };
+
+  const jobs = readVisualAssetJobs(visualSpec);
+  if (!jobs.length) return { skip: true, reason: "visual-assets:skipped-empty" };
+  if (hasUnresolvedVisualAssetNeed(spec)) return { skip: false, reason: "" };
+  return { skip: true, reason: "visual-assets:skipped-unreferenced" };
+}
+
+function hasUnresolvedVisualAssetNeed(spec = {}) {
+  const text = JSON.stringify({
+    visual_inventory: spec.visual_inventory || [],
+    asset_provenance: spec.asset_provenance || [],
+    background_strategy: spec.background_strategy || null,
+    notes: spec.notes || "",
+    warnings: spec.warnings || []
+  });
+  return /requires_separation|requires asset separation|asset separation|needed_visual_asset|product|photo|package|packaging|logo|brand|foreground|omitted unavailable generated image assets|包装|产品|标识|前景/i.test(text);
+}
+
+function collectReferencedImagePaths(spec) {
+  const values = [];
+  for (const item of Array.isArray(spec?.images) ? spec.images : []) {
+    for (const key of ["src", "path", "asset", "asset_path", "image", "source"]) {
+      const value = item?.[key];
+      if (typeof value === "string" && value.trim()) values.push(value.trim());
+    }
+  }
+  return [...new Set(values.filter((value) => !/^https?:\/\//i.test(value)))];
 }
 
 function pageRelativePath(pageDir, value) {

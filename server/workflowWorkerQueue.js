@@ -46,8 +46,14 @@ export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
     const existing = existingByPage.get(prompt.pageId) || {};
     const dispatch = lastByPage(dispatches, prompt.pageId);
     const record = lastByPage(records, prompt.pageId);
-    const recordCurrent = record && !isResetAfterRecord(existing, record);
-    const status = recordCurrent ? "recorded" : existing.status || (dispatch ? "running" : "ready");
+    const evidence = inspectPageEvidence(prompt.pageDir);
+    const generated = Boolean(evidence.pagePptxExists || evidence.previewExists || evidence.manifestExists || evidence.pageResultExists);
+    const recordCurrent = record && evidence.validationPassed && evidence.outputContractOk && !isResetAfterRecord(existing, record);
+    let existingStatus = existing.status === "recorded" && !recordCurrent ? "" : existing.status;
+    if (["claimed", "running"].includes(existingStatus) && !generated && !isRecentTaskActivity(existing)) {
+      existingStatus = "";
+    }
+    const status = recordCurrent ? "recorded" : existingStatus || "ready";
     return normalizeTask({
       ...existing,
       pageId: prompt.pageId,
@@ -55,8 +61,8 @@ export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
       pageDir: prompt.pageDir,
       relativePath: prompt.relativePath,
       status,
-      agentId: existing.agentId || dispatch?.agentId || "",
-      dispatchAt: existing.dispatchAt || dispatch?.createdAt || "",
+      agentId: recordCurrent ? existing.agentId || dispatch?.agentId || "" : existing.agentId || "",
+      dispatchAt: recordCurrent ? existing.dispatchAt || dispatch?.createdAt || "" : existing.dispatchAt || "",
       recordedAt: recordCurrent ? existing.recordedAt || record?.createdAt || "" : existing.recordedAt || "",
       updatedAt: now,
       createdAt: existing.createdAt || now
@@ -165,6 +171,13 @@ export async function completeWorkflowEditableWorkerTask(jobId, pageId, options 
   if (!pageTask) throw new Error(`Worker task not found: ${pageId}`);
   if (pageTask.agentId && pageTask.agentId !== agentId) throw new Error(`Task belongs to another agent: ${pageTask.agentId}`);
   try {
+    const evidence = inspectPageEvidence(pageTask.pageDir);
+    if (evidence.validationPassed !== true || evidence.outputContractOk !== true) {
+      throw new Error(`Page evidence is not recordable: ${[
+        evidence.validationError,
+        ...(evidence.outputContractIssues || [])
+      ].filter(Boolean).slice(0, 5).join(" | ") || "validation or output contract failed"}`);
+    }
     const recorded = await recordWorkflowEditablePage(jobId, {
       pageId: pageTask.pageId,
       agentId,
@@ -175,7 +188,8 @@ export async function completeWorkflowEditableWorkerTask(jobId, pageId, options 
       agentId,
       heartbeatAt: new Date().toISOString(),
       recordedAt: new Date().toISOString(),
-      error: ""
+      error: "",
+      message: "page artifacts recorded"
     });
     recorded.artifacts = {
       ...(recorded.artifacts || {}),
@@ -275,7 +289,16 @@ function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
     "split_assets_contact.png",
     "validation.json",
     "page_result.json",
-    "page-rebuild-spec.json"
+    "page-rebuild-spec.json",
+    "page-spec-fallback.json",
+    "visual-asset-jobs.json",
+    "model-page-spec-prompt.json",
+    "model-page-spec-response.json",
+    "model-page-spec-source-preview.jpg"
+  ];
+  const directories = [
+    "assets",
+    path.join("prompts", "image-assets")
   ];
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const archiveDir = path.join(root, ".retry-archive", stamp);
@@ -285,6 +308,15 @@ function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
     const source = path.join(root, name);
     if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
     const target = path.join(archiveDir, name);
+    fsSync.mkdirSync(path.dirname(target), { recursive: true });
+    fsSync.renameSync(source, target);
+    moved.push(name);
+  }
+  for (const name of directories) {
+    const source = path.join(root, name);
+    if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
+    const target = path.join(archiveDir, name);
+    fsSync.mkdirSync(path.dirname(target), { recursive: true });
     fsSync.renameSync(source, target);
     moved.push(name);
   }
@@ -515,6 +547,12 @@ function isResetAfterRecord(task = {}, record = {}) {
   const taskTime = Date.parse(task.updatedAt);
   const recordTime = Date.parse(record.createdAt);
   return Number.isFinite(taskTime) && Number.isFinite(recordTime) && taskTime > recordTime;
+}
+
+function isRecentTaskActivity(task = {}, maxAgeMs = 15 * 60 * 1000) {
+  const value = task.heartbeatAt || task.claimedAt || task.dispatchAt || "";
+  const time = Date.parse(value);
+  return Number.isFinite(time) && Date.now() - time < maxAgeMs;
 }
 
 function normalizePageId(value = "") {

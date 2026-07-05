@@ -10,11 +10,11 @@ import { getWorkflowNextActionPreflight } from "./workflowNextAction.js";
 import { authorizeExternalImageSpend } from "./workflowAuthorizations.js";
 import { approveCodexPptGate, preflightCodexPptGate } from "./workflowApprovals.js";
 import { invalidateWorkflowEditableRebuildEvidence } from "./workflowEditable.js";
-import { appendEvent, artifactRecord, assembleWorkflowImageDeck, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages, parsePageSelection } from "./workflowVisuals.js";
+import { appendEvent, artifactRecord, assembleWorkflowImageDeck, buildCodexPptStyleLock, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages, parsePageSelection } from "./workflowVisuals.js";
 
 const execFileAsync = promisify(execFile);
 const latestProductVisualReadinessPath = path.join(v1AcceptanceRootDir, "latest-product-visual-readiness.json");
-const PRODUCT_VISUAL_STYLE_BRIEF = "Unified premium business presentation system: clear hierarchy, precise alignment, consistent spacing, restrained palette, designed visual density, preserved short titles/logos/charts/icons, and clean text-safe regions for editable rebuild.";
+const PRODUCT_VISUAL_STYLE_BRIEF = "Unified premium business presentation system with one locked visual identity: consistent Chinese typography hierarchy, fixed title and content zones, restrained brand-led palette, shared 16:9 grid, repeated card/chart/icon language, normalized source-page styling, and controlled role-based layout variation.";
 
 export async function runProductVisualReadinessNoCost(options = {}) {
   const latest = await getLatestV1AcceptanceReport().catch(() => null);
@@ -314,11 +314,15 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
   const sampleProduct = isSourceReferencedVisualSample(sample);
   const sampleApproved = approved.has("sample");
   const fullDeckApproved = approved.has("fullDeck");
+  const styleLock = buildCodexPptStyleLock(job, {
+    styleBrief: PRODUCT_VISUAL_STYLE_BRIEF
+  });
   const providerReady = Boolean(provider.configured && provider.enabled && provider.model && provider.supportsImageEdit !== false);
   const blockingIssues = [
     ...(!providerReady ? ["图片 API 尚未配置完成，或未声明支持源页参考图重绘。"] : []),
     ...(!sample?.path ? ["缺少真实 codex-ppt 视觉样张。"] : []),
     ...(sample?.path && !sampleProduct ? ["当前样张仍是 dry-run/passthrough、缺少 sha256，或没有源页面图片参考证据，不能作为产品级样张。"] : []),
+    ...(!styleLock.locked ? ["风格锁尚未建立：全量生成必须携带已确认样张作为统一风格参考。"] : []),
     ...(!sampleApproved ? ["样张关卡尚未确认。"] : []),
     ...(!fullDeckApproved ? ["全量生成关卡尚未授权。"] : []),
     ...(!renderedPageCount ? ["缺少可生成的源页面。"] : []),
@@ -330,6 +334,7 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     { id: "provider", ok: Boolean(provider.configured && provider.enabled && provider.model), label: "图片 API", detail: provider.model || "未配置" },
     { id: "image-edit-provider", ok: providerReady, label: "源页参考图重绘", detail: provider.supportsImageEdit === false ? "未启用" : provider.editEndpoint || "/images/edits" },
     { id: "product-sample", ok: sampleProduct, label: "真实样张", detail: sample?.path ? path.relative(rootDir, sample.path) : "缺失" },
+    { id: "style-lock", ok: styleLock.locked, label: "风格锁", detail: styleLock.locked ? path.relative(rootDir, styleLock.approvedSample.path) : "未建立" },
     { id: "sample-approval", ok: sampleApproved, label: "样张确认", detail: sampleApproved ? "已确认" : "待确认" },
     { id: "full-deck-approval", ok: fullDeckApproved, label: "全量授权", detail: fullDeckApproved ? "已授权" : "待授权" },
     { id: "source-pages", ok: Boolean(renderedPageCount), label: "目标页数", detail: `${renderedPageCount || calls} 页` },
@@ -363,6 +368,14 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
       sourceOriginalName: job.input?.sourceOriginalName || ""
     },
     provider,
+    styleLock: {
+      locked: Boolean(styleLock.locked),
+      source: styleLock.source || "",
+      samplePath: styleLock.approvedSample?.path || "",
+      sampleRelativePath: styleLock.approvedSample?.path ? path.relative(rootDir, styleLock.approvedSample.path) : "",
+      referenceImages: styleLock.referenceImages || [],
+      requirements: styleLock.requirements || []
+    },
     approvals: latest?.result?.approvals || base.approvals,
     runbook: latest?.result?.runbook || base.runbook,
     sample: sample ? {

@@ -1,4 +1,5 @@
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 
 export async function approveWorkflowManualReview(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
@@ -7,14 +8,21 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
   if (!final.path) throw new Error("Final PPTX must exist before manual review can be approved.");
   const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const recordedPages = tasks.filter((task) => task.status === "recorded").map((task) => task.pageId).filter(Boolean);
+  const sourcePages = numberOrZero(job.sourceMeta?.pageCount || artifacts.sourceMeta?.pageCount);
+  const finalPages = numberOrZero(final.summary?.page_count || final.pptxEditability?.slideCount);
+  const reviewScope = sourcePages && finalPages && finalPages < sourcePages ? "sample" : "full";
   const now = new Date().toISOString();
   const manualReview = {
     kind: "manual_review",
     status: "approved",
+    scope: reviewScope,
     reviewer: cleanString(options.reviewer || "operator"),
     note: cleanString(options.note || ""),
     reviewedPages: recordedPages,
-    reviewedPageCount: recordedPages.length,
+    reviewedPageCount: finalPages || recordedPages.length,
+    sourcePages,
+    finalPages,
+    partialSourceCoverage: reviewScope === "sample",
     finalPath: final.path,
     finalCreatedAt: final.createdAt || "",
     finalSize: final.size || 0,
@@ -26,6 +34,7 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
   };
   job.events = appendEvent(job.events, "workflow.manual_review_approved", "Manual review approved", {
     reviewedPageCount: manualReview.reviewedPageCount,
+    scope: manualReview.scope,
     reviewer: manualReview.reviewer,
     finalPath: final.path
   });
@@ -83,8 +92,106 @@ export async function resetWorkflowManualReview(jobId, options = {}) {
   return saveWorkflowJob(job);
 }
 
+export async function recordWorkflowPageVisualReview(jobId, options = {}) {
+  const job = await readWorkflowJob(jobId);
+  const pageId = normalizePageId(options.pageId || "");
+  const status = normalizePageReviewStatus(options.status || "");
+  if (!pageId) throw new Error("A valid pageId is required for page visual review.");
+  if (!status) throw new Error("Page visual review status must be pass, accept, or rerun.");
+
+  const pageEvidence = await scanWorkflowPageEvidence(job).catch(() => null);
+  const page = Array.isArray(pageEvidence?.pages)
+    ? pageEvidence.pages.find((item) => item.pageId === pageId)
+    : null;
+  if (!page && status !== "rerun") {
+    throw new Error("Page evidence is missing; only rerun can be recorded for this page.");
+  }
+  if (status !== "rerun" && page?.complete !== true) {
+    throw new Error("Page evidence is incomplete; mark this page as rerun or complete the editable rebuild first.");
+  }
+
+  const artifacts = job.artifacts || {};
+  const previous = artifacts.pageVisualReview || {};
+  const marks = {
+    ...(previous.marks || {})
+  };
+  const now = new Date().toISOString();
+  marks[pageId] = {
+    kind: "page_visual_review_mark",
+    pageId,
+    status,
+    reviewer: cleanString(options.reviewer || "operator"),
+    note: cleanString(options.note || ""),
+    evidenceComplete: page?.complete === true,
+    issues: Array.isArray(page?.issues) ? page.issues : [],
+    markedAt: now
+  };
+  const summary = summarizePageVisualReviewMarks(marks, pageEvidence);
+  job.artifacts = {
+    ...artifacts,
+    pageVisualReview: {
+      kind: "page_visual_review",
+      status: summary.readyForFinalReview ? "reviewed" : "in_progress",
+      marks,
+      summary,
+      updatedAt: now
+    }
+  };
+  job.events = appendEvent(job.events, "workflow.page_visual_review_marked", "Page visual review marked", {
+    pageId,
+    status,
+    evidenceComplete: page?.complete === true,
+    reviewer: marks[pageId].reviewer
+  });
+  return saveWorkflowJob(job);
+}
+
+function normalizePageId(value = "") {
+  const match = String(value || "").match(/\d+/);
+  return match ? `page_${String(Number(match[0])).padStart(3, "0")}` : "";
+}
+
+function normalizePageReviewStatus(value = "") {
+  const text = String(value || "").trim().toLowerCase();
+  if (["pass", "passed", "approve", "approved"].includes(text)) return "pass";
+  if (["accept", "accepted", "temporary_accept", "temporary-accept"].includes(text)) return "accept";
+  if (["rerun", "retry", "needs_rerun", "needs-rerun", "fail", "failed"].includes(text)) return "rerun";
+  return "";
+}
+
+function summarizePageVisualReviewMarks(marks = {}, pageEvidence = null) {
+  const pages = Array.isArray(pageEvidence?.pages) ? pageEvidence.pages : [];
+  const pageIds = pages.map((page) => page.pageId).filter(Boolean);
+  const values = Object.values(marks || {});
+  const passCount = values.filter((mark) => mark.status === "pass").length;
+  const acceptCount = values.filter((mark) => mark.status === "accept").length;
+  const rerunCount = values.filter((mark) => mark.status === "rerun").length;
+  const markedCount = values.length;
+  const completePageIds = pages.filter((page) => page.complete === true).map((page) => page.pageId);
+  const allCompletePagesReviewed = completePageIds.length > 0
+    && completePageIds.every((pageId) => ["pass", "accept"].includes(marks[pageId]?.status));
+  const allPagesReviewed = pageIds.length > 0
+    && pageIds.every((pageId) => ["pass", "accept"].includes(marks[pageId]?.status));
+  return {
+    totalPages: pageIds.length,
+    completePages: completePageIds.length,
+    markedCount,
+    passCount,
+    acceptCount,
+    rerunCount,
+    allCompletePagesReviewed,
+    allPagesReviewed,
+    readyForFinalReview: Boolean(pageEvidence?.complete && allPagesReviewed && rerunCount === 0)
+  };
+}
+
 function cleanString(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+function numberOrZero(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
 function appendEvent(events = [], type, message, details = {}) {

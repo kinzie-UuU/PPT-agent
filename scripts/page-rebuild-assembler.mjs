@@ -27,11 +27,11 @@ const DEFAULT_PREVIEW_FONT = firstExistingPath([
   "C:\\Windows\\Fonts\\arial.ttf"
 ]);
 const ALLOWED_SOURCE_TYPES = new Set(["asset-sheet-separated", "imagegen", "latex-rendered-formula", "user-provided", "user-approved-rasterization"]);
-const FOREGROUND_ASSET_TERMS = /(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|visual object)/i;
+const FOREGROUND_ASSET_TERMS = /(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|visual object|laurel|leaf|leaves|award|trophy)/i;
 const FORBIDDEN_FALLBACK_TERMS = /\b(crop|approximation|fallback|emoji)\b|裁剪|近似|降级/i;
-const FOREGROUND_TERMS = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|brand mark|brand block)\b|图标|照片|徽标|截图|贴纸|标记/i;
+const FOREGROUND_TERMS = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|brand mark|brand block|laurel|leaf|leaves|award|trophy)\b|图标|照片|徽标|截图|贴纸|标记/i;
 const ASSET_SEPARATION_TERMS = /asset-sheet-separated|asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|imagegen|分离/i;
-const STRUCTURAL_TERMS = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background/i;
+const STRUCTURAL_TERMS = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background|arc|circle|ellipse|bullet|line|border|curve|stroke|sweep/i;
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -48,7 +48,7 @@ async function main() {
   const pageRequest = await readJson(path.join(pageDir, "page_request.json"));
 
   try {
-    const manifest = buildManifest({ pageDir, pageRequest, spec });
+    const manifest = buildManifest({ pageDir, pageRequest, spec, specPath });
     validateManifestDraft({ pageDir, manifest });
     await writeJson(path.join(pageDir, "manifest.json"), manifest);
     await ensureImagegenJobs(pageDir, manifest.page_id, pageRequest.run_id);
@@ -59,6 +59,29 @@ async function main() {
       await rewritePagePptxForPowerPoint(pageDir);
     }
     const validation = await readJson(path.join(pageDir, "validation.json"));
+    const fallbackMarker = await readJson(path.join(pageDir, "page-spec-fallback.json")).catch(() => null);
+    const preRecoverySpec = await readJson(`${specPath}.before-complex-recovery.json`).catch(() => null);
+    const sourceFidelityRecovery = isTrustedSourceFidelityMarker(fallbackMarker, pageDir, { pageRequest, specPath }) && hasSourceFidelityTiles(manifest);
+    const fallbackDetected = !sourceFidelityRecovery && (
+      fallbackMarker?.fallback === "no-image-page-spec"
+      || hasNoImageFallbackEvidence(spec, pageDir)
+      || hasNoImageFallbackEvidence(manifest, pageDir)
+      || hasNoImageFallbackEvidence(preRecoverySpec, pageDir, manifest)
+    );
+    if (fallbackDetected) {
+      const reason = "No-image page spec fallback requires visual review and cannot be recorded as a product-grade editable page.";
+      await writeJson(path.join(pageDir, "validation.json"), {
+        ...validation,
+        passed: false,
+        status: "needs_visual_review",
+        reason,
+        fallback: fallbackMarker || { fallback: "no-image-page-spec", reason: "manifest-or-spec-no-image-evidence" },
+        createdAt: validation.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      await writePageResult(pageDir);
+      throw new Error(reason);
+    }
     await writePageResult(pageDir);
     if (validation.passed !== true) {
       throw new Error("editppt page validate did not produce top-level passed=true");
@@ -77,6 +100,111 @@ async function main() {
     await writeFailure(pageDir, error.message || String(error));
     throw error;
   }
+}
+
+function hasNoImageFallbackEvidence(value = {}, pageDir = "", resolvedValue = value) {
+  const text = [
+    value?.background_strategy?.mode,
+    value?.background_strategy?.source_consistency_contract,
+    value?.background_strategy?.comparison_note,
+    value?.notes,
+    ...(Array.isArray(value?.warnings) ? value.warnings : []),
+    value?.reason,
+    value?.error,
+    typeof value?.fallback === "string" ? value.fallback : value?.fallback?.reason
+  ].filter(Boolean).join(" ");
+  if (isOnlyResolvedOmittedAssetEvidence(text, resolvedValue, pageDir)) return false;
+  return /--no-image|\bno-image\b|text-only-ocr-spec|requires visual pass before production|requires product visual review|asset-hydrated recovery|requires-asset-separation|intentionally fails pass|omitted unavailable generated image assets/i.test(text);
+}
+
+function isTrustedSourceFidelityMarker(fallbackMarker = null, pageDir = "", context = {}) {
+  const pageRequest = context.pageRequest || readJsonIfExists(path.join(pageDir, "page_request.json")) || {};
+  const pageId = normalizePageId(pageRequest.page_id || path.basename(pageDir));
+  const expectedJobId = String(process.env.PPT_WORKFLOW_JOB_ID || deriveWorkflowJobId(pageDir) || "").trim();
+  const expectedRunId = String(pageRequest.run_id || "").trim();
+  return envTruthy(process.env.PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND)
+    && fallbackMarker?.schemaVersion === 1
+    && fallbackMarker?.createdBy === "model-page-worker-pipeline"
+    && fallbackMarker?.fallback === "source-fidelity-background-recovery"
+    && fallbackMarker?.reason === "visual-asset-budget-exhausted"
+    && normalizePageId(fallbackMarker?.pageId || "") === pageId
+    && normalizePageId(fallbackMarker?.pageDirName || "") === normalizePageId(path.basename(pageDir))
+    && String(fallbackMarker?.specFile || "") === path.basename(context.specPath || "page-rebuild-spec.json")
+    && expectedJobId
+    && String(fallbackMarker?.jobId || "") === expectedJobId
+    && expectedRunId
+    && String(fallbackMarker?.runId || "") === expectedRunId;
+}
+
+function hasSourceFidelityTiles(manifest = {}) {
+  const provenance = Array.isArray(manifest?.asset_provenance) ? manifest.asset_provenance : [];
+  const images = Array.isArray(manifest?.images) ? manifest.images : [];
+  const tileCount = provenance.filter((item) => {
+    const pathValue = normalizeAssetPath(item?.path || "");
+    return /^assets\/source_fidelity_tile_\d+\.png$/i.test(pathValue)
+      && item?.source_type === "user-approved-rasterization"
+      && item?.approval_note;
+  }).length;
+  const imageTileCount = images.filter((item) => /^assets\/source_fidelity_tile_\d+\.png$/i.test(normalizeAssetPath(item?.path || ""))).length;
+  return tileCount >= 4 && imageTileCount >= 4;
+}
+
+function readJsonIfExists(filePath = "") {
+  try {
+    if (!filePath || !fsSync.existsSync(filePath)) return null;
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
+}
+
+function deriveWorkflowJobId(pageDir = "") {
+  const normalized = String(pageDir || "").replace(/\\/g, "/");
+  const match = normalized.match(/ppt-tool-editable-runs\/([^/]+)\/[^/]+\/pages\/[^/]+$/i);
+  return match ? match[1] : "";
+}
+
+function isOnlyResolvedOmittedAssetEvidence(text = "", value = {}, pageDir = "") {
+  const omittedPattern = /Omitted unavailable generated image assets:\s*([a-zA-Z0-9_,\s-]+)\./gi;
+  const stripped = String(text || "").replace(omittedPattern, "");
+  if (/--no-image|\bno-image\b|text-only-ocr-spec|requires visual pass before production|requires product visual review|asset-hydrated recovery|requires-asset-separation|intentionally fails pass|omitted unavailable generated image assets/i.test(stripped)) {
+    return false;
+  }
+  const ids = [];
+  for (const match of String(text || "").matchAll(omittedPattern)) {
+    ids.push(...String(match[1] || "").split(",").map((item) => normalizePageId(item)).filter(Boolean));
+  }
+  if (!ids.length || !pageDir) return false;
+  const jobsById = readRecordedImagegenJobs(pageDir);
+  const imagePaths = new Set((Array.isArray(value?.images) ? value.images : []).map((image) => normalizeAssetPath(image?.path || "")).filter(Boolean));
+  const provenancePaths = new Set((Array.isArray(value?.asset_provenance) ? value.asset_provenance : []).map((item) => normalizeAssetPath(item?.path || "")).filter(Boolean));
+  return [...new Set(ids)].every((id) => {
+    const job = jobsById.get(id.toLowerCase());
+    const output = normalizeAssetPath(job?.output || "");
+    return output
+      && fsSync.existsSync(path.join(pageDir, output))
+      && imagePaths.has(output)
+      && provenancePaths.has(output);
+  });
+}
+
+function readRecordedImagegenJobs(pageDir = "") {
+  const map = new Map();
+  try {
+    const jobsPath = path.join(pageDir, "imagegen-jobs.json");
+    if (!fsSync.existsSync(jobsPath)) return map;
+    const data = JSON.parse(fsSync.readFileSync(jobsPath, "utf8").replace(/^\uFEFF/, ""));
+    for (const job of Array.isArray(data?.jobs) ? data.jobs : []) {
+      const id = normalizePageId(job?.job_id || job?.id || "");
+      const output = normalizeAssetPath(job?.output || "");
+      if (!id || String(job?.status || "").toLowerCase() !== "recorded" || !output) continue;
+      if (!fsSync.existsSync(path.join(pageDir, output))) continue;
+      map.set(id.toLowerCase(), job);
+    }
+  } catch {
+    return new Map();
+  }
+  return map;
 }
 
 function guardRecordedPageOverwrite(pageDir, args = {}) {
@@ -104,13 +232,15 @@ function readPageRunState(pageDir) {
   }
 }
 
-function buildManifest({ pageDir, pageRequest, spec }) {
+function buildManifest({ pageDir, pageRequest, spec, specPath = "" }) {
   const width = Number(pageRequest.source_size_px?.width || pageRequest.source?.width_px || spec.source?.width_px || 0);
   const height = Number(pageRequest.source_size_px?.height || pageRequest.source?.height_px || spec.source?.height_px || 0);
   if (!width || !height) throw new Error("page_request.json must provide source_size_px width and height.");
   const hydratedSpec = materializeSourceFidelityBackground({
     pageDir,
     spec: materializeComplexDecorationAssets({ pageDir, spec, width, height }),
+    pageRequest,
+    specPath,
     width,
     height
   });
@@ -230,8 +360,9 @@ function validateManifestDraft({ pageDir, manifest }) {
   if (errors.length) throw new Error(errors.join(" | "));
 }
 
-function materializeSourceFidelityBackground({ pageDir, spec = {}, width = 0, height = 0 } = {}) {
-  if (!envTruthy(process.env.PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND)) return spec;
+function materializeSourceFidelityBackground({ pageDir, spec = {}, pageRequest = {}, specPath = "", width = 0, height = 0 } = {}) {
+  const fallbackMarker = readJsonIfExists(path.join(pageDir, "page-spec-fallback.json"));
+  if (!isTrustedSourceFidelityMarker(fallbackMarker, pageDir, { pageRequest, specPath })) return spec;
   const sourcePath = path.join(pageDir, "source.png");
   if (!fsSync.existsSync(sourcePath)) return spec;
   const assetsDir = path.join(pageDir, "assets");
@@ -243,7 +374,7 @@ function materializeSourceFidelityBackground({ pageDir, spec = {}, width = 0, he
     path: tile.path,
     box_px: tile.box,
     alt: `source faithful tile ${index + 1}`,
-    z_index: 9000 + index
+    z_index: index
   }));
   const tileProvenance = tiles.map((tile) => ({
     path: tile.path,
@@ -1310,16 +1441,23 @@ function normalizeVisualInventory(items, images = []) {
     }
     const text = JSON.stringify(item);
     if (isBackgroundDecorationInventory(item, text)) {
+      const { path: _path, source_type: _sourceType, asset_provenance: _assetProvenance, ...nativeItem } = item;
       return {
-        ...item,
+        ...nativeItem,
+        name: sanitizeNativeVisualInventoryName(item.name),
+        description: sanitizeNativeVisualInventoryDescription(item.description),
         kind: item.kind === "native-shapes" ? "native_background_decoration" : item.kind,
-        decision: [item.decision, "source-faithful native background decoration reconstruction; no foreground asset separation required"].filter(Boolean).join("; ")
+        decision: [item.decision, "source-faithful editable native background decoration reconstruction"].filter(Boolean).join("; ")
       };
     }
-    if (/shape|native-shape|native shape/i.test(`${item.type || ""} ${item.kind || ""}`) && !/logo|photo|screenshot|brand|device/i.test(text)) {
+    if (isNativeStructuralVisualInventory(item, text)) {
+      const { path: _path, source_type: _sourceType, asset_provenance: _assetProvenance, ...nativeItem } = item;
       return {
-        ...item,
-        decision: [item.decision, "native structural shape reconstruction; no foreground asset separation required"].filter(Boolean).join("; ")
+        ...nativeItem,
+        name: sanitizeNativeVisualInventoryName(item.name),
+        kind: item.kind || "native_structural_shape",
+        description: sanitizeNativeVisualInventoryDescription(item.description),
+        decision: [item.decision, "source-faithful editable native structural shape reconstruction"].filter(Boolean).join("; ")
       };
     }
     if ((FOREGROUND_TERMS.test(text) || FOREGROUND_ASSET_TERMS.test(text)) && item.id) {
@@ -1335,6 +1473,26 @@ function normalizeVisualInventory(items, images = []) {
     }
     return item;
   });
+}
+
+function isNativeStructuralVisualInventory(item = {}, text = "") {
+  const kindText = `${item.type || ""} ${item.kind || ""} ${item.role || ""} ${text || ""}`;
+  if (/logo|photo|screenshot|brand|device/i.test(text)) return false;
+  return /shape|native-shape|native shape|arc|circle|circular|ellipse|line|divider|dots?|bullet|polygon|freeform|rect|rectangle|border/i.test(kindText);
+}
+
+function sanitizeNativeVisualInventoryName(value = "") {
+  return cleanString(value)
+    .replace(/\bdecorative\b/gi, "native structural")
+    .replace(/\bdecoration\b/gi, "native structural");
+}
+
+function sanitizeNativeVisualInventoryDescription(value = "") {
+  return cleanString(value)
+    .replace(/\bdecorative\b/gi, "native structural")
+    .replace(/\bdecoration\b/gi, "native structural")
+    .replace(/\bcropped\b/gi, "partially off-canvas")
+    .replace(/\bcrop\b/gi, "off-canvas placement");
 }
 
 function collectMissingForegroundAssets(manifest) {

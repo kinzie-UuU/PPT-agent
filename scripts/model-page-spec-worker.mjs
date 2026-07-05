@@ -3,11 +3,14 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
+import { execFile } from "child_process";
 import { fileURLToPath } from "url";
+import { promisify } from "util";
 import { getProviderConfig, requestOpenAiCompatible, readProviderError, stripEndpoint } from "../server/providers.js";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
+const execFileAsync = promisify(execFile);
 const DEFAULT_WORKFLOW_ROOT = firstExistingPath([
   process.env.PPT_WORKFLOW_ROOT,
   process.env.WORKFLOW_ROOT,
@@ -22,10 +25,19 @@ const REQUIRED_QUALITY_CHECKS = [
   "shape_corner_geometry_checked"
 ];
 const FORBIDDEN_FALLBACK_TERMS = /\b(crop|approximation|fallback|emoji)\b|裁剪|近似|降级/i;
-const FOREGROUND_FAMILY_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark)\b|图标|照片|徽标|截图|贴纸|标记/i;
-const FOREGROUND_CONTRACT_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|panel|frame|ribbon|rule|band|wave|accent)\b/i;
+const FOREGROUND_FAMILY_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|laurel|leaf|leaves|award|trophy)\b|图标|照片|徽标|截图|贴纸|标记/i;
+const FOREGROUND_CONTRACT_RE = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|panel|frame|ribbon|rule|band|wave|accent|laurel|leaf|leaves|award|trophy)\b/i;
 const ASSET_SEPARATION_RE = /asset-sheet-separated|asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|imagegen|分离/i;
-const NATIVE_STRUCTURAL_RE = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background/i;
+const NATIVE_STRUCTURAL_RE = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background|arc|circle|ellipse|bullet|line|border|curve|stroke|sweep/i;
+const activeModelResponse = {
+  bundle: null,
+  selected: null,
+  attemptRecords: [],
+  latest: {},
+  finalWritten: false
+};
+
+installTerminationFinalResponseHandlers();
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -46,6 +58,7 @@ async function main() {
   const timeoutMs = parseBoundedNumber(args["timeout-ms"] || args.timeoutMs, 5000, 600000, null);
   const maxRetries = parseBoundedNumber(args["max-retries"] ?? args.maxRetries, 0, 8, null);
   const maxTokens = parseBoundedNumber(args["max-tokens"] || args.maxTokens, 256, 12000, null);
+  const lowComplexity = Boolean(args["low-complexity"] || args.lowComplexity || process.env.MODEL_PAGE_SPEC_LOW_COMPLEXITY === "1");
 
   if (!fsSync.existsSync(sourceImage)) throw new Error(`source.png not found: ${sourceImage}`);
   if (!fsSync.existsSync(pageRequestPath)) throw new Error(`page_request.json not found: ${pageRequestPath}`);
@@ -65,7 +78,8 @@ async function main() {
       includeImage,
       timeoutMs,
       maxRetries,
-      maxTokens
+      maxTokens,
+      lowComplexity
     });
     const promptPath = path.join(pageDir, "model-page-spec-prompt.json");
     await writeJson(promptPath, promptBundle.redactedPromptRecord);
@@ -87,17 +101,37 @@ async function main() {
       ? await readSpecFromResponse(pageDir, args["from-response"])
       : await callVisionModel(promptBundle);
     if (spec.passed === false) {
-      if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
-        await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
+      if (hydrateNeededAssetJobsFromAvailableAssets(spec, promptBundle)) {
+        spec.passed = true;
+        spec.notes = [
+          removeForbiddenFallbackTerms(spec.notes),
+          "Asset-hydrated from model passed:false by mapping needed_visual_asset_jobs to existing page assets."
+        ].filter(Boolean).join(" ");
+        delete spec.error;
+        clearResolvedNoImageFallbackMarker(pageDir);
+      } else if (!promptBundle.includeImage) {
+        spec.passed = true;
+        spec.notes = [
+          spec.notes,
+          "No-image fallback ignored model-requested visual asset jobs; this page requires visual QA before production delivery."
+        ].filter(Boolean).join(" ");
+        spec.needed_visual_asset_jobs = [];
+        delete spec.error;
+      } else {
+        if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
+          await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
+        }
+        throw new Error(spec.error || "Model refused to create page-rebuild-spec because required assets are missing.");
       }
-      throw new Error(spec.error || "Model refused to create page-rebuild-spec because required assets are missing.");
     }
     normalizeSpecDraft(spec, promptBundle, pageRequest);
-    const missingImageAssetJobs = [
-      ...collectMissingImageAssetJobs(spec),
-      ...collectMissingForegroundInventoryAssetJobs(spec),
-      ...collectMissingBrandBlockAssetJobs(spec, promptBundle)
-    ];
+    const missingImageAssetJobs = promptBundle.includeImage
+      ? [
+        ...collectMissingImageAssetJobs(spec),
+        ...collectMissingForegroundInventoryAssetJobs(spec),
+        ...collectMissingBrandBlockAssetJobs(spec, promptBundle)
+      ]
+      : [];
     if (missingImageAssetJobs.length) {
       await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(missingImageAssetJobs));
       omitUnavailableImageAssets(spec, missingImageAssetJobs);
@@ -150,14 +184,18 @@ function omitUnavailableImageAssets(spec = {}, missingJobs = []) {
   return spec;
 }
 
-async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, brief, includeImage = true, timeoutMs = null, maxRetries = null, maxTokens = null }) {
+async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, brief, includeImage = true, timeoutMs = null, maxRetries = null, maxTokens = null, lowComplexity = false }) {
   const providerConfig = getProviderConfig().llm;
   const apiKey = process.env.OPENAI_API_KEY || process.env.PROVIDER_API_KEY || "";
   const model = process.env.PAGE_SPEC_MODEL || process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || providerConfig.model;
-  const dataUrl = includeImage ? await imageDataUrl(sourceImage) : "";
+  const promptImage = includeImage && lowComplexity ? await preparePromptImage(sourceImage, pageDir) : null;
+  const dataUrl = includeImage ? await imageDataUrl(promptImage?.path || sourceImage) : "";
   const ocrLines = brief?.ocr?.lines || [];
   const skeleton = brief?.specSkeleton || buildFallbackSkeleton(pageRequest, ocrLines);
   const availableAssets = listAvailableAssets(pageDir);
+  const promptOcrLines = lowComplexity ? compactOcrLinesForPrompt(ocrLines, 35) : ocrLines;
+  const promptSkeleton = lowComplexity ? buildCompactPromptSkeleton(pageRequest, promptOcrLines) : skeleton;
+  const promptAvailableAssets = lowComplexity ? compactAvailableAssetsForPrompt(availableAssets, 12) : availableAssets;
   const system = [
     "You are a page worker for image-to-editable-ppt.",
     "Return only valid JSON for page-rebuild-spec.json.",
@@ -166,16 +204,21 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "Visual fidelity is mandatory: every visible non-text object larger than about 2% of the slide area must appear in visual_inventory and must be rebuilt as native shapes or images.",
     "Do not claim the background is preserved unless the required background/decoration objects are represented by shapes, images, or needed_visual_asset_jobs.",
     "Brand logos, complex icons, screenshots, decorative maps, patterned panels, cards, shadows, and image-like decorations must be represented as images with real separated/generated assets, or requested through needed_visual_asset_jobs.",
-    "Simple borders, divider lines, rectangles, grids, and translucent blocks must be represented as native shapes with source pixel coordinates.",
+    "Simple borders, divider lines, arcs, circles, ellipses, bullets, rectangles, grids, and translucent blocks must be represented as native structural shapes with source pixel coordinates.",
     "If a foreground logo/photo/icon/screenshot/device/illustration must be reused, represent it only as an image asset with asset_provenance from asset-sheet-separated or imagegen, and only if an actual asset path exists.",
     "Never reference source.png in images[].path.",
     "Never use words crop, approximation, fallback, or emoji anywhere in visual_inventory or asset_provenance.",
+    "Use clean visual_inventory decisions only: native-shape, image-asset, needed-visual-asset, or native-text. Do not write native-shape-approximation.",
     "When image asset separation is required but no asset file exists yet, return a JSON object with passed:false, error, and needed_visual_asset_jobs instead of a page-rebuild-spec.",
     "If an available page asset listed by the user matches a required foreground object, reference it in images[].path and add matching asset_provenance with source_type asset-sheet-separated or user-approved-rasterization according to the asset metadata.",
+    "Before returning needed_visual_asset_jobs, first match the required object against Available page assets by id, prompt_excerpt, provenance_note, and source_box_px. Reuse matching available assets instead of requesting duplicates.",
     "All box_px and points_px values are source.png pixel coordinates.",
     includeImage
       ? "You can inspect the source image attached in this message."
-      : "No image is attached in this run. Use OCR lines, page_request, and worker brief only; set background_strategy.mode to text-only-ocr-spec and describe this limitation in notes."
+      : "No image is attached in this run. Use OCR lines, page_request, and worker brief only; set background_strategy.mode to text-only-ocr-spec and describe this limitation in notes.",
+    lowComplexity
+      ? "Low-complexity mode is enabled because the provider timed out. Return a compact but valid spec: prioritize editable text, simple shapes, major image regions, and only essential visual asset jobs."
+      : ""
   ].join(" ");
   const userText = [
     `Page id: ${pageId}`,
@@ -184,34 +227,39 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     `Content box: ${JSON.stringify(pageRequest.content_box || {})}`,
     "",
     "OCR lines:",
-    JSON.stringify(ocrLines, null, 2),
+    JSON.stringify(promptOcrLines, null, lowComplexity ? 0 : 2),
     "",
     "Use this skeleton as a starting point, but verify the image before deciding:",
-    JSON.stringify(skeleton, null, 2),
+    JSON.stringify(promptSkeleton, null, lowComplexity ? 0 : 2),
     "",
     "Available page assets:",
-    JSON.stringify(availableAssets, null, 2),
+    JSON.stringify(promptAvailableAssets, null, lowComplexity ? 0 : 2),
+    availableAssets.length
+      ? "Important: these assets already exist in the page directory. If one matches a photo, logo, icon, badge, or decorative object, use its path in images[] and asset_provenance. Do not ask for a new needed_visual_asset_job for the same object."
+      : "No separated page assets are available yet; request needed_visual_asset_jobs for required non-text foreground visuals.",
     "",
     "Visual coverage rules:",
-    JSON.stringify({
-      must_cover: [
-        "all visible logos or brand marks",
-        "large decorative background maps, patterns, grids, bands, cards, panels, and shadows",
-        "icons, badges, screenshots, device frames, photos, illustrations, and image-like marks",
-        "all divider lines, borders, accent rules, and colored blocks"
-      ],
-      allowed_methods: [
-        "native shapes for simple geometry",
-        "image assets only when a real asset path exists",
-        "needed_visual_asset_jobs when a required visual asset is not yet available"
-      ],
-      not_allowed: [
-        "omitting decoration because it is not text",
-        "claiming the background is preserved while shapes/images are missing",
-        "using source.png as an image",
-        "creating a mostly blank editable text-only page"
-      ]
-    }, null, 2),
+    lowComplexity
+      ? "Cover visible logos/photos/icons/packaging/panels. Use native shapes for simple geometry. Use image assets only from Available page assets. Request needed_visual_asset_jobs only for missing required assets. Never use source.png."
+      : JSON.stringify({
+        must_cover: [
+          "all visible logos or brand marks",
+          "large decorative background maps, patterns, grids, bands, cards, panels, and shadows",
+          "icons, badges, screenshots, device frames, photos, illustrations, and image-like marks",
+          "all divider lines, borders, accent rules, and colored blocks"
+        ],
+        allowed_methods: [
+          "native shapes for simple geometry",
+          "image assets only when a real asset path exists",
+          "needed_visual_asset_jobs when a required visual asset is not yet available"
+        ],
+        not_allowed: [
+          "omitting decoration because it is not text",
+          "claiming the background is preserved while shapes/images are missing",
+          "using source.png as an image",
+          "creating a mostly blank editable text-only page"
+        ]
+      }, null, 2),
     "",
     "Required output JSON shape:",
     JSON.stringify({
@@ -238,13 +286,21 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
       images: [],
       asset_provenance: [],
       notes: "short worker note"
-    }, null, 2)
+    }, null, lowComplexity ? 0 : 2)
   ].join("\n");
 
   const userContent = [
     { type: "text", text: userText }
   ];
-  if (includeImage) userContent.push({ type: "image_url", image_url: { url: dataUrl } });
+  if (includeImage) {
+    userContent.push({
+      type: "image_url",
+      image_url: {
+        url: dataUrl,
+        ...(lowComplexity ? { detail: "low" } : {})
+      }
+    });
+  }
   const messages = [
     { role: "system", content: system },
     {
@@ -263,7 +319,9 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     timeoutMs: timeoutMs ?? providerConfig.timeoutMs,
     maxRetries: maxRetries ?? providerConfig.maxRetries,
     maxTokens,
+    lowComplexity,
     includeImage,
+    promptImage,
     availableAssets,
     messages,
     redactedPromptRecord: {
@@ -273,6 +331,8 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
       model,
       baseUrl: providerConfig.baseUrl,
       includeImage,
+      promptImage,
+      lowComplexity,
       timeoutMs: timeoutMs ?? providerConfig.timeoutMs,
       maxRetries: maxRetries ?? providerConfig.maxRetries,
       maxTokens,
@@ -282,7 +342,7 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
         {
           role: "user",
           content: includeImage
-            ? [{ type: "text", text: userText }, { type: "image_url", image_url: { url: "<source.png data-url redacted>" } }]
+            ? [{ type: "text", text: userText }, { type: "image_url", image_url: { url: lowComplexity ? "<prompt-image data-url redacted>" : "<source.png data-url redacted>", ...(lowComplexity ? { detail: "low" } : {}) } }]
             : [{ type: "text", text: userText }]
         }
       ],
@@ -293,30 +353,48 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
 
 async function callVisionModel(bundle) {
   if (!bundle.apiKey) throw new Error("Missing API key for model page worker. Configure OPENAI_API_KEY or PROVIDER_API_KEY.");
-  const attempts = [
-    { responseFormat: true, reason: "json_object" },
-    { responseFormat: true, compact: true, reason: "compact-vision-json-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 60000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) },
-    { responseFormat: false, reason: "plain-json-retry-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 60000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) }
-  ];
+  const compactTimeoutMs = parseBoundedNumber(bundle.timeoutMs || 300000, 90000, 600000, 300000);
+  const compactMaxTokens = Math.min(bundle.maxTokens || 1800, 1800);
+  const attempts = bundle.lowComplexity
+    ? [
+      { responseFormat: true, compact: true, reason: "low-complexity-compact-vision-json", timeoutMs: compactTimeoutMs, maxTokens: compactMaxTokens, maxRetries: 0 },
+      { responseFormat: false, compact: true, reason: "low-complexity-plain-json-retry", timeoutMs: compactTimeoutMs, maxTokens: compactMaxTokens, maxRetries: 0 }
+    ]
+    : [
+      { responseFormat: true, reason: "json_object" },
+      { responseFormat: true, compact: true, reason: "compact-vision-json-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) },
+      { responseFormat: false, reason: "plain-json-retry-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) }
+    ];
   const attemptRecords = [];
   let selected = null;
+  Object.assign(activeModelResponse, { bundle, selected, attemptRecords, latest: {}, finalWritten: false });
   for (const attempt of attempts) {
     try {
       const result = await requestModelSpecAttempt(bundle, attempt);
       attemptRecords.push(result.record);
+      activeModelResponse.selected = selected;
+      activeModelResponse.latest = {
+        data: result.data,
+        content: result.content,
+        spec: result.spec,
+        parseError: result.parseError
+      };
       await writeModelResponseRecord(bundle, {
         selected,
         attemptRecords,
         data: result.data,
         content: result.content,
         spec: result.spec,
-        parseError: result.parseError
+        parseError: result.parseError,
+        final: false
       });
       if (result.spec) {
         selected = result;
+        activeModelResponse.selected = selected;
         break;
       }
     } catch (error) {
+      const latest = activeModelResponse.latest || {};
       attemptRecords.push({
         reason: attempt.reason || "",
         responseFormat: Boolean(attempt.responseFormat),
@@ -329,14 +407,26 @@ async function callVisionModel(bundle) {
         usage: null,
         finishReason: ""
       });
-      await writeModelResponseRecord(bundle, { selected, attemptRecords, parseError: error.message || String(error) });
+      activeModelResponse.selected = selected;
+      await writeModelResponseRecord(bundle, {
+        selected,
+        attemptRecords,
+        data: latest.data || {},
+        content: latest.content || "",
+        spec: latest.spec || null,
+        parseError: error.message || String(error),
+        final: false
+      });
     }
   }
-  const data = selected?.data || attemptRecords.at(-1)?.raw || {};
-  const content = selected?.content || attemptRecords.at(-1)?.content || "";
-  const spec = selected?.spec || null;
-  const parseError = selected?.parseError || attemptRecords.at(-1)?.parseError || "";
-  await writeModelResponseRecord(bundle, { selected, attemptRecords, data, content, spec, parseError });
+  const latest = activeModelResponse.latest || {};
+  const existing = readJsonIfExists(path.join(bundle.pageDir, "model-page-spec-response.json"));
+  const data = selected?.data || latest.data || existing?.raw || {};
+  const content = selected?.content || latest.content || existing?.content || "";
+  const spec = selected?.spec || latest.spec || existing?.parsed || null;
+  const parseError = selected?.parseError || latest.parseError || attemptRecords.at(-1)?.parseError || existing?.parseError || "";
+  await writeModelResponseRecord(bundle, { selected, attemptRecords, data, content, spec, parseError, final: true });
+  activeModelResponse.finalWritten = true;
   if (!spec) {
     throw new Error([
       "Model response did not contain parseable JSON.",
@@ -345,10 +435,28 @@ async function callVisionModel(bundle) {
     ].filter(Boolean).join(" "));
   }
   if (spec.passed === false) {
+    if (hydrateNeededAssetJobsFromAvailableAssets(spec, bundle)) {
+      spec.passed = true;
+      spec.notes = [
+        removeForbiddenFallbackTerms(spec.notes),
+        "Asset-hydrated from model passed:false by mapping needed_visual_asset_jobs to existing page assets."
+      ].filter(Boolean).join(" ");
+      delete spec.error;
+      clearResolvedNoImageFallbackMarker(bundle.pageDir);
+    } else if (!bundle.includeImage) {
+      spec.passed = true;
+      spec.notes = [
+        spec.notes,
+        "No-image fallback ignored model-requested visual asset jobs; this page requires visual QA before production delivery."
+      ].filter(Boolean).join(" ");
+      spec.needed_visual_asset_jobs = [];
+      delete spec.error;
+    } else {
     if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
       await writeJson(path.join(bundle.pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
     }
     throw new Error(spec.error || "Model refused to create page-rebuild-spec because required assets are missing.");
+    }
   }
   spec.model_worker = {
     provider: "openai-compatible",
@@ -358,6 +466,334 @@ async function callVisionModel(bundle) {
     usage: data.usage || null
   };
   return spec;
+}
+
+function hydrateNeededAssetJobsFromAvailableAssets(spec = {}, bundle = {}) {
+  const jobs = Array.isArray(spec.needed_visual_asset_jobs) ? spec.needed_visual_asset_jobs : [];
+  if (!jobs.length) return false;
+  const pageDir = bundle.pageDir || "";
+  if (!pageDir) return false;
+  if (!Array.isArray(spec.images)) spec.images = [];
+  if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
+  if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
+  const existingImagePaths = new Set(spec.images.map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const injected = [];
+  const injectedMappings = [];
+  const remaining = [];
+  for (const job of jobs) {
+    const assetPath = findExistingAssetForNeededJob(pageDir, job);
+    const box = coerceAssetJobBox(job);
+    if (!assetPath || !box) {
+      remaining.push(job);
+      continue;
+    }
+    const id = cleanAssetId(job.id || path.basename(assetPath, path.extname(assetPath)));
+    if (!existingImagePaths.has(assetPath)) {
+      spec.images.push({
+        id,
+        path: assetPath,
+        box_px: box,
+        description: cleanLooseText(job.description || job.prompt || job.required_for || "Recovered available page asset."),
+        z_index: Number(job.z_index || 40)
+      });
+      existingImagePaths.add(assetPath);
+    }
+    spec.asset_provenance.push({
+      path: assetPath,
+      source: assetPath,
+      source_type: "asset-sheet-separated",
+      provenance_note: cleanLooseText(job.asset_provenance || job.note || "Mapped from needed_visual_asset_jobs to an existing generated page asset.")
+    });
+    injected.push(id);
+    injectedMappings.push({ id, path: assetPath, box, job });
+  }
+  spec.needed_visual_asset_jobs = remaining;
+  if (!injected.length) return false;
+  spec.visual_inventory = spec.visual_inventory.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const itemId = cleanAssetId(item.id || "");
+    const itemBox = coerceBox(item.box_px || item.bounds_px || item.box);
+    const mapping = injectedMappings.find((entry) => {
+      if (itemId && itemId === entry.id) return true;
+      if (itemBox && entry.box && boxOverlapRatio(itemBox, entry.box) > 0.45) return true;
+      return assetJobTextScore(item, entry.job) >= 2;
+    });
+    if (!mapping) return item;
+    return {
+      ...item,
+      decision: "asset-sheet-separated",
+      path: item.path || mapping.path,
+      asset_provenance: {
+        ...(typeof item.asset_provenance === "object" && !Array.isArray(item.asset_provenance) ? item.asset_provenance : {}),
+        path: item.path || mapping.path,
+        source_type: "asset-sheet-separated",
+        provenance_note: "Mapped from needed_visual_asset_jobs to an existing separated page asset."
+      }
+    };
+  });
+  spec.background_strategy = {
+    ...(spec.background_strategy || {}),
+    comparison_note: [
+      removeForbiddenFallbackTerms(spec.background_strategy?.comparison_note),
+      `Mapped existing generated assets for: ${injected.join(", ")}.${remaining.length ? ` Remaining requested assets were left to native/shape reconstruction: ${remaining.map((job) => cleanAssetId(job.id || "")).filter(Boolean).join(", ")}.` : ""}`
+    ].filter(Boolean).join(" ")
+  };
+  spec.notes = removeForbiddenFallbackTerms(spec.notes);
+  spec.background_strategy.source_consistency_contract = removeForbiddenFallbackTerms(spec.background_strategy.source_consistency_contract);
+  return remaining.length === 0;
+}
+
+function cleanLooseText(value = "") {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function coerceAssetJobBox(job = {}) {
+  return coerceBox(
+    job.source_box_px
+    || job.source_region_box_px
+    || job.source_region_px
+    || job.intended_placement_px
+    || job.sourceBoxPx
+    || job.box_px
+    || job.target_box_px
+  );
+}
+
+function compactOcrLinesForPrompt(lines = [], limit = 80) {
+  const normalized = (Array.isArray(lines) ? lines : [])
+    .map((line, index) => {
+      const box = coerceBox(line?.box_px || line?.box || line?.bounds);
+      return {
+        id: String(line?.id || `L${index + 1}`).trim(),
+        text: cleanLooseText(line?.text || ""),
+        ...(box ? { box_px: box } : {}),
+        ...(line?.font_pt_if_cjk ? { font_pt_if_cjk: Number(line.font_pt_if_cjk) } : {}),
+        ...(line?.font_pt_if_latin ? { font_pt_if_latin: Number(line.font_pt_if_latin) } : {})
+      };
+    })
+    .filter((line) => line.text || line.box_px);
+  normalized.sort((a, b) => {
+    const ay = Number(a.box_px?.[1] || 0);
+    const by = Number(b.box_px?.[1] || 0);
+    if (ay !== by) return ay - by;
+    return Number(a.box_px?.[0] || 0) - Number(b.box_px?.[0] || 0);
+  });
+  return normalized.slice(0, limit);
+}
+
+function buildCompactPromptSkeleton(pageRequest = {}, ocrLines = []) {
+  const width = Number(pageRequest.source_size_px?.width || 1280);
+  const height = Number(pageRequest.source_size_px?.height || 720);
+  return {
+    schema_version: 1,
+    strategy: "model-page-worker-rebuild",
+    page_strategy: "model-page-worker-rebuild",
+    source_size_px: { width, height },
+    required_text: ocrLines.map((line) => line.text).filter(Boolean),
+    text_boxes: "Return one text box per visible text region using the attached image and OCR boxes as hints.",
+    shapes: [],
+    images: [],
+    asset_provenance: [],
+    quality_checks: Object.fromEntries(REQUIRED_QUALITY_CHECKS.map((key) => [key, false]))
+  };
+}
+
+function compactAvailableAssetsForPrompt(assets = [], limit = 30) {
+  return (Array.isArray(assets) ? assets : [])
+    .slice(0, limit)
+    .map((asset) => ({
+      id: cleanAssetId(asset?.id || path.basename(asset?.path || "", path.extname(asset?.path || ""))),
+      path: normalizeAssetPath(asset?.path || ""),
+      source_type: asset?.source_type || "",
+      ...(Array.isArray(asset?.source_box_px) ? { source_box_px: asset.source_box_px } : {}),
+      ...(asset?.prompt_excerpt ? { prompt_excerpt: cleanLooseText(asset.prompt_excerpt).slice(0, 180) } : {})
+    }))
+    .filter((asset) => asset.path);
+}
+
+function removeForbiddenFallbackTerms(value = "") {
+  return String(value || "")
+    .replace(/Generated in --no-image [^.]*\./gi, "")
+    .replace(/requires visual pass before production[^.]*\./gi, "")
+    .replace(/no-image mode for unavailable generated assets:[^.]*\./gi, "")
+    .replace(/\bno-image\s+fallback\b/gi, "asset-hydrated recovery")
+    .replace(/\bno-image\b/gi, "asset-hydrated")
+    .replace(/\bfallback\b/gi, "recovery")
+    .replace(/\bapproximation\b/gi, "rebuild")
+    .replace(/\bcrop\b/gi, "region")
+    .replace(/\bemoji\b/gi, "symbol")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clearResolvedNoImageFallbackMarker(pageDir = "") {
+  if (!pageDir) return;
+  const markerPath = path.join(pageDir, "page-spec-fallback.json");
+  try {
+    if (fsSync.existsSync(markerPath)) fsSync.rmSync(markerPath, { force: true });
+  } catch {
+    // Best effort cleanup; validation will still catch unresolved fallback evidence.
+  }
+}
+
+function findExistingAssetForNeededJob(pageDir, job = {}) {
+  const id = cleanAssetId(job.id || "");
+  const numericSuffix = id.match(/(\d+)$/)?.[1] || "";
+  const target = normalizeAssetPath(job.target_asset_path || job.expected_asset_path || job.path || job.dest || "");
+  const candidates = [
+    target,
+    id ? `assets/${id}.png` : "",
+    id ? `assets/generated/${id}.png` : "",
+    numericSuffix ? `assets/generated/job${numericSuffix.padStart(3, "0")}.png` : "",
+    numericSuffix ? `assets/generated/job${numericSuffix}.png` : ""
+  ].filter(Boolean);
+  for (const relativePath of candidates) {
+    const fullPath = path.join(pageDir, relativePath);
+    if (fsSync.existsSync(fullPath)
+      && fsSync.statSync(fullPath).isFile()
+      && isTrustedExistingAssetForNeededJob(pageDir, relativePath, job)) {
+      return normalizeAssetPath(relativePath);
+    }
+  }
+  const jobBox = coerceAssetJobBox(job);
+  const scored = listAvailableAssets(pageDir)
+    .filter((asset) => !isExcludedAssetCandidate(asset))
+    .map((asset) => ({
+      asset,
+      exactIdMatch: assetIdMatchesJob(asset, job),
+      overlap: jobBox && Array.isArray(asset.source_box_px) ? boxOverlapRatio(jobBox, asset.source_box_px) : 0,
+      score: assetJobTextScore(asset, job)
+    }))
+    .filter(({ asset, exactIdMatch, overlap, score }) => exactIdMatch || overlap > 0.35 || (score >= 3 && assetJobFamilyMatch(asset, job)))
+    .sort((a, b) => Number(b.exactIdMatch) - Number(a.exactIdMatch) || (b.overlap - a.overlap) || (b.score - a.score));
+  if (scored[0]?.asset?.path) return normalizeAssetPath(scored[0].asset.path);
+  return "";
+}
+
+function isTrustedExistingAssetForNeededJob(pageDir = "", relativePath = "", job = {}) {
+  const normalizedPath = normalizeAssetPath(relativePath);
+  const asset = listAvailableAssets(pageDir).find((item) => normalizeAssetPath(item.path || "") === normalizedPath);
+  if (!asset) return false;
+  if (isExcludedAssetCandidate(asset)) return false;
+  const jobBox = coerceAssetJobBox(job);
+  if (assetIdMatchesJob(asset, job)) return true;
+  const overlap = jobBox && Array.isArray(asset.source_box_px) ? boxOverlapRatio(jobBox, asset.source_box_px) : 0;
+  if (overlap > 0.35) return true;
+  const score = assetJobTextScore(asset, job);
+  if (score >= 3 && assetJobFamilyMatch(asset, job)) return true;
+  const assetJob = readVisualAssetJobIndex(pageDir).get(normalizedPath);
+  const assetJobScore = assetJob ? assetJobTextScore({
+    id: assetJob.id,
+    path: assetJob.dest,
+    prompt_excerpt: assetJob.prompt || assetJob.note,
+    provenance_note: assetJob.note,
+    source_box_px: assetJob.source_box_px
+  }, job) : 0;
+  const assetJobOverlap = assetJob && jobBox && Array.isArray(assetJob.source_box_px) ? boxOverlapRatio(jobBox, assetJob.source_box_px) : 0;
+  if (assetJob && (assetJobOverlap > 0.35 || (assetJobScore >= 3 && assetJobFamilyMatch(assetJob, job)))) {
+    return true;
+  }
+  return false;
+}
+
+function assetIdMatchesJob(asset = {}, job = {}) {
+  const jobId = cleanAssetId(job.id || job.job_id || job.jobId || "");
+  if (!jobId) return false;
+  const assetIds = [
+    asset.id,
+    path.basename(asset.path || "", path.extname(asset.path || ""))
+  ].map((value) => cleanAssetId(value)).filter(Boolean);
+  return assetIds.includes(jobId);
+}
+
+function assetJobTextScore(asset = {}, job = {}) {
+  const assetText = cleanLooseText([
+    asset.id,
+    asset.path,
+    asset.prompt_excerpt,
+    asset.provenance_note,
+    asset.description,
+    asset.purpose
+  ].filter(Boolean).join(" ")).toLowerCase();
+  const jobText = cleanLooseText([
+    job.id,
+    job.purpose,
+    job.requirements,
+    job.description,
+    job.prompt,
+    job.required_for
+  ].filter(Boolean).join(" ")).toLowerCase();
+  if (!assetText || !jobText) return 0;
+  let score = 0;
+  const groups = [
+    ["product", "products", "package", "packaging", "gift", "box", "mooncake", "bottle", "cluster", "arrangement", "snack"],
+    ["photo", "photograph", "image", "scene", "bed", "bedroom", "bedding", "sheet", "pillow"],
+    ["logo", "brand", "inovance", "crown", "badge"],
+    ["background", "decor", "texture", "shadow", "line"]
+  ];
+  for (const group of groups) {
+    const assetHits = group.filter((term) => assetText.includes(term));
+    const jobHits = group.filter((term) => jobText.includes(term));
+    if (assetHits.length && jobHits.length) score += Math.min(assetHits.length, jobHits.length);
+  }
+  if (assetText.includes(cleanAssetId(job.id || "")) && job.id) score += 2;
+  return score;
+}
+
+function assetJobFamilyMatch(asset = {}, job = {}) {
+  const assetText = cleanLooseText([
+    asset.id,
+    asset.path,
+    asset.prompt_excerpt,
+    asset.provenance_note,
+    asset.description,
+    asset.purpose,
+    asset.note
+  ].filter(Boolean).join(" ")).toLowerCase();
+  const jobText = cleanLooseText([
+    job.id,
+    job.purpose,
+    job.requirements,
+    job.description,
+    job.prompt,
+    job.required_for,
+    job.note
+  ].filter(Boolean).join(" ")).toLowerCase();
+  if (!assetText || !jobText) return false;
+  const families = [
+    ["photo", "photograph", "image", "scene", "bed", "bedroom", "bedding", "sheet", "pillow"],
+    ["logo", "brand", "inovance", "crown", "badge"],
+    ["product", "products", "package", "packaging", "gift", "box", "mooncake", "bottle", "cluster", "arrangement", "snack"],
+    ["background", "decor", "texture", "shadow", "line"]
+  ];
+  return families.some((family) => family.some((term) => assetText.includes(term)) && family.some((term) => jobText.includes(term)));
+}
+
+function isExcludedAssetCandidate(asset = {}) {
+  const text = cleanLooseText([
+    asset.id,
+    asset.path,
+    asset.prompt_excerpt,
+    asset.provenance_note,
+    asset.description,
+    asset.purpose,
+    asset.note
+  ].filter(Boolean).join(" ")).toLowerCase();
+  return /source[\s_-]?fidelity[\s_-]?tile|full[\s_-]?slide|source page|native structural|text-only|background[\s_-]?tile/.test(text);
+}
+
+function boxOverlapRatio(a = [], b = []) {
+  const boxA = coerceBox(a);
+  const boxB = coerceBox(b);
+  if (!boxA || !boxB) return 0;
+  const left = Math.max(boxA[0], boxB[0]);
+  const top = Math.max(boxA[1], boxB[1]);
+  const right = Math.min(boxA[0] + boxA[2], boxB[0] + boxB[2]);
+  const bottom = Math.min(boxA[1] + boxA[3], boxB[1] + boxB[3]);
+  const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const areaA = Math.max(1, boxA[2] * boxA[3]);
+  const areaB = Math.max(1, boxB[2] * boxB[3]);
+  return intersection / Math.min(areaA, areaB);
 }
 
 async function requestModelSpecAttempt(bundle, attempt = {}) {
@@ -377,7 +813,7 @@ async function requestModelSpecAttempt(bundle, attempt = {}) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${bundle.apiKey}` },
     body: JSON.stringify(body),
     timeoutMs: attempt.timeoutMs || bundle.timeoutMs,
-    maxRetries: bundle.maxRetries
+    maxRetries: attempt.maxRetries ?? bundle.maxRetries
   });
   if (!result.response.ok) {
     throw new Error(`model page worker failed: HTTP ${result.response.status} ${await readProviderError(result.response)}`);
@@ -412,13 +848,15 @@ async function requestModelSpecAttempt(bundle, attempt = {}) {
   };
 }
 
-async function writeModelResponseRecord(bundle, { selected = null, attemptRecords = [], data = {}, content = "", spec = null, parseError = "" } = {}) {
+async function writeModelResponseRecord(bundle, { selected = null, attemptRecords = [], data = {}, content = "", spec = null, parseError = "", final = false } = {}) {
   const raw = data && typeof data === "object" ? data : {};
   await writeJson(path.join(bundle.pageDir, "model-page-spec-response.json"), {
     version: 1,
+    final: Boolean(final),
     model: bundle.model,
     baseUrl: selected?.baseUrl || attemptRecords.at(-1)?.baseUrl || "",
     includeImage: bundle.includeImage,
+    lowComplexity: Boolean(bundle.lowComplexity),
     content: selected?.content || content || "",
     raw,
     parsed: selected?.spec || spec || null,
@@ -427,6 +865,40 @@ async function writeModelResponseRecord(bundle, { selected = null, attemptRecord
     usage: raw.usage || null,
     createdAt: new Date().toISOString()
   });
+  if (final) activeModelResponse.finalWritten = true;
+}
+
+function installTerminationFinalResponseHandlers() {
+  const finalizeAndExit = (signal) => {
+    writeFinalResponseOnTermination(signal)
+      .finally(() => {
+        process.exit(signal === "SIGTERM" ? 143 : 130);
+      });
+  };
+  process.once("SIGTERM", () => finalizeAndExit("SIGTERM"));
+  process.once("SIGINT", () => finalizeAndExit("SIGINT"));
+  process.once("uncaughtException", (error) => {
+    writeFinalResponseOnTermination(`uncaughtException: ${error?.message || error}`)
+      .finally(() => {
+        process.stderr.write(`${error?.stack || error}\n`);
+        process.exit(1);
+      });
+  });
+}
+
+async function writeFinalResponseOnTermination(reason = "terminated") {
+  if (!activeModelResponse.bundle || activeModelResponse.finalWritten) return;
+  const existing = readJsonIfExists(path.join(activeModelResponse.bundle.pageDir, "model-page-spec-response.json"));
+  const latest = activeModelResponse.latest || {};
+  await writeModelResponseRecord(activeModelResponse.bundle, {
+    selected: activeModelResponse.selected || null,
+    attemptRecords: activeModelResponse.attemptRecords,
+    data: latest.data || existing?.raw || {},
+    content: latest.content || existing?.content || "",
+    spec: latest.spec || existing?.parsed || null,
+    parseError: `model page spec worker terminated before final response: ${reason}`,
+    final: true
+  }).catch(() => null);
 }
 
 function strengthenPlainJsonMessages(messages = []) {
@@ -453,6 +925,8 @@ function buildCompactSpecMessages(bundle = {}) {
     "Do not reference source.png as an image asset.",
     "Do not create a mostly blank editable text-only page. Cover all large visible non-text objects as shapes, images, or needed_visual_asset_jobs.",
     "Do not claim the background is preserved unless the visible decoration is actually represented.",
+    "Never use words crop, approximation, fallback, or emoji anywhere in visual_inventory or asset_provenance.",
+    "Use clean visual_inventory decisions only: native-shape, image-asset, needed-visual-asset, or native-text. Do not write native-shape-approximation.",
     "If a logo/photo/icon/screenshot/device must be separated first, return passed:false with needed_visual_asset_jobs.",
     "Otherwise create editable text_boxes and native shapes; keep images empty unless an actual separated asset exists.",
     "Required arrays: text_inventory, visual_inventory, required_text, text_boxes, shapes, images, asset_provenance.",
@@ -519,6 +993,7 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
   ensureAvailableBrandAssetsRepresented(spec, bundle);
   normalizeVisualInventoryProvenance(spec);
   normalizeShapeGeometry(spec, pageRequest);
+  sanitizeSpecDraft(spec, bundle, pageRequest);
   if (!bundle.includeImage) normalizeTextOnlySpec(spec, pageRequest);
 }
 
@@ -610,6 +1085,89 @@ function mergeBriefOcrText(spec, bundle, pageRequest) {
 
 function normalizeTextForCompare(value = "") {
   return String(value || "").replace(/\s+/g, "").trim().toLowerCase();
+}
+
+function sanitizeSpecDraft(spec, bundle, pageRequest) {
+  if (!spec || typeof spec !== "object") return;
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  const rejected = [];
+
+  if (!Array.isArray(spec.text_boxes)) spec.text_boxes = [];
+  const textBoxes = [];
+  for (const [index, box] of spec.text_boxes.entries()) {
+    if (!box || typeof box !== "object") {
+      rejected.push(`text_boxes[${index}] non-object`);
+      continue;
+    }
+    const text = String(box.text || "").trim();
+    const cleanBox = coerceBox(box.box_px);
+    if (!text || !validBox(cleanBox, width, height)) {
+      rejected.push(`text_boxes[${index}] missing text or valid box_px`);
+      continue;
+    }
+    textBoxes.push({ ...box, text, box_px: cleanBox });
+  }
+  spec.text_boxes = textBoxes;
+
+  if (!spec.text_boxes.length) {
+    const ocrLines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines : [];
+    const fallback = buildFallbackSkeleton(pageRequest, ocrLines);
+    spec.text_boxes = fallback.text_boxes.filter((box) => box.text && validBox(coerceBox(box.box_px), width, height));
+    if (spec.text_boxes.length) {
+      spec.text_inventory = fallback.text_inventory;
+      spec.required_text = fallback.required_text;
+      rejected.push(`restored ${spec.text_boxes.length} text box(es) from OCR skeleton`);
+    }
+  }
+
+  if (!Array.isArray(spec.shapes)) spec.shapes = [];
+  spec.shapes = spec.shapes.filter((shape, index) => {
+    if (!shape || typeof shape !== "object") {
+      rejected.push(`shapes[${index}] non-object`);
+      return false;
+    }
+    if (shape.type === "line") {
+      const points = coercePoints(shape.points_px);
+      if (!validPoints(points, width, height)) {
+        rejected.push(`shapes[${index}] line missing valid points_px`);
+        return false;
+      }
+      shape.points_px = points;
+      return true;
+    }
+    const box = coerceBox(shape.box_px);
+    if (!validBox(box, width, height)) {
+      rejected.push(`shapes[${index}] missing valid box_px`);
+      return false;
+    }
+    shape.box_px = box;
+    return true;
+  });
+
+  if (!Array.isArray(spec.images)) spec.images = [];
+  spec.images = spec.images.filter((image, index) => {
+    const imagePath = normalizeAssetPath(image?.path);
+    const box = coerceBox(image?.box_px);
+    const ok = imagePath && imagePath !== "source.png" && validBox(box, width, height);
+    if (!ok) rejected.push(`images[${index}] missing valid path or box_px`);
+    if (ok) {
+      image.path = imagePath;
+      image.box_px = box;
+    }
+    return ok;
+  });
+
+  if (!Array.isArray(spec.text_inventory)) spec.text_inventory = [];
+  if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
+  if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
+  if (!Array.isArray(spec.required_text)) spec.required_text = spec.text_boxes.map((box) => box.text).filter(Boolean);
+  if (rejected.length) {
+    spec.notes = [
+      spec.notes,
+      `Sanitized invalid model objects before validation: ${rejected.slice(0, 12).join("; ")}${rejected.length > 12 ? "; ..." : ""}.`
+    ].filter(Boolean).join(" ");
+  }
 }
 
 function normalizeCoordinateObjects(spec, pageRequest) {
@@ -980,7 +1538,7 @@ function buildVisualAssetSpec(neededJobs) {
       const id = cleanAssetId(job.id || job.job_id || job.jobId || `visual_asset_${index + 1}`);
       const targetPath = normalizeAssetPath(job.target_asset_path || job.expected_asset_path || job.path || path.join("assets", `${id}.png`)) || path.join("assets", `${id}.png`);
       const out = path.basename(targetPath);
-      const sourceBox = coerceBox(job.source_box_px || job.sourceBoxPx || job.box_px);
+      const sourceBox = coerceAssetJobBox(job);
       const localCleanup = /full-slide|raster scene|base visual layer/i.test(`${job.asset_type || ""} ${job.purpose || ""}`);
       return {
         id,
@@ -991,7 +1549,9 @@ function buildVisualAssetSpec(neededJobs) {
           job.description || job.object || job.purpose || (Array.isArray(job.requirements) ? job.requirements.join(" ") : "") || job.required_output || "Separate the required foreground visual asset from the source slide.",
           "Preserve the source-faithful colors, typography, proportions, strokes, edges, and shadows.",
           "Return only the requested visual object/panel, cleanly separated for reuse in an editable PowerPoint rebuild.",
-          job.transparent_background === false ? "Keep the original rectangular/panel background." : "Use transparent background outside the requested object."
+          job.transparent_background === false
+            ? "Keep the original rectangular/panel background."
+            : "Use real transparent pixels outside the requested object; do not render a gray-white checkerboard, transparency grid, or placeholder background. If true transparency is unavailable, use one flat high-saturation chroma-key color that does not appear in the object."
         ].join(" "),
         out,
         dest: targetPath,
@@ -1025,6 +1585,7 @@ function listAvailableAssets(pageDir) {
           source: relativePath,
           source_type: /user_approved|raster/i.test(entry.name) ? "user-approved-rasterization" : "asset-sheet-separated",
           provenance_note: job.note || "Available page asset discovered after visual asset generation/import.",
+          ...(readAssetPromptExcerpt(pageDir, entry.name) ? { prompt_excerpt: readAssetPromptExcerpt(pageDir, entry.name) } : {}),
           ...(Array.isArray(job.source_box_px) ? { source_box_px: job.source_box_px } : {})
         });
       }
@@ -1033,20 +1594,66 @@ function listAvailableAssets(pageDir) {
   return results.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+function readAssetPromptExcerpt(pageDir, fileName = "") {
+  const id = cleanAssetId(path.basename(fileName, path.extname(fileName)));
+  const candidates = [
+    path.join(pageDir, "prompts", "image-assets", `${id}.prompt.txt`)
+  ];
+  for (const filePath of candidates) {
+    try {
+      if (!fsSync.existsSync(filePath)) continue;
+      return fsSync.readFileSync(filePath, "utf8").replace(/\s+/g, " ").trim().slice(0, 360);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
 function readVisualAssetJobIndex(pageDir) {
   const index = new Map();
   try {
     const specPath = path.join(pageDir, "visual-asset-jobs.json");
-    if (!fsSync.existsSync(specPath)) return index;
-    const spec = JSON.parse(fsSync.readFileSync(specPath, "utf8").replace(/^\uFEFF/, ""));
-    for (const job of Array.isArray(spec.jobs) ? spec.jobs : []) {
-      const dest = normalizeAssetPath(job.dest || "");
-      if (dest) index.set(dest, job);
+    if (fsSync.existsSync(specPath)) {
+      const spec = JSON.parse(fsSync.readFileSync(specPath, "utf8").replace(/^\uFEFF/, ""));
+      for (const job of Array.isArray(spec.jobs) ? spec.jobs : []) {
+        const dest = normalizeAssetPath(job.dest || "");
+        if (dest) index.set(dest, job);
+      }
+    }
+    const imagegenPath = path.join(pageDir, "imagegen-jobs.json");
+    if (fsSync.existsSync(imagegenPath)) {
+      const imagegen = JSON.parse(fsSync.readFileSync(imagegenPath, "utf8").replace(/^\uFEFF/, ""));
+      for (const job of Array.isArray(imagegen.jobs) ? imagegen.jobs : []) {
+        const output = normalizeAssetPath(job.output || "");
+        if (!output || index.has(output)) continue;
+        index.set(output, {
+          id: job.job_id || job.id,
+          dest: output,
+          note: job.note || "asset-sheet-separated",
+          source_box_px: job.source_box_px,
+          prompt: readPromptFileExcerpt(resolvePageRelativePath(pageDir, job.prompt_file || ""))
+        });
+      }
     }
   } catch {
     // Ignore malformed transient asset job specs; the caller can still use filesystem assets.
   }
   return index;
+}
+
+function resolvePageRelativePath(pageDir = "", filePath = "") {
+  if (!filePath) return "";
+  return path.isAbsolute(filePath) ? filePath : path.join(pageDir, filePath);
+}
+
+function readPromptFileExcerpt(filePath = "") {
+  try {
+    if (!filePath || !fsSync.existsSync(filePath)) return "";
+    return fsSync.readFileSync(filePath, "utf8").replace(/\s+/g, " ").trim().slice(0, 360);
+  } catch {
+    return "";
+  }
 }
 
 function cleanAssetId(value) {
@@ -1202,8 +1809,9 @@ function normalizeShapeGeometry(spec, pageRequest) {
         shape.polygon_px = shape.points_px;
         delete shape.points_px;
       }
-      if (shape.type === "roundRect" && !Number.isFinite(Number(shape.source_corner_radius_px)) && Number.isFinite(Number(shape.radius_px))) {
-        shape.source_corner_radius_px = Number(shape.radius_px);
+      if (shape.type === "roundRect" && !Number.isFinite(Number(shape.source_corner_radius_px))) {
+        const radius = Number(shape.radius_px);
+        shape.source_corner_radius_px = Number.isFinite(radius) ? radius : inferRoundRectCornerRadius(shape.box_px);
       }
       expanded.push(shape);
       continue;
@@ -1269,6 +1877,15 @@ function normalizePaint(shape) {
     shape.outline = shape.stroke;
   }
   if (shape.fill === undefined && shape.type === "line") shape.fill = "none";
+}
+
+function inferRoundRectCornerRadius(boxPx = []) {
+  const box = Array.isArray(boxPx) ? boxPx.map(Number) : [];
+  const width = Math.abs(Number(box[2] || 0));
+  const height = Math.abs(Number(box[3] || 0));
+  const shortest = Math.min(width || 0, height || 0);
+  if (!Number.isFinite(shortest) || shortest <= 0) return 8;
+  return Math.max(4, Math.min(24, Math.round(shortest * 0.18)));
 }
 
 function flattenLinePoints(value) {
@@ -1587,6 +2204,55 @@ async function imageDataUrl(filePath) {
   return `data:${mime};base64,${buffer.toString("base64")}`;
 }
 
+async function preparePromptImage(sourceImage, pageDir) {
+  const maxWidth = parseBoundedNumber(process.env.PAGE_SPEC_PROMPT_IMAGE_MAX_WIDTH, 384, 2048, 512);
+  const quality = parseBoundedNumber(process.env.PAGE_SPEC_PROMPT_IMAGE_QUALITY, 35, 95, 55);
+  const previewPath = path.join(pageDir, `model-page-spec-source-preview-${maxWidth}w-q${quality}.jpg`);
+  const sourceStat = fsSync.statSync(sourceImage);
+  const needsRefresh = !fsSync.existsSync(previewPath)
+    || fsSync.statSync(previewPath).mtimeMs < sourceStat.mtimeMs
+    || fsSync.statSync(previewPath).size < 512;
+  if (needsRefresh) {
+    const script = [
+      "import sys",
+      "from PIL import Image",
+      "src, out, max_width, quality = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])",
+      "im = Image.open(src).convert('RGB')",
+      "w, h = im.size",
+      "if w > max_width:",
+      "    h = max(1, round(h * (max_width / w)))",
+      "    w = max_width",
+      "    im = im.resize((w, h), Image.Resampling.LANCZOS)",
+      "im.save(out, 'JPEG', quality=quality, optimize=True)"
+    ].join("\n");
+    try {
+      await execFileAsync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourceImage, previewPath, String(maxWidth), String(quality)], {
+        timeout: 30000,
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+        encoding: "utf8"
+      });
+    } catch {
+      return {
+        path: sourceImage,
+        sourcePath: sourceImage,
+        optimized: false,
+        reason: "prompt-image-preview-unavailable"
+      };
+    }
+  }
+  const previewStat = fsSync.existsSync(previewPath) ? fsSync.statSync(previewPath) : null;
+  return {
+    path: previewPath,
+    sourcePath: sourceImage,
+    optimized: Boolean(previewStat),
+    maxWidth,
+    quality,
+    sourceBytes: sourceStat.size,
+    previewBytes: previewStat?.size || null
+  };
+}
+
 function parseJsonContent(content) {
   const text = String(content || "").trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   try {
@@ -1664,6 +2330,15 @@ function balancedObjectCandidates(text = "") {
     }
   }
   return results;
+}
+
+function readJsonIfExists(filePath) {
+  try {
+    if (!filePath || !fsSync.existsSync(filePath)) return null;
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
+  }
 }
 
 function validBox(value, width, height) {
