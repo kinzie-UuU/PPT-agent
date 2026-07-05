@@ -1447,7 +1447,7 @@ function App() {
   const hasEditableContext = Boolean(job && currentSlide && !editBlocked);
   const allowAdvancedEdit = activeStep === "preview" && hasEditableContext;
   const useDualRouteDashboard = activeStep === "generate";
-  const showRightPanel = !useDualRouteDashboard && ((activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed");
+  const showRightPanel = !useDualRouteDashboard && activeStep !== "export" && ((activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed");
   const visibleRightPanelMode = rightPanelMode === "closed"
     ? "status"
     : (!allowAdvancedEdit && ["edit", "ai"].includes(rightPanelMode) ? "status" : rightPanelMode);
@@ -1510,7 +1510,7 @@ function App() {
         ) : null}
       </header>
 
-      {!useDualRouteDashboard ? (
+      {!useDualRouteDashboard && activeStep !== "export" ? (
         <WorkflowStrip activeStep={activeStep} completion={completion} rightPanelMode={rightPanelMode} setActiveStep={setActiveStep} setRightPanelMode={toggleSettingsPanel} stepState={stepState} />
       ) : null}
 
@@ -1540,7 +1540,7 @@ function App() {
           />
         )}
         <main className="main-stage">
-          {activeStep !== "generate" ? (
+          {activeStep !== "generate" && activeStep !== "export" ? (
             <WorkflowPrimaryJobNotice
               currentJob={workflowJob}
               onOpenDelivery={openDeliveryReviewPanel}
@@ -1785,7 +1785,7 @@ function App() {
           )}
 
           {activeStep === "export" && (
-            <SectionCard title="交付文件" desc="最终只交付可编辑 PPT；图片型 PPT、校验证据和日志包作为中间产物与证据查看。">
+            <SectionCard title="交付文件" desc="只显示最终交付状态；需要人工确认时再展开复核界面。">
               <WorkflowDeliveryPortal
                 job={workflowJob}
                 onCreateWorkflow={startSkillFirstWorkflow}
@@ -3185,99 +3185,6 @@ function WorkflowWorkerBatchPreflightPanel({ bundle = null }) {
   );
 }
 
-function WorkflowEditableFailureRecoveryCard({
-  failure = null,
-  onOpenLog,
-  onPreflight,
-  onResetPages,
-  onSelectPage,
-  onStartPage,
-  preflightBusy = false,
-  resetBusy = false,
-  run = null,
-  startReady = false
-}) {
-  if (!failure) return null;
-  const pages = Array.isArray(failure.pages) ? failure.pages.filter(Boolean) : [];
-  const recoveryPlan = failure.recoveryPlan || {};
-  const recoverySteps = Array.isArray(recoveryPlan.steps) ? recoveryPlan.steps : [];
-  const pageText = pages.length ? pages.join("、") : "受影响页面";
-  const imageProviderOverloaded = failure.kind === "image-provider-overloaded" || recoveryPlan.imageProviderRetryRecommended;
-  const complexityLabel = imageProviderOverloaded
-    ? "不适用：图片 API 过载"
-    : recoveryPlan.lowComplexityRecommended
-      ? "建议启用"
-      : "按预检判断";
-  const canRetry = Boolean(failure.canRetryPages && pages.length);
-  const canStart = Boolean(canRetry && startReady && onStartPage && !preflightBusy);
-  const canReset = Boolean(canRetry && onResetPages && !resetBusy && !preflightBusy);
-  function confirmStart() {
-    if (!canStart) return;
-    const confirmed = window.confirm(
-      imageProviderOverloaded
-        ? `将稍后重跑 ${pageText}。上次失败原因是图片 API 服务过载，不是 OCR 或成功页问题。\n\n此操作会重新调用 gpt-image-2 生成该页图片资产并重建可编辑 PPT，可能消耗额度；已成功页面不会被覆盖。是否继续？`
-        : `将重跑 ${pageText} 的可编辑页面重建。此操作会调用外部模型/图片服务，可能消耗额度。已成功页面不会被覆盖。是否继续？`
-    );
-    if (confirmed) onStartPage?.();
-  }
-  return (
-    <div className="workflow-editable-failure-card">
-      <div className="workflow-editable-failure-head">
-        <div>
-          <b>最近失败恢复</b>
-          <span>{failure.title || "页面重建失败"}</span>
-        </div>
-        <strong>{run?.status ? uiZh(run.status) : "失败"}</strong>
-      </div>
-      <div className="workflow-editable-failure-grid">
-        <WorkflowArtifact label="影响页面" value={pageText} />
-        <WorkflowArtifact label="失败类型" value={failure.kind || "worker-command-failed"} />
-        <WorkflowArtifact label="运行记录" value={run?.id || "-"} />
-        <WorkflowArtifact label="成功页保护" value={recoveryPlan.preserveSuccessfulPages ? "只重跑失败页" : "待确认"} />
-        <WorkflowArtifact label="低复杂度模式" value={complexityLabel} />
-        <WorkflowArtifact label="重跑后合成" value={recoveryPlan.autoFinalize ? "自动尝试" : "手动合成 final"} />
-      </div>
-      <p>{uiZh(failure.reason || "可编辑页面重建没有完成。")}</p>
-      <small>{uiZh(failure.recommendedAction || "先查看日志，再只重跑受影响页面。")}</small>
-      {recoverySteps.length ? (
-        <div className="workflow-editable-failure-flow">
-          {recoverySteps.map((step, index) => (
-            <span key={step.id || step.label || index}>
-              {index + 1}. {uiZh(step.label || step.id)}
-              {step.detail ? <small>{uiZh(step.detail)}</small> : null}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <div className="workflow-editable-failure-flow">
-          <span>1. 重置失败页</span>
-          <span>2. 重跑前预检</span>
-          <span>3. 只重跑影响页</span>
-          <span>4. 重新合成 final</span>
-        </div>
-      )}
-      <div className="workflow-editable-failure-actions">
-        {pages.slice(0, 4).map((pageId) => (
-          <button type="button" key={pageId} onClick={() => onSelectPage?.(pageId)}>
-            定位 {pageId}
-          </button>
-        ))}
-        <button type="button" onClick={onOpenLog} disabled={!run?.logHref}>打开日志</button>
-        <button type="button" onClick={onResetPages} disabled={!canReset}>
-          {resetBusy ? "重置中..." : "重置失败页"}
-        </button>
-        <button type="button" onClick={onPreflight} disabled={!canRetry || preflightBusy}>
-          {preflightBusy ? "预检中..." : "先做重跑预检"}
-        </button>
-        <button type="button" onClick={confirmStart} disabled={!canStart}>
-          {startReady ? (failure.retryLabel || "确认并重跑") : "预检通过后重跑"}
-        </button>
-      </div>
-      {!startReady ? <em>重跑按钮需要先对这些失败页面完成预检，避免误用其他页的预检结果。</em> : null}
-    </div>
-  );
-}
-
 function WorkflowEditablePreparePreflightPanel({ bundle = null, busy = false, message = "", onPrepare, onRefresh }) {
   const state = bundle?.ready || bundle?.startReady ? "ready" : bundle ? "blocked" : "pending";
   const checks = Array.isArray(bundle?.checks) ? bundle.checks : [];
@@ -4448,7 +4355,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
   async function resetLatestDeliveryFailurePages() {
     if (!job?.id || !latestDeliveryFailurePages.length || recoveryBusy) return;
     const pageText = latestDeliveryFailurePages.join(",");
-    const confirmed = window.confirm(`将重置失败页 ${pageText} 的页面任务状态。\n\n这一步只清理本地失败/锁定状态，不调用外部 API，不覆盖已成功页面。重置后仍需先做预检，再手动启动重跑。是否继续？`);
+    const confirmed = window.confirm(`将清理 ${pageText} 的失败/锁定状态。\n\n这一步只处理本地状态，不调用外部 API，不覆盖已成功页面。清理后仍需先做预检，再手动启动。是否继续？`);
     if (!confirmed) return;
     setRecoveryBusy("reset-latest-failure");
     setRecoveryMessage("");
@@ -4500,7 +4407,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       const lowComplexityNote = startBody.lowComplexityPageSpec ? "\n\n检测到页面重建模型最近超时，本次会使用低复杂度页面规格模式，优先降低再次 524 的概率。" : "";
       const imageCalls = Number(startBody.externalImageCallBudget || preflight.externalImageCalls || preflight.authorization?.imageCalls || 0);
       const imageCallNote = imageCalls ? `\n\n本批预计最多使用 ${imageCalls} 次 gpt-image-2 图片调用。` : "";
-      const confirmed = window.confirm(`将启动 ${preflight.selectedCount || 0} 个 image-to-editable-ppt 页面 worker。此操作会调用外部图片/模型服务，可能消耗额度。成功页会保留，失败页后续单独重跑。是否继续？${imageCallNote}${lowComplexityNote}`);
+      const confirmed = window.confirm(`将启动 ${preflight.selectedCount || 0} 个可编辑页面任务。此操作会调用外部图片/模型服务，可能消耗额度。是否继续？${imageCallNote}${lowComplexityNote}`);
       if (!confirmed) return;
       const result = await api.startWorkflowWorkerBatch(job.id, {
         mode: "model",
@@ -4560,11 +4467,11 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
     <div className="workflow-delivery-portal">
       <div className="workflow-delivery-portal-head">
         <div>
-          <b>双技能交付中心</b>
-          <span>只展示两套核心技能工作流产生的正式产物和诊断文件；辅助 PDF/PNG 导出不作为主交付入口。</span>
+          <b>交付文件</b>
+          <span>这里只看能不能交付。需要你确认的地方会展开确认界面，其余处理保持后台完成。</span>
         </div>
         <div>
-          <button className="btn ghost" type="button" onClick={onOpenWorkflow}>打开工作流</button>
+          <button className="btn ghost" type="button" onClick={onOpenWorkflow}>返回主工作台</button>
           <button className="btn ghost" type="button" onClick={() => loadDelivery()} disabled={loading}>{loading ? "刷新中..." : "刷新交付"}</button>
           <button className="btn ghost" type="button" onClick={onCreateWorkflow}>新建工作流</button>
         </div>
@@ -4580,41 +4487,6 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
         />
       ) : null}
       {loading && !deliveryBundle ? <p className="workflow-note">正在读取交付状态和产物链接...</p> : null}
-      <WorkflowPlainAgentDashboardClean
-        bundle={deliveryBundle}
-        job={job}
-        onAuthorizeEditableWorkerSpend={authorizeEditableWorkerSpend}
-        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-        onOpenWorkflow={onOpenWorkflow}
-        onPreviewEditableWorkerStart={previewEditableWorkerStart}
-        onStartEditableWorker={startEditableWorkerFromDelivery}
-        onToggleLlmRecovered={toggleDeliveryLlmRecovered}
-        latestWorkerRun={latestDeliveryRun}
-        selectedWorkerBatchSize={deliveryWorkerBatchSize}
-        selectedWorkerPageIds={deliverySelectedWorkerPageIds}
-        onChangeWorkerBatchSize={(value) => {
-          setDeliveryWorkerBatchSize(value === "all" ? "all" : Number(value || 2));
-          setWorkerPreflightBundle(null);
-        }}
-        status={status}
-        llmRecoveredConfirmed={deliveryLlmRecoveredConfirmed}
-        workerPreflight={workerPreflightBundle}
-        workerPreflightBusy={workerPreflightBusy}
-        workerStartBusy={workerStartBusy}
-        authorizationBusy={authorizationBusy === "editable-workers"}
-      />
-      <WorkflowEditableFailureRecoveryCard
-        failure={latestDeliveryFailure}
-        onOpenLog={() => latestDeliveryFailedRun?.logHref && window.open(latestDeliveryFailedRun.logHref, "_blank", "noopener,noreferrer")}
-        onPreflight={previewLatestFailureWorkerStart}
-        onResetPages={resetLatestFailurePages}
-        onSelectPage={onOpenPageTasks || onOpenWorkflow}
-        onStartPage={startLatestFailureWorker}
-        preflightBusy={workerPreflightBusy}
-        resetBusy={recoveryBusy === "reset-latest-failure"}
-        run={latestDeliveryFailedRun}
-        startReady={latestDeliveryFailurePreflightReady}
-      />
       <WorkflowDeliverySummary
         artifactBundle={artifactBundle}
         bundle={deliveryBundle}
@@ -4629,249 +4501,12 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
   );
 }
 
-function WorkflowPlainAgentDashboardClean({ authorizationBusy = false, bundle = null, job = null, latestWorkerRun = null, llmRecoveredConfirmed = false, onAuthorizeEditableWorkerSpend, onChangeWorkerBatchSize, onOpenPageTasks, onOpenWorkflow, onPreviewEditableWorkerStart, onStartEditableWorker, onToggleLlmRecovered, selectedWorkerBatchSize = 2, selectedWorkerPageIds = [], status = {}, workerPreflight = null, workerPreflightBusy = false, workerStartBusy = false }) {
-  const gate = bundle?.finalGate || null;
-  const checks = gate?.checks || {};
-  const coverage = bundle?.coverage || {};
-  const sourcePages = Number(checks.sourcePages || coverage.sourcePages || job?.sourcePages || job?.sourceMeta?.pageCount || job?.artifacts?.sourceMeta?.pageCount || 0);
-  const finalPages = Number(checks.finalPages || coverage.finalPages || job?.finalPages || job?.artifacts?.editableFinal?.summary?.page_count || 0);
-  const remainingPages = Math.max(0, sourcePages - finalPages);
-  const nextStep = status?.nextStep || {};
-  const workerPages = Array.isArray(nextStep.pages) ? nextStep.pages : [];
-  const workerPageCount = workerPages.length || remainingPages || 0;
-  const workerPageSelection = workflowWorkerPageSelection(status);
-  const batchPlan = nextStep.batchPlan || {};
-  const selectedBatchPageIds = Array.isArray(selectedWorkerPageIds) ? selectedWorkerPageIds.filter(Boolean) : [];
-  const selectedBatchPageSelection = selectedBatchPageIds.join(",");
-  const selectedBatchCount = selectedBatchPageIds.length || Math.min(workerPageCount || 0, 2);
-  const imageCallsPerPage = Number(nextStep.externalImageCallsPerPage || batchPlan.externalImageCallsPerPage || 8);
-  const selectedBatchImageCalls = selectedBatchCount * imageCallsPerPage;
-  const defaultBatchPages = Array.isArray(batchPlan.defaultBatchPages) ? batchPlan.defaultBatchPages.filter(Boolean) : [];
-  const defaultBatchLabel = defaultBatchPages.length ? defaultBatchPages.join(",") : selectedBatchPageSelection || workerPageSelection;
-  const hasFinal = Boolean(finalPages || bundle?.final?.artifact || job?.artifacts?.editableFinal);
-  const productReady = gate?.productReady === true || status?.level === "ready";
-  const isPartialFinal = Boolean(hasFinal && sourcePages && finalPages && finalPages < sourcePages);
-  const needsWorkerStart = nextStep.id === "start-page-workers";
-  const needsAuthorization = Boolean(needsWorkerStart && nextStep.authorization?.required && !nextStep.authorization?.persisted);
-  const workerPreflightSelection = workflowPreflightPageSelection(workerPreflight);
-  const preflightMatchesStatus = workflowPageSelectionsMatch(workerPreflightSelection, selectedBatchPageSelection || workerPageSelection);
-  const preflightReady = Boolean(workerPreflight?.startReady === true && preflightMatchesStatus);
-  const externalConfirmation = workerPreflight?.requiredConfirmations?.externalImageSpend || {};
-  const llmRecovery = workerPreflight?.requiredConfirmations?.llmProviderRecovered || {};
-  const needsLlmRecovery = Boolean(workerPreflight && llmRecovery.required && !llmRecovery.confirmed);
-  const modelPageWorkersReady = Boolean(workerPreflight?.modelPageWorkers?.ready || workerPreflight?.modelPageWorkers?.missingCount === 0);
-  const preflightCanAuthorize = Boolean(
-    workerPreflight?.ready
-      && workerPageSelection
-      && preflightMatchesStatus
-      && Array.isArray(workerPreflight?.selectedPageIds)
-      && workerPreflight.selectedPageIds.length
-  );
-  const sourceName = job?.sourceName || job?.input?.sourceOriginalName || job?.artifacts?.source?.originalName || job?.title || "当前 PPT";
-  const manualReview = job?.artifacts?.manualReview || {};
-  const manualReviewRecorded = checks.manualReviewRecorded === true;
-  const sampleReviewRecorded = Boolean(manualReviewRecorded && isPartialFinal);
-  const fullReviewRecorded = Boolean(manualReviewRecorded && !isPartialFinal && checks.fullSourceCoverage === true);
-  const blocked = status?.level === "blocked" || gate?.level === "blocked";
-  const authorizationLabel = selectedBatchImageCalls ? `授权本批 ${selectedBatchImageCalls} 次图片额度` : "确认图片额度";
-  const workerPageLabel = workerPageCount ? `继续剩余 ${workerPageCount} 页` : "继续剩余页面";
-  const title = productReady
-    ? "最终 PPT 已可交付"
-    : isPartialFinal
-      ? `当前只有 ${finalPages}/${sourcePages} 页小样本`
-      : needsWorkerStart
-        ? "可编辑重建还没完成"
-        : blocked
-          ? "当前任务被交付门禁拦住"
-          : "PPT Agent 正在处理";
-  const summary = productReady
-    ? "页数、可编辑性、PowerPoint 打开检查和人工复核都已通过，可以下载最终产品级 PPT。"
-    : isPartialFinal
-      ? `已有 ${finalPages} 页可编辑结果，但完整交付必须覆盖全部 ${sourcePages} 页。下一步是继续重建剩余页面，或先复核当前小样本。`
-      : needsWorkerStart
-        ? `还有 ${workerPageCount || "若干"} 页等待 image-to-editable-ppt 重建。建议先小批量运行，本次默认选择 ${selectedBatchCount || 0} 页。`
-        : blocked
-          ? "当前被交付门禁拦住，先按下方推荐动作处理。"
-          : "继续等待后台任务或刷新状态。";
-  const facts = [
-    { label: "当前文件", value: sourceName },
-    { label: "源文件页数", value: sourcePages || "未知" },
-    { label: "可编辑 PPT", value: sourcePages && finalPages ? `${finalPages}/${sourcePages}` : finalPages || "未生成" },
-    { label: "待重建页数", value: workerPageCount || remainingPages || 0 },
-    { label: "本批页数", value: selectedBatchCount || "待选择" },
-    { label: "本批预计额度", value: selectedBatchImageCalls ? `${selectedBatchImageCalls} 次` : "待预检" }
-  ];
-  const steps = [
-    { label: "上传源文件", detail: sourcePages ? `${sourcePages} 页` : "等待源文件", done: Boolean(sourcePages || job?.source?.path || job?.input?.path) },
-    { label: "生成图片型 PPT", detail: checks.codexPptSlideRunComplete === true ? "20/20 已完成" : "等待 codex-ppt", done: checks.codexPptSlideRunComplete === true },
-    { label: "转成可编辑 PPT", detail: sourcePages && finalPages ? `${finalPages}/${sourcePages}` : "等待重建", done: checks.fullSourceCoverage === true, current: needsWorkerStart || isPartialFinal },
-    { label: "人工复核", detail: fullReviewRecorded ? "完整复核已记录" : sampleReviewRecorded ? "小样本已复核" : hasFinal ? "等待复核" : "等待最终 PPT", done: fullReviewRecorded, current: hasFinal && !fullReviewRecorded },
-    { label: "下载最终 PPT", detail: productReady ? "最终产品级" : isPartialFinal ? "仅小样本草稿" : "等待门禁", done: productReady, current: productReady }
-  ];
-  const launchChecklist = needsWorkerStart ? [
-    { label: "页面材料", value: workerPreflight ? (modelPageWorkersReady ? "已就绪" : "缺少材料") : "待预检", state: workerPreflight ? (modelPageWorkersReady ? "ready" : "blocked") : "pending" },
-    { label: "模型状态", value: workerPreflight ? (llmRecovery.required ? (llmRecovery.confirmed ? "已确认恢复" : "待确认恢复") : "无需确认") : "待预检", state: workerPreflight ? (llmRecovery.required ? (llmRecovery.confirmed ? "ready" : "warning") : "ready") : "pending" },
-    { label: "图片额度", value: workerPreflight ? (externalConfirmation.required ? (externalConfirmation.confirmed ? "已授权" : `${externalConfirmation.imageCalls || selectedBatchImageCalls || "待确认"} 次待确认`) : "无需授权") : `${selectedBatchImageCalls || "待确认"} 次待确认`, state: workerPreflight ? (externalConfirmation.required ? (externalConfirmation.confirmed ? "ready" : "warning") : "ready") : "warning" },
-    { label: "启动状态", value: preflightReady ? "预检通过，等待人工启动" : workerPreflight ? "未就绪" : "待预检", state: preflightReady ? "ready" : "pending" }
-  ] : [];
-  const llmRecoveryLabel = llmRecovery.required
-    ? llmRecovery.confirmed
-      ? "模型恢复已确认"
-      : "需要确认模型恢复"
-    : "模型状态正常";
-  const nextCopy = productReady
-    ? "下载区在下方；这是最终产品级文件。"
-    : needsAuthorization && needsLlmRecovery
-      ? `先确认页面重建模型已恢复，再授权 ${selectedBatchImageCalls || "本批"} 次图片额度。`
-      : needsAuthorization
-        ? `先点“启动前预检”，再点“${authorizationLabel}”，最后启动本批页面重建。`
-        : needsLlmRecovery
-          ? "确认页面重建模型服务已经恢复，再重新执行启动前预检。"
-          : preflightReady
-            ? `预检已通过，可以点“确认并启动 ${selectedBatchCount || "本批"} 页重建”。`
-            : needsWorkerStart
-              ? `先选择本次运行页数，再做启动前预检，确认 ${selectedBatchCount || "这些"} 页、图片额度和模型状态。`
-              : isPartialFinal
-                ? "先复核当前小样本；完整交付仍需要继续剩余页面。"
-              : "按当前推荐动作继续处理。";
-
-  return (
-    <section className={`workflow-agent-dashboard ${productReady ? "ready" : blocked ? "blocked" : "working"}`}>
-      <div className="workflow-agent-dashboard-head">
-        <div>
-          <b>PPT Agent 工作台</b>
-          <strong>{title}</strong>
-          <span>{summary}</span>
-        </div>
-        <button className="btn ghost" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看完整工作流</button>
-      </div>
-      <div className="workflow-agent-dashboard-facts">
-        {facts.map((fact) => <span key={fact.label}><b>{fact.value}</b>{fact.label}</span>)}
-      </div>
-      <div className="workflow-agent-dashboard-steps" aria-label="PPT 智能体主流程">
-        {steps.map((step, index) => {
-          const state = step.done ? "done" : step.current ? "current" : "pending";
-          return (
-            <span className={state} key={step.label}>
-              <b>{index + 1}</b>
-              <strong>{step.label}</strong>
-              <small>{step.detail}</small>
-            </span>
-          );
-        })}
-      </div>
-      <div className="workflow-agent-dashboard-next">
-        <div>
-          <b>推荐下一步</b>
-          <span>{nextCopy}</span>
-        </div>
-        <div className="workflow-agent-dashboard-actions">
-          {needsWorkerStart ? (
-            <>
-              <label className="workflow-agent-dashboard-batch">
-                <span>本次运行</span>
-                <select value={selectedWorkerBatchSize} onChange={(event) => onChangeWorkerBatchSize?.(event.target.value)} disabled={!onChangeWorkerBatchSize || workerPreflightBusy || workerStartBusy}>
-                  <option value={1}>先跑 1 页</option>
-                  <option value={2}>先跑 2 页</option>
-                  <option value={5}>跑 5 页</option>
-                  <option value="all">跑完剩余页</option>
-                </select>
-              </label>
-              <button className="btn" type="button" onClick={onPreviewEditableWorkerStart} disabled={workerPreflightBusy || !onPreviewEditableWorkerStart}>
-                {workerPreflightBusy ? "预检中..." : "启动前预检"}
-              </button>
-              <button className="btn" type="button" onClick={onAuthorizeEditableWorkerSpend} disabled={authorizationBusy || !needsAuthorization || !preflightCanAuthorize || !onAuthorizeEditableWorkerSpend}>
-                {authorizationBusy ? "记录中..." : authorizationLabel}
-              </button>
-              <label className={`workflow-agent-dashboard-confirm ${needsLlmRecovery ? "warning" : llmRecovery.confirmed ? "ready" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={llmRecoveredConfirmed || Boolean(llmRecovery.confirmed)}
-                  onChange={(event) => onToggleLlmRecovered?.(event.target.checked)}
-                  disabled={!onToggleLlmRecovered || !workerPreflight || !llmRecovery.required}
-                />
-                <span>{llmRecoveryLabel}</span>
-              </label>
-              <button className="btn primary" type="button" onClick={onStartEditableWorker} disabled={workerStartBusy || !preflightReady || !onStartEditableWorker}>
-                {workerStartBusy ? "启动中..." : `确认并启动 ${selectedBatchCount || ""} 页重建`}
-              </button>
-            </>
-          ) : null}
-          {isPartialFinal ? <button className="btn" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>复核当前小样本</button> : null}
-          <button className="btn ghost" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>{needsWorkerStart ? workerPageLabel : "打开页面任务"}</button>
-        </div>
-      </div>
-      {needsWorkerStart ? (
-        <div className="workflow-agent-dashboard-worker-range">
-          <b>待处理页面</b>
-          <span>{selectedBatchPageSelection || workerPageSelection || "等待后端返回页码"}</span>
-          <small>默认本批：{defaultBatchLabel || "等待选择"}；预计 {selectedBatchImageCalls || batchPlan.defaultBatchExternalImageCalls || 0} 次图片 API。{uiZh(batchPlan.whyBatch || "这里只启动本批页面；成功页会保留，失败页后续单独重跑。选择“跑完剩余页”前请确认额度和模型稳定性。")}</small>
-          {batchPlan.preserveSuccessfulPages ? <em>成功页会保留；失败页可以后续单独重跑。</em> : null}
-        </div>
-      ) : null}
-      <WorkflowAgentWorkerRunStatusClean run={latestWorkerRun} />
-      {launchChecklist.length ? (
-        <div className="workflow-agent-dashboard-checklist" aria-label="启动前确认清单">
-          {launchChecklist.map((item) => (
-            <span className={item.state} key={item.label}>
-              <b>{item.label}</b>
-              {item.value}
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function WorkflowAgentWorkerRunStatusClean({ run = null }) {
-  if (!run) return null;
-  const status = String(run.status || "unknown");
-  const running = status === "running";
-  const failed = status === "failed";
-  const complete = status === "complete";
-  const pageText = run.pages || (Array.isArray(run.selectedPageIds) ? run.selectedPageIds.join(",") : "未记录");
-  const succeeded = Number(run.succeeded || run.summary?.succeeded || 0);
-  const failedCount = Number(run.failed || run.summary?.failed || 0);
-  const title = running
-    ? "本批正在重建"
-    : complete
-      ? "最近一批已完成"
-      : failed
-        ? "最近一批失败"
-        : "最近一批状态";
-  const detail = failed && run.failureAnalysis?.reason
-    ? run.failureAnalysis.reason
-    : running
-      ? "页面 worker 正在运行，状态会自动刷新。"
-      : complete
-        ? "本批页面已经返回，交付门禁会继续检查页面证据。"
-        : "可以打开日志查看这批页面的详细过程。";
-  return (
-    <div className={`workflow-agent-worker-run ${status}`}>
-      <div>
-        <b>{title}</b>
-        <span>{uiZh(detail)}</span>
-      </div>
-      <div className="workflow-agent-worker-run-facts">
-        <span><b>{pageText}</b>页码</span>
-        <span><b>{succeeded}</b>成功</span>
-        <span><b>{failedCount}</b>失败</span>
-        <span><b>{run.lowComplexityPageSpec ? "已启用" : "未启用"}</b>低复杂度</span>
-      </div>
-      <div className="workflow-agent-worker-run-actions">
-        {run.logHref ? <a className="btn ghost" href={run.logHref} target="_blank" rel="noreferrer">查看日志</a> : null}
-        {run.logDownloadHref ? <a className="btn ghost" href={run.logDownloadHref}>下载日志</a> : null}
-      </div>
-    </div>
-  );
-}
-
 function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPageTasks, onOpenWorkflow, onRefreshDelivery, onRecomposeEditableFinal, status }) {
   const finalGate = bundle?.finalGate || null;
   const finalDownloadState = getFinalDownloadState(finalGate);
   const [manualReviewBusy, setManualReviewBusy] = useState(false);
   const [manualReviewError, setManualReviewError] = useState("");
+  const [showReviewWorkbench, setShowReviewWorkbench] = useState(false);
 
   async function approveFinalManualReview() {
     if (!job?.id || manualReviewBusy) return;
@@ -4920,19 +4555,22 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
         job={job}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
         onOpenWorkflow={onOpenWorkflow}
+        onOpenReview={() => setShowReviewWorkbench(true)}
         onRecomposeFinal={onRecomposeEditableFinal}
         status={status}
       />
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
-      <WorkflowPageVisualReviewWorkbench
-        artifactBundle={artifactBundle}
-        onApproveFinalReview={approveFinalManualReview}
-        onMarkPage={markPageVisualReview}
-        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-        pageEvidence={bundle?.pageEvidence}
-        pageVisualReview={job?.artifacts?.pageVisualReview || null}
-        reviewBusy={manualReviewBusy}
-      />
+      {showReviewWorkbench ? (
+        <WorkflowPageVisualReviewWorkbench
+          artifactBundle={artifactBundle}
+          onApproveFinalReview={approveFinalManualReview}
+          onMarkPage={markPageVisualReview}
+          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+          pageEvidence={bundle?.pageEvidence}
+          pageVisualReview={job?.artifacts?.pageVisualReview || null}
+          reviewBusy={manualReviewBusy}
+        />
+      ) : null}
       <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
     </div>
   );
@@ -4960,7 +4598,7 @@ function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onO
   );
 }
 
-function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenWorkflow, onRecomposeFinal, status = {} }) {
+function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenReview, onOpenWorkflow, onRecomposeFinal, status = {} }) {
   const checks = finalGate?.checks || {};
   const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
   const reviewReady = Boolean(
@@ -5003,9 +4641,6 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
       : failedLabels.length
         ? `未通过项：${failedLabels.join(" / ")}`
         : "等待交付检查结果。";
-  function scrollToPageReview() {
-    document.querySelector(".workflow-page-review-workbench")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
   return (
     <section className={`workflow-simple-delivery ${productReady ? "ready" : reviewReady ? "review" : blocked ? "blocked" : "pending"}`}>
       <div className="workflow-simple-delivery-head">
@@ -5021,8 +4656,8 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
         {productReady ? (
           <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看最终文件</button>
         ) : reviewReady ? (
-          <button className="btn success" type="button" onClick={scrollToPageReview}>
-            去逐页复核
+          <button className="btn success" type="button" onClick={onOpenReview} disabled={!onOpenReview}>
+            开始人工复核
           </button>
         ) : hasFinal ? (
           <>
