@@ -4780,6 +4780,132 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   border-color: rgba(180,35,24,.24);
   background: #fff4f2;
 }
+
+.workflow-simple-delivery {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(40,84,216,.18);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.workflow-simple-delivery.ready {
+  border-color: rgba(22,138,91,.28);
+  background: #f3fbf7;
+}
+
+.workflow-simple-delivery.review {
+  border-color: rgba(40,84,216,.28);
+  background: #f5f8ff;
+}
+
+.workflow-simple-delivery.blocked {
+  border-color: rgba(180,35,24,.22);
+  background: #fff7f6;
+}
+
+.workflow-simple-delivery-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.workflow-simple-delivery-head div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.workflow-simple-delivery-head b {
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.workflow-simple-delivery-head h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.workflow-simple-delivery-head p,
+.workflow-simple-delivery-head > span {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.workflow-simple-delivery-head > span {
+  max-width: 260px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.workflow-simple-delivery-checks {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-simple-delivery-checks span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflow-simple-delivery-checks b {
+  overflow: hidden;
+  color: var(--red);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-simple-delivery-checks .pass b {
+  color: var(--green);
+}
+
+.workflow-simple-delivery-checks .review b {
+  color: var(--blue);
+}
+
+.workflow-simple-delivery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-delivery-advanced-details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.workflow-delivery-advanced-details summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--blue);
+  font-weight: 900;
+}
+
+.workflow-delivery-advanced-grid {
+  display: grid;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
 .workflow-delivery-head {
   display: flex;
   justify-content: space-between;
@@ -8482,23 +8608,96 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
 }
 
 .dual-dashboard-left::after {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 36px;
-  margin-top: auto;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--muted);
-  font-weight: 800;
-  content: "回收站";
+  display: none;
+  content: "";
 }
 
 .dual-new-task {
   min-height: 38px;
   border-radius: 6px;
   box-shadow: 0 8px 18px rgba(40,84,216,.2);
+}
+
+.dual-cleanup-entry {
+  min-height: 38px;
+  margin-top: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.dual-cleanup-entry:hover {
+  border-color: rgba(40,84,216,.28);
+  color: var(--blue);
+}
+
+.dual-cleanup-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(40,84,216,.18);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.dual-cleanup-head,
+.dual-cleanup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dual-cleanup-tools {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dual-cleanup-head div,
+.dual-cleanup-row div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dual-cleanup-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.dual-cleanup-head span,
+.dual-cleanup-row span,
+.dual-cleanup-grid p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.dual-cleanup-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.dual-cleanup-row {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.dual-cleanup-row.active {
+  border-color: rgba(40,84,216,.28);
+  background: var(--blue-soft);
+}
+
+.dual-cleanup-row.archived {
+  border-style: dashed;
+  background: #fbfcfe;
+  opacity: .86;
 }
 
 .dual-task-head,
@@ -8867,6 +9066,20 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .route-completion .btn.primary {
     width: 100%;
     min-width: 0;
+  }
+
+  .dual-cleanup-head,
+  .dual-cleanup-row,
+  .workflow-simple-delivery-head {
+    display: grid;
+  }
+
+  .workflow-simple-delivery-checks {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-simple-delivery-head > span {
+    max-width: none;
   }
 }
 

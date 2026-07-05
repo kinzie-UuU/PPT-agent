@@ -1715,6 +1715,8 @@ function App() {
               onOpenEditable={() => window.setTimeout(() => document.getElementById("dual-route-editable")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onOpenVisual={() => window.setTimeout(() => document.getElementById("dual-route-visual")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onNotesChange={(value) => update("notes", value)}
+              onArchiveJob={toggleWorkflowArchive}
+              onRefreshJobs={(includeArchived = false) => loadWorkflowJobs({ activeId: workflowJob?.id || "", includeArchived })}
               onSelectJob={selectWorkflowJob}
               onUploadFiles={uploadFiles}
             />
@@ -1994,6 +1996,49 @@ function TopbarStatusCard({ detail = "", label, state = "ready", value }) {
   );
 }
 
+function DualCleanupPanel({ activeJobId = "", jobs = [], onArchiveJob, onRefreshJobs, onSelectJob }) {
+  const [showArchived, setShowArchived] = useState(false);
+  const visibleJobs = jobs.filter(Boolean);
+  async function toggleArchivedVisibility() {
+    const next = !showArchived;
+    setShowArchived(next);
+    await onRefreshJobs?.(next);
+  }
+  return (
+    <section className="dual-cleanup-panel">
+      <div className="dual-cleanup-head">
+        <div>
+          <h2>清理 / 回收站</h2>
+          <span>这里只做安全归档，不删除源文件、产物或证据。归档后任务会从当前列表隐藏，产物仍保留在磁盘。</span>
+        </div>
+        <div className="dual-cleanup-tools">
+          <button className="btn" type="button" onClick={() => onRefreshJobs?.(showArchived)} disabled={!onRefreshJobs}>刷新任务</button>
+          <button className="btn" type="button" onClick={toggleArchivedVisibility} disabled={!onRefreshJobs}>{showArchived ? "隐藏已归档" : "显示已归档"}</button>
+        </div>
+      </div>
+      <div className="dual-cleanup-grid">
+        {visibleJobs.length ? visibleJobs.map((item) => {
+          const state = buildDualRouteState(item);
+          const active = item.id === activeJobId;
+          const archived = Boolean(item.archived || item.lifecycle?.archivedAt);
+          return (
+            <div className={`dual-cleanup-row ${active ? "active" : ""} ${archived ? "archived" : ""}`} key={item.id}>
+              <div>
+                <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
+                <span>{archived ? "已归档 / " : ""}图片版：{routeStatusLabel(state.routeA.status)} / 可编辑版：{routeStatusLabel(state.routeB.status)}</span>
+              </div>
+              <button className="btn" type="button" onClick={() => item.id && onSelectJob?.(item.id)} disabled={!item.id || active}>查看</button>
+              <button className={archived ? "btn" : "btn danger"} type="button" onClick={() => item.id && onArchiveJob?.(item.id, !archived)} disabled={!item.id || active || !onArchiveJob}>
+                {active ? "当前任务" : archived ? "恢复" : "归档"}
+              </button>
+            </div>
+          );
+        }) : <p>暂无可清理任务。</p>}
+      </div>
+    </section>
+  );
+}
+
 function DualRouteDashboard({
   busy = false,
   files = [],
@@ -2002,6 +2047,7 @@ function DualRouteDashboard({
   jobs = [],
   notes = "",
   noCostApprovalSummary = null,
+  onArchiveJob,
   onApproveNoCostGates,
   onCreateWorkflow,
   onNotesChange,
@@ -2009,11 +2055,13 @@ function DualRouteDashboard({
   onOpenDelivery,
   onOpenEditable,
   onOpenVisual,
+  onRefreshJobs,
   onRefresh,
   onSelectJob,
   onUploadFiles
 }) {
   const [createOpen, setCreateOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const state = buildDualRouteState(job);
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
@@ -2044,6 +2092,7 @@ function DualRouteDashboard({
         : "继续生成图片版 PPT";
   const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
+  const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const canCreateFromPanel = !busy && Boolean(files.length || notes.trim());
 
@@ -2056,7 +2105,7 @@ function DualRouteDashboard({
           <div><span className="active">进行中</span><span>已完成</span><span>已失败</span></div>
         </div>
         <div className="dual-task-list">
-          {taskRows.length ? taskRows.map((item) => {
+          {visibleTaskRows.length ? visibleTaskRows.map((item) => {
             const active = item?.id && item.id === job?.id;
             const rowState = buildDualRouteState(item);
             const pages = rowState.routeA.visualLabel || workflowJobLabel(item);
@@ -2069,6 +2118,7 @@ function DualRouteDashboard({
             );
           }) : <p>暂无任务，先上传材料创建。</p>}
         </div>
+        <button className="dual-cleanup-entry" type="button" onClick={() => setCleanupOpen((current) => !current)}>清理 / 回收站</button>
       </aside>
 
       <section className="dual-dashboard-main">
@@ -2079,6 +2129,15 @@ function DualRouteDashboard({
           </div>
         </div>
         <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
+        {cleanupOpen ? (
+          <DualCleanupPanel
+            activeJobId={job?.id || ""}
+            jobs={taskRows}
+            onArchiveJob={onArchiveJob}
+            onRefreshJobs={onRefreshJobs}
+            onSelectJob={onSelectJob}
+          />
+        ) : null}
         {createOpen ? (
           <section className="dual-create-panel">
             <div className="dual-create-head">
@@ -5231,114 +5290,19 @@ function WorkflowDeliverySummary({ artifactBundle, authorizationBusy = "", bundl
 
   return (
     <div className={`workflow-delivery-summary ${status.level}`} id="workflow-delivery-panel">
-      <div className="workflow-delivery-head">
-        <div>
-          <b>{status.title}</b>
-          <span>{status.summary}</span>
-        </div>
-      </div>
-      <div className="workflow-delivery-facts">
-        {status.facts.map((fact) => (
-          <span key={fact.label}><b>{fact.value}</b>{fact.label}</span>
-        ))}
-      </div>
-      {status.nextStep ? (
-        <div className="workflow-delivery-next">
-          <b>下一步</b>
-          <span>{uiZh(status.nextStep.label)}：{uiZh(status.nextStep.reason)}</span>
-        </div>
-      ) : null}
-      {status.warnings.length ? (
-        <div className="workflow-delivery-warnings">
-          {status.warnings.map((warning) => <span key={warning}>{warning}</span>)}
-        </div>
-      ) : null}
-      {finalGate ? <WorkflowFinalGateV2 gate={finalGate} /> : null}
-      {finalGate ? (
-        <WorkflowFinalReviewCalloutV2
-          finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
-          finalEvidence={bundle?.finalEvidence}
-          gate={finalGate}
-          manualReview={job?.artifacts?.manualReview || null}
-          onApprove={approveFinalManualReview}
-          onOpenWorkflow={onOpenWorkflow}
-          reviewBusy={manualReviewBusy}
-        />
-      ) : null}
-      {finalGate ? (
-        <WorkflowPartialFinalNextPanel
-          coverage={bundle?.coverage}
-          gate={finalGate}
-          onContinueRemaining={onOpenPageTasks || onOpenWorkflow}
-          onReviewCurrent={onOpenWorkflow}
-        />
-      ) : null}
-      {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
-      <WorkflowEditableWorkerRecoveryAction
-        busy={authorizationBusy === "editable-workers"}
+      <WorkflowDeliverySimpleCheck
+        bundle={bundle}
+        finalDownloadState={finalDownloadState}
         finalGate={finalGate}
-        onAuthorize={onAuthorizeEditableWorkerSpend}
+        job={job}
+        onApproveReview={approveFinalManualReview}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-        onPreview={onPreviewEditableWorkerStart}
-        preflight={workerPreflight}
-        preflightBusy={workerPreflightBusy}
-        onStart={onStartEditableWorker}
-        startBusy={workerStartBusy}
+        onOpenWorkflow={onOpenWorkflow}
+        onRecomposeFinal={onRecomposeEditableFinal}
+        reviewBusy={manualReviewBusy}
         status={status}
       />
-      <WorkflowEditableFinalizeAction
-        busy={retryBusy === "editable-finalize"}
-        bundle={bundle}
-        job={job}
-        onRecompose={onRecomposeEditableFinal}
-      />
-      {stalePageIds.length ? (
-        <WorkflowStalePageEvidenceRecoveryV2
-          busy={retryBusy === "stale-page-evidence"}
-          previewBusy={retryBusy === "stale-page-evidence-preview"}
-          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-          onPreview={onPreviewStalePageEvidence}
-          onRetry={onRetryStalePageEvidence}
-          pageIds={stalePageIds}
-        />
-      ) : null}
-      {finalGate ? (
-        <WorkflowFinalQualityChecklist
-          coverage={bundle?.coverage}
-          finalEvidence={bundle?.finalEvidence}
-          gate={finalGate}
-          pageEvidence={bundle?.pageEvidence}
-          validation={validation}
-        />
-      ) : null}
-      <WorkflowPageVisualReviewWorkbench
-        artifactBundle={artifactBundle}
-        busyPageId={pageReviewBusy}
-        onApproveFinalReview={approveFinalManualReview}
-        onMarkPage={markPageVisualReview}
-        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-        pageEvidence={bundle?.pageEvidence}
-        pageVisualReview={job?.artifacts?.pageVisualReview || null}
-        reviewBusy={manualReviewBusy}
-      />
-      {pageReviewError ? <p className="workflow-error">{pageReviewError}</p> : null}
-      <WorkflowFinalVisualQaPanel
-        finalEvidence={bundle?.finalEvidence}
-        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-        onPreviewRetry={onPreviewFinalVisualQaRetry}
-        onRetry={onRetryFinalVisualQaPages}
-        retryBusy={retryBusy}
-      />
-      {finalGate ? (
-        <WorkflowManualReviewSummaryV2
-          finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
-          gate={finalGate}
-          manualReview={job?.artifacts?.manualReview || null}
-          onOpenWorkflow={onOpenWorkflow}
-        />
-      ) : null}
-      <WorkflowDeliveryValidationSummary validation={validation} validationBundle={bundle?.validation} />
-      <WorkflowDiagnosticBundleSummary link={logBundleLink} status={status} />
+      {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
       {links.length ? (
         <div className="workflow-delivery-link-groups">
           <div className={`workflow-delivery-link-group final ${finalDownloadState.state}`}>
@@ -5384,6 +5348,118 @@ function WorkflowDeliverySummary({ artifactBundle, authorizationBusy = "", bundl
           {status.nextActions.map((action) => <span key={action}>{action}</span>)}
         </div>
       ) : null}
+      <details className="workflow-delivery-advanced-details">
+        <summary>高级证据与修复详情</summary>
+        <div className="workflow-delivery-advanced-grid">
+          <div className="workflow-delivery-head">
+            <div>
+              <b>{status.title}</b>
+              <span>{status.summary}</span>
+            </div>
+          </div>
+          <div className="workflow-delivery-facts">
+            {status.facts.map((fact) => (
+              <span key={fact.label}><b>{fact.value}</b>{fact.label}</span>
+            ))}
+          </div>
+          {status.nextStep ? (
+            <div className="workflow-delivery-next">
+              <b>下一步</b>
+              <span>{uiZh(status.nextStep.label)}：{uiZh(status.nextStep.reason)}</span>
+            </div>
+          ) : null}
+          {status.warnings.length ? (
+            <div className="workflow-delivery-warnings">
+              {status.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+            </div>
+          ) : null}
+          {finalGate ? <WorkflowFinalGateV2 gate={finalGate} /> : null}
+          {finalGate ? (
+            <WorkflowFinalReviewCalloutV2
+              finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
+              finalEvidence={bundle?.finalEvidence}
+              gate={finalGate}
+              manualReview={job?.artifacts?.manualReview || null}
+              onApprove={approveFinalManualReview}
+              onOpenWorkflow={onOpenWorkflow}
+              reviewBusy={manualReviewBusy}
+            />
+          ) : null}
+          {finalGate ? (
+            <WorkflowPartialFinalNextPanel
+              coverage={bundle?.coverage}
+              gate={finalGate}
+              onContinueRemaining={onOpenPageTasks || onOpenWorkflow}
+              onReviewCurrent={onOpenWorkflow}
+            />
+          ) : null}
+          <WorkflowEditableWorkerRecoveryAction
+            busy={authorizationBusy === "editable-workers"}
+            finalGate={finalGate}
+            onAuthorize={onAuthorizeEditableWorkerSpend}
+            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+            onPreview={onPreviewEditableWorkerStart}
+            preflight={workerPreflight}
+            preflightBusy={workerPreflightBusy}
+            onStart={onStartEditableWorker}
+            startBusy={workerStartBusy}
+            status={status}
+          />
+          <WorkflowEditableFinalizeAction
+            busy={retryBusy === "editable-finalize"}
+            bundle={bundle}
+            job={job}
+            onRecompose={onRecomposeEditableFinal}
+          />
+          {stalePageIds.length ? (
+            <WorkflowStalePageEvidenceRecoveryV2
+              busy={retryBusy === "stale-page-evidence"}
+              previewBusy={retryBusy === "stale-page-evidence-preview"}
+              onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+              onPreview={onPreviewStalePageEvidence}
+              onRetry={onRetryStalePageEvidence}
+              pageIds={stalePageIds}
+            />
+          ) : null}
+          {finalGate ? (
+            <WorkflowFinalQualityChecklist
+              coverage={bundle?.coverage}
+              finalEvidence={bundle?.finalEvidence}
+              gate={finalGate}
+              pageEvidence={bundle?.pageEvidence}
+              validation={validation}
+            />
+          ) : null}
+          <WorkflowPageVisualReviewWorkbench
+            artifactBundle={artifactBundle}
+            busyPageId={pageReviewBusy}
+            onApproveFinalReview={approveFinalManualReview}
+            onMarkPage={markPageVisualReview}
+            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+            pageEvidence={bundle?.pageEvidence}
+            pageVisualReview={job?.artifacts?.pageVisualReview || null}
+            reviewBusy={manualReviewBusy}
+          />
+          {pageReviewError ? <p className="workflow-error">{pageReviewError}</p> : null}
+          <WorkflowFinalVisualQaPanel
+            finalEvidence={bundle?.finalEvidence}
+            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+            onPreviewRetry={onPreviewFinalVisualQaRetry}
+            onRetry={onRetryFinalVisualQaPages}
+            retryBusy={retryBusy}
+          />
+          {finalGate ? (
+            <WorkflowManualReviewSummaryV2
+              finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
+              gate={finalGate}
+              manualReview={job?.artifacts?.manualReview || null}
+              onOpenWorkflow={onOpenWorkflow}
+            />
+          ) : null}
+          <WorkflowDeliveryValidationSummary validation={validation} validationBundle={bundle?.validation} />
+          <WorkflowDiagnosticBundleSummary link={logBundleLink} status={status} />
+        </div>
+      </details>
     </div>
   );
 }
@@ -5478,6 +5554,94 @@ function workflowFactNumber(status = {}, label = "") {
   const fact = Array.isArray(status.facts) ? status.facts.find((item) => item.label === label) : null;
   const value = Number(fact?.value || 0);
   return Number.isFinite(value) ? value : 0;
+}
+
+function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onApproveReview, onOpenPageTasks, onOpenWorkflow, onRecomposeFinal, reviewBusy = false, status = {} }) {
+  const checks = finalGate?.checks || {};
+  const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
+  const reviewReady = Boolean(
+    hasFinal
+    && checks.validationPassed === true
+    && checks.editabilityPassed === true
+    && checks.powerPointOpenable === true
+    && checks.noFullSlideRaster === true
+    && checks.fullSourceCoverage === true
+    && checks.manualReviewRecorded !== true
+  );
+  const productReady = Boolean(finalGate?.productReady);
+  const blocked = Boolean(finalGate && !productReady);
+  const issueText = buildDeliveryUserIssue(finalGate, status);
+  const title = productReady
+    ? "可编辑 PPT 已可交付"
+    : reviewReady
+      ? "已生成，等待人工确认"
+      : hasFinal
+        ? "暂不能交付，需要先修复"
+        : "可编辑 PPT 还没生成";
+  const summary = productReady
+    ? "页数、可编辑性、打开检查和人工复核都已通过。"
+    : reviewReady
+      ? "文件结构已通过，最后只需要人工确认视觉内容。"
+      : hasFinal
+        ? issueText
+        : "先完成路线 B 的可编辑重建，再进入交付检查。";
+  const items = [
+    { label: "页数", ok: checks.fullSourceCoverage === true, value: checks.fullSourceCoverage ? "通过" : formatDeliveryCheckValue(checks.finalPages, checks.sourcePages) },
+    { label: "可打开", ok: checks.powerPointOpenable === true, value: checks.powerPointOpenable ? "通过" : "未通过" },
+    { label: "可编辑性", ok: checks.editabilityPassed === true && checks.noFullSlideRaster === true, value: checks.editabilityPassed && checks.noFullSlideRaster ? "通过" : "未通过" },
+    { label: "视觉复核", ok: checks.manualReviewRecorded === true, value: checks.manualReviewRecorded ? "已复核" : reviewReady ? "待确认" : "待修复" }
+  ];
+  return (
+    <section className={`workflow-simple-delivery ${productReady ? "ready" : reviewReady ? "review" : blocked ? "blocked" : "pending"}`}>
+      <div className="workflow-simple-delivery-head">
+        <div>
+          <b>交付检查</b>
+          <h2>{title}</h2>
+          <p>{summary}</p>
+        </div>
+        <span>{finalDownloadState.message || status.title || "等待检查"}</span>
+      </div>
+      <div className="workflow-simple-delivery-checks">
+        {items.map((item) => (
+          <span className={item.ok ? "pass" : reviewReady && item.label === "视觉复核" ? "review" : "fail"} key={item.label}>
+            <b>{item.value}</b>{item.label}
+          </span>
+        ))}
+      </div>
+      <div className="workflow-simple-delivery-actions">
+        {productReady ? (
+          <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看最终文件</button>
+        ) : reviewReady ? (
+          <button className="btn success" type="button" onClick={onApproveReview} disabled={reviewBusy || !onApproveReview}>
+            {reviewBusy ? "正在记录..." : "确认人工复核通过"}
+          </button>
+        ) : hasFinal ? (
+          <>
+            <button className="btn primary" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>修复问题</button>
+            <button className="btn" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
+          </>
+        ) : (
+          <button className="btn primary" type="button" onClick={onOpenPageTasks || onOpenWorkflow} disabled={!onOpenPageTasks && !onOpenWorkflow}>继续可编辑重建</button>
+        )}
+        <button className="btn ghost" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看工作流</button>
+      </div>
+    </section>
+  );
+}
+
+function buildDeliveryUserIssue(finalGate = null, status = {}) {
+  const reasons = [...(finalGate?.reasons || []), ...(finalGate?.warnings || [])].map(uiZh).filter(Boolean);
+  if (reasons.length) return reasons.slice(0, 2).join("；");
+  if (status?.nextStep?.reason) return uiZh(status.nextStep.reason);
+  if (status?.summary) return uiZh(status.summary);
+  return "当前检查未通过，请先修复失败页或重新合成最终 PPT。";
+}
+
+function formatDeliveryCheckValue(done = 0, total = 0) {
+  const current = Number(done || 0);
+  const expected = Number(total || 0);
+  if (expected) return `${Math.min(current, expected)}/${expected}`;
+  return current ? `${current} 页` : "未通过";
 }
 
 function workflowWorkerPageIds(status = {}) {
