@@ -1659,19 +1659,22 @@ function App() {
             <>
               <DualRouteDashboard
                 busy={workflowBusy || generationProgress.active}
+                files={files}
                 hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
                 job={workflowJob}
                 jobs={workflowJobs}
+                notes={form.notes}
                 noCostApprovalSummary={noCostApprovalSummary}
                 onApproveNoCostGates={approveNoCostCodexGates}
                 onCreateWorkflow={startSkillFirstWorkflow}
+                onNotesChange={(value) => update("notes", value)}
                 onOpenArtifacts={() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
                 onOpenDelivery={() => setActiveStep("export")}
                 onOpenEditable={() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onOpenMaterials={() => setActiveStep("materials")}
                 onOpenVisual={() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
                 onRefresh={refreshWorkflowJob}
                 onSelectJob={selectWorkflowJob}
+                onUploadFiles={uploadFiles}
               />
             <SectionCard title="生成可编辑 PPT" desc="确认大纲、视觉方向和生成方式后，创建 PPT 重制任务并重建可编辑 PPTX。">
               <DualRouteWorkbench
@@ -1915,20 +1918,24 @@ function App() {
 
 function DualRouteDashboard({
   busy = false,
+  files = [],
   hasInput = false,
   job = null,
   jobs = [],
+  notes = "",
   noCostApprovalSummary = null,
   onApproveNoCostGates,
   onCreateWorkflow,
+  onNotesChange,
   onOpenArtifacts,
   onOpenDelivery,
   onOpenEditable,
-  onOpenMaterials,
   onOpenVisual,
   onRefresh,
-  onSelectJob
+  onSelectJob,
+  onUploadFiles
 }) {
+  const [createOpen, setCreateOpen] = useState(false);
   const state = buildDualRouteState(job);
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
@@ -1956,11 +1963,12 @@ function DualRouteDashboard({
   const canRunPrimary = !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
+  const canCreateFromPanel = !busy && Boolean(files.length || notes.trim());
 
   return (
     <div className="dual-dashboard">
       <aside className="dual-dashboard-left">
-        <button className="dual-new-task" type="button" onClick={onOpenMaterials}>+ 新建任务</button>
+        <button className="dual-new-task" type="button" onClick={() => setCreateOpen(true)}>+ 新建任务</button>
         <div className="dual-task-head">
           <h2>任务列表</h2>
           <div><span className="active">进行中</span><span>已完成</span><span>已失败</span></div>
@@ -1990,6 +1998,45 @@ function DualRouteDashboard({
           <button className="btn" type="button" onClick={onRefresh} disabled={!job?.id || busy}>任务详情</button>
         </div>
         <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
+        {createOpen ? (
+          <section className="dual-create-panel">
+            <div className="dual-create-head">
+              <div>
+                <h2>新建 PPT 任务</h2>
+                <span>在当前工作台完成材料上传和需求录入，不跳回旧流程。</span>
+              </div>
+              <button className="btn" type="button" onClick={() => setCreateOpen(false)}>收起</button>
+            </div>
+            <div className="dual-create-grid">
+              <label className="dual-upload-box">
+                <input type="file" multiple onChange={onUploadFiles} />
+                <b>上传 PPT / PDF / 图片 / 文档</b>
+                <span>{files.length ? `已选择 ${files.length} 个文件` : "点击选择文件，或先填写需求直接创建"}</span>
+              </label>
+              <label className="dual-brief-box">
+                <span>任务需求</span>
+                <textarea
+                  value={notes}
+                  onChange={(event) => onNotesChange?.(event.target.value)}
+                  placeholder="例如：把这份中秋提案重做成更高级的图片版 PPT，图片版先交付，可编辑版后续再做。"
+                />
+              </label>
+            </div>
+            {files.length ? (
+              <div className="dual-file-chips">
+                {files.slice(0, 6).map((file) => (
+                  <span key={file.id || file.originalName}><b>{fileExt(file.originalName)}</b>{file.originalName || file.id}</span>
+                ))}
+              </div>
+            ) : null}
+            <div className="dual-create-actions">
+              <span>{canCreateFromPanel ? "准备就绪：会先进入图片版 PPT 生成路线。" : "请先上传材料，或填写一句任务需求。"}</span>
+              <button className="btn primary" type="button" onClick={onCreateWorkflow} disabled={!canCreateFromPanel}>
+                {busy ? "正在创建..." : "创建任务"}
+              </button>
+            </div>
+          </section>
+        ) : null}
         <RouteLane
           accent="visual"
           badge="路线 A"

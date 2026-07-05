@@ -11318,6 +11318,120 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   font-weight: 800;
 }
 
+.dual-create-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(40,84,216,.22);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 14px 34px rgba(21,25,34,.08);
+}
+
+.dual-create-head,
+.dual-create-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.dual-create-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.dual-create-head span,
+.dual-create-actions span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dual-create-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr);
+  gap: 12px;
+}
+
+.dual-upload-box,
+.dual-brief-box {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.dual-upload-box {
+  place-content: center;
+  min-height: 156px;
+  padding: 18px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.dual-upload-box input {
+  display: none;
+}
+
+.dual-upload-box b {
+  color: var(--blue);
+  font-size: 15px;
+}
+
+.dual-upload-box span,
+.dual-brief-box span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dual-brief-box {
+  padding: 12px;
+  background: #fff;
+}
+
+.dual-brief-box textarea {
+  min-height: 112px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+}
+
+.dual-file-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dual-file-chips span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 220px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dual-file-chips b {
+  flex-shrink: 0;
+  color: var(--blue);
+  font-size: 11px;
+}
+
 .dual-dashboard .route-lane {
   padding: 20px;
   box-shadow: none;
