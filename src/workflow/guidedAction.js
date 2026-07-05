@@ -74,8 +74,8 @@ export function getWorkflowGuidedAction(runbook = {}, context = {}) {
       label: "打开复核",
       description: runbook.summary || "交付前需要复核最终产物。",
       kind: "focus",
-      targetId: "workflow-artifact-review-panel",
-      note: "先复核页面产物和最终证据，再标记整套已复核。"
+      targetId: "workflow-delivery-panel",
+      note: "逐页对比原始页、图片版和可编辑页，通过后再记录整套复核。"
     };
   }
 

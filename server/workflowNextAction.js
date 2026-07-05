@@ -461,8 +461,8 @@ function buildFinalDeliveryNextOptions(finalGate = {}, statusStep = {}) {
     {
       id: "record-manual-visual-review",
       label: "记录人工视觉复核",
-      detail: "逐页确认 codex-ppt 目标图、可编辑预览、资产分离和校验结果。",
-      targetPanel: "workflow-artifact-review-panel",
+      detail: "逐页对比原始页、图片版和可编辑页；每页只需要选择通过或不通过。",
+      targetPanel: "workflow-delivery-panel",
       mutatesWorkflow: true,
       externalImageCalls: 0
     }
@@ -685,7 +685,7 @@ function buildPartialFinalContinuation(job = {}) {
       {
         id: "review-current-sample",
         label: `复核当前 ${finalPages} 页样例`,
-        detail: "逐页对比 codex-ppt 目标图、可编辑预览、页面校验和资产分离结果；通过后可解锁当前测试范围下载。",
+        detail: "逐页对比原始页、图片版和可编辑页；每页选择通过或不通过。",
         targetPanel: "workflow-delivery-panel",
         mutatesWorkflow: false,
         externalImageCalls: 0

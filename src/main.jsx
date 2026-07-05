@@ -1778,8 +1778,8 @@ function App() {
                   window.setTimeout(() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
                 }}
                 onOpenWorkflow={() => {
-                  setActiveStep("generate");
-                  window.setTimeout(() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+                  setActiveStep("export");
+                  window.setTimeout(() => document.getElementById("workflow-delivery-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
                 }}
               />
             </SectionCard>
@@ -3962,150 +3962,6 @@ function getLowConfidenceOcrLines(data = null) {
   });
 }
 
-function WorkflowArtifactReviewPanel({ artifactBundle, job, onRefresh }) {
-  const links = artifactBundle?.links || [];
-  const rows = useMemo(() => buildWorkflowReviewRows(links), [links]);
-  const [selectedReviewPageId, setSelectedReviewPageId] = useState("");
-  const selectedRow = rows.find((row) => row.pageId === selectedReviewPageId) || rows[0] || null;
-  const [pageValidation, setPageValidation] = useState({ loading: false, data: null, error: "" });
-  const [reviewBusy, setReviewBusy] = useState(false);
-  const [reviewError, setReviewError] = useState("");
-  const manualReview = job?.artifacts?.manualReview || null;
-  const reviewApproved = manualReview?.status === "approved";
-  useEffect(() => {
-    if (rows.length && !rows.some((row) => row.pageId === selectedReviewPageId)) {
-      setSelectedReviewPageId(rows[0].pageId);
-    }
-  }, [rows, selectedReviewPageId]);
-  useEffect(() => {
-    const href = selectedRow?.validation?.href || "";
-    if (!href) {
-      setPageValidation({ loading: false, data: null, error: "" });
-      return undefined;
-    }
-    const controller = new AbortController();
-    setPageValidation({ loading: true, data: null, error: "" });
-    fetch(href, { cache: "no-store", signal: controller.signal })
-      .then((response) => response.json().then((data) => {
-        if (!response.ok) throw new Error(data.error || "页面校验读取失败");
-        return data;
-      }))
-      .then((data) => setPageValidation({ loading: false, data, error: "" }))
-      .catch((error) => {
-        if (controller.signal.aborted) return;
-        setPageValidation({ loading: false, data: null, error: getErrorMessage(error) });
-      });
-    return () => controller.abort();
-  }, [selectedRow?.validation?.href]);
-  if (!rows.length) return null;
-  const readyRows = rows.filter((row) => row.visual).length;
-  const rebuiltRows = rows.filter((row) => row.rebuild && row.validation).length;
-  async function approveManualReview() {
-    if (!job?.id || reviewBusy) return;
-    setReviewBusy(true);
-    setReviewError("");
-    try {
-      await api.approveWorkflowManualReview(job.id, {
-        reviewer: "operator",
-        note: `Reviewed ${rebuiltRows}/${rows.length} rebuilt page preview(s)`
-      });
-      await onRefresh?.();
-    } catch (error) {
-      setReviewError(getErrorMessage(error));
-    } finally {
-      setReviewBusy(false);
-    }
-  }
-  async function resetManualReview() {
-    if (!job?.id || reviewBusy) return;
-    setReviewBusy(true);
-    setReviewError("");
-    try {
-      await api.resetWorkflowManualReview(job.id, {
-        reviewer: "operator",
-        note: "Manual review reset from workflow review panel"
-      });
-      await onRefresh?.();
-    } catch (error) {
-      setReviewError(getErrorMessage(error));
-    } finally {
-      setReviewBusy(false);
-    }
-  }
-  return (
-    <div className="workflow-review-panel" id="workflow-artifact-review-panel">
-      <div className="workflow-review-head">
-        <div>
-          <b>页面复核</b>
-          <span>{readyRows}/{rows.length} 页已有视觉图片；{rebuiltRows}/{rows.length} 页已有重建预览和页面校验。</span>
-        </div>
-        <div className="workflow-review-actions">
-          <span>{reviewApproved ? `已复核 ${manualReview.approvedAt || ""}` : "等待人工复核"}</span>
-          <button type="button" onClick={approveManualReview} disabled={reviewBusy || !job?.artifacts?.editableFinal?.path || rebuiltRows < rows.length}>{reviewBusy ? "正在保存..." : "标记已复核"}</button>
-          <button type="button" onClick={resetManualReview} disabled={reviewBusy || !reviewApproved}>重置</button>
-        </div>
-      </div>
-      {reviewError ? <p className="workflow-error">{reviewError}</p> : null}
-      <div className="workflow-review-preview">
-        <WorkflowReviewPreviewCard title="源页面" pageId={selectedRow.pageId} link={selectedRow.source} />
-        <WorkflowReviewPreviewCard title="codex-ppt 目标图" pageId={selectedRow.pageId} link={selectedRow.visual} emptyText="等待目标图" />
-        <WorkflowReviewPreviewCard title="可编辑预览" pageId={selectedRow.pageId} link={selectedRow.rebuild} emptyText="等待可编辑重建" />
-        <WorkflowReviewPreviewCard title="最终对比图" pageId={selectedRow.pageId} link={selectedRow.compare} emptyText="等待最终 QA" />
-      </div>
-      <WorkflowReviewValidation data={pageValidation.data} error={pageValidation.error} loading={pageValidation.loading} row={selectedRow} />
-      <div className="workflow-review-list">
-        {rows.map((row) => (
-          <div className={`workflow-review-row ${row.rebuild && row.validation ? "ready" : "missing"} ${row.pageId === selectedRow.pageId ? "active" : ""}`} key={row.pageId} onClick={() => setSelectedReviewPageId(row.pageId)}>
-            <b>{row.pageId}</b>
-            {row.source ? <a href={row.source.href} target="_blank" rel="noreferrer">源页</a> : <span>无源页</span>}
-            {row.visual ? <a href={row.visual.href} target="_blank" rel="noreferrer">目标图</a> : <span>等待目标图</span>}
-            {row.rebuild ? <a href={row.rebuild.href} target="_blank" rel="noreferrer">预览</a> : <span>等待预览</span>}
-            {row.compare ? <a href={row.compare.href} target="_blank" rel="noreferrer">对比</a> : <span>等待对比</span>}
-            {row.validation ? <a href={row.validation.href} target="_blank" rel="noreferrer">校验</a> : <span>无校验</span>}
-            {row.pptx ? <a href={row.pptx.href} target="_blank" rel="noreferrer">PPT</a> : <span>无 PPT</span>}
-            <small>{row.rebuild && row.validation && row.compare ? "可复核最终结果" : row.rebuild && row.validation ? "可复核可编辑预览" : row.visual ? "可先对比目标图" : "尚未进入完整重建链路"}</small>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function WorkflowReviewValidation({ data, error, loading, row }) {
-  const issueCount = data ? countWorkflowPageValidationIssues(data) : 0;
-  const passed = data?.passed === true && issueCount === 0;
-  const statusText = loading ? "正在读取页面校验..." : error ? "校验读取失败" : data ? (passed ? "页面校验通过" : "页面校验有问题") : "无页面校验";
-  return (
-    <div className={`workflow-review-validation ${passed ? "passed" : data || error ? "warn" : "empty"}`}>
-      <div>
-        <b>{row?.pageId || "page"} / {statusText}</b>
-        <span>{data ? `${data.editable_text_shapes ?? 0} 段文字 / ${data.images ?? 0} 张图片 / ${data.shape_count ?? 0} 个图形` : row?.validation ? "校验待读取" : "校验未记录"}</span>
-      </div>
-      {error ? <small>{error}</small> : null}
-      {data && issueCount ? <small>{summarizeWorkflowPageValidationIssues(data)}</small> : null}
-      {data?.page_contract_violations?.length ? <small>{data.page_contract_violations.slice(0, 2).join(" / ")}</small> : null}
-    </div>
-  );
-}
-
-function WorkflowReviewPreviewCard({ emptyText = "缺少产物", link, pageId, title }) {
-  return (
-    <div className={`workflow-review-preview-card ${link ? "ready" : "empty"}`}>
-      <div>
-        <b>{title}</b>
-        <span>{pageId}</span>
-      </div>
-      {link ? (
-        <a href={link.href} target="_blank" rel="noreferrer">
-          <img src={link.href} alt={`${pageId} ${title}`} />
-        </a>
-      ) : (
-        <span className="workflow-review-empty">{emptyText}</span>
-      )}
-    </div>
-  );
-}
-
 function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, onOpenPageTasks, onOpenWorkflow }) {
   const [deliveryBundle, setDeliveryBundle] = useState(null);
   const [artifactBundle, setArtifactBundle] = useState(null);
@@ -6167,7 +6023,7 @@ function WorkflowFinalVisualQaPanel({ finalEvidence = null, onOpenPageTasks, onP
       <div className="workflow-final-visual-qa-head">
         <div>
           <b>视觉 QA</b>
-          <span>对比 codex-ppt 目标图和 image-to-editable-ppt 重建预览，防止结构通过但视觉明显跑偏。</span>
+          <span>对比图片版页面和可编辑页预览，防止结构通过但视觉明显跑偏。</span>
         </div>
         <strong>{statusText}</strong>
       </div>
@@ -6185,8 +6041,8 @@ function WorkflowFinalVisualQaPanel({ finalEvidence = null, onOpenPageTasks, onP
                 <span>{page.issues.map(describeVisualQaIssue).join("；")}</span>
               </div>
               <div className="workflow-final-visual-qa-metrics">
-                <span>目标图 <b>{formatFileSize(page.targetSize)}</b></span>
-                <span>重建预览 <b>{formatFileSize(page.previewSize)}</b></span>
+                <span>图片版 <b>{formatFileSize(page.targetSize)}</b></span>
+                <span>可编辑页 <b>{formatFileSize(page.previewSize)}</b></span>
                 <span>比例 <b>{formatRatio(page.previewToTargetBytes)}</b></span>
               </div>
             </div>
@@ -6220,8 +6076,8 @@ function describeVisualQaIssue(issue = "") {
   const text = String(issue || "");
   if (text === "preview-too-small-simplified") return "重建预览明显过度简化";
   if (text === "editable-preview-missing") return "缺少可编辑重建预览";
-  if (text === "target-visual-missing") return "缺少 codex-ppt 目标图";
-  if (text === "preview-aspect-ratio-mismatch") return "预览比例和目标图不一致";
+  if (text === "target-visual-missing") return "缺少图片版页面";
+  if (text === "preview-aspect-ratio-mismatch") return "可编辑页和图片版比例不一致";
   if (text === "asset-contact-sheet-missing") return "缺少资产分离联系表";
   return uiZh(text);
 }
@@ -6779,53 +6635,6 @@ function WorkflowSkillRunbook({ runbook }) {
       ) : null}
     </div>
   );
-}
-
-function buildWorkflowReviewRows(links = []) {
-  const rows = new Map();
-  for (const link of links) {
-    if (!link?.pageId || !["rendered-page", "visual-page", "rebuild-preview", "final-compare", "page-validation", "page-result", "page-pptx"].includes(link.key)) continue;
-    const row = rows.get(link.pageId) || { pageId: link.pageId, source: null, visual: null, rebuild: null, validation: null, result: null, pptx: null };
-    if (link.key === "rendered-page") row.source = link;
-    if (link.key === "visual-page") row.visual = link;
-    if (link.key === "rebuild-preview") row.rebuild = link;
-    if (link.key === "final-compare") row.compare = link;
-    if (link.key === "page-validation") row.validation = link;
-    if (link.key === "page-result") row.result = link;
-    if (link.key === "page-pptx") row.pptx = link;
-    rows.set(link.pageId, row);
-  }
-  return [...rows.values()].sort((a, b) => a.pageId.localeCompare(b.pageId));
-}
-
-function countWorkflowPageValidationIssues(data = {}) {
-  return [
-    data.missing_required_text,
-    data.missing_parts,
-    data.missing_relationship_targets,
-    data.missing_asset_provenance,
-    data.missing_manifest_images,
-    data.missing_provenance_sources,
-    data.invalid_asset_provenance,
-    data.media_hash_mismatches,
-    data.page_contract_violations,
-    data.warnings
-  ].reduce((total, items) => total + (Array.isArray(items) ? items.length : 0), data.media_manifest_mismatch ? 1 : 0);
-}
-
-function summarizeWorkflowPageValidationIssues(data = {}) {
-  const parts = [
-    ["missing text", data.missing_required_text],
-    ["missing parts", data.missing_parts],
-    ["missing relationships", data.missing_relationship_targets],
-    ["missing asset provenance", data.missing_asset_provenance],
-    ["invalid asset provenance", data.invalid_asset_provenance],
-    ["hash mismatch", data.media_hash_mismatches],
-    ["page contract", data.page_contract_violations],
-    ["warnings", data.warnings]
-  ].filter(([, items]) => Array.isArray(items) && items.length);
-  if (data.media_manifest_mismatch) parts.push(["media manifest mismatch", [true]]);
-  return parts.map(([label, items]) => `${label} ${items.length}`).join(" / ");
 }
 
 function formatFileSize(size = 0) {

@@ -633,11 +633,11 @@ function summarizeFinalEvidenceIssue(finalEvidence = {}) {
       .slice(0, 6)
       .join("；");
     return failed
-      ? `最终视觉 QA 未通过：${failed}。这些可编辑页与 codex-ppt 目标图片不一致，交付前需要重跑对应的 image-to-editable-ppt 页面任务。`
-      : "最终视觉 QA 未通过：可编辑页与 codex-ppt 目标图片不一致，交付前需要重跑对应的 image-to-editable-ppt 页面任务。";
+      ? `最终视觉 QA 未通过：${failed}。这些可编辑页与图片版页面不一致，交付前需要重跑对应的 image-to-editable-ppt 页面任务。`
+      : "最终视觉 QA 未通过：可编辑页与图片版页面不一致，交付前需要重跑对应的 image-to-editable-ppt 页面任务。";
   }
   if (issues.includes("final-visual-qa-needs-review")) {
-    return "最终视觉 QA 需要人工复核：交付前请对比可编辑预览和 codex-ppt 目标图片。";
+    return "最终视觉 QA 需要人工复核：交付前请对比图片版页面和可编辑页预览。";
   }
   if (issues.includes("page-foreground-assets-missing")) {
     const pages = Array.isArray(finalEvidence.summary?.foregroundAssetIssues)
@@ -671,7 +671,7 @@ function formatVisualQaIssue(issue = "") {
     "editable-preview-missing": "缺少可编辑预览图",
     "asset-contact-sheet-missing": "缺少资产分离总览图",
     "preview-too-small-simplified": "重建预览明显过度简化",
-    "target-image-missing": "缺少 codex-ppt 目标图",
+    "target-image-missing": "缺少图片版页面",
     "visual-page-missing": "缺少视觉页",
     "preview-size-mismatch": "预览尺寸异常",
     "manual-review-missing": "缺少人工复核"
