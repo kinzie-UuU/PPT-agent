@@ -1678,11 +1678,6 @@ function App() {
                 onApproveNoCostGates={approveNoCostCodexGates}
                 onCreateWorkflow={startSkillFirstWorkflow}
                 onNotesChange={(value) => update("notes", value)}
-                onOpenArtifacts={() => document.getElementById("workflow-artifact-review-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onOpenDelivery={() => setActiveStep("export")}
-                onOpenEditable={() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onOpenVisual={() => document.getElementById("codex-slide-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                onRefresh={refreshWorkflowJob}
                 onSelectJob={selectWorkflowJob}
                 onUploadFiles={uploadFiles}
               />
@@ -2009,7 +2004,6 @@ function DualRouteDashboard({
             <h1>{currentTitle}</h1>
             <span>{job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务"} · {sourcePages}</span>
           </div>
-          <button className="btn" type="button" onClick={onRefresh} disabled={!job?.id || busy}>任务详情</button>
         </div>
         <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
         {createOpen ? (
@@ -2065,8 +2059,6 @@ function DualRouteDashboard({
           ]}
           actions={[
             imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
-            { label: "查看问题", onClick: onOpenArtifacts, disabled: !job?.id },
-            { label: state.routeA.imageDeckReady ? "查看图片页证据" : "继续图片阶段", onClick: onOpenVisual, disabled: !job?.id || busy }
           ].filter(Boolean)}
         />
         <RouteLane
@@ -2083,8 +2075,7 @@ function DualRouteDashboard({
           ]}
           actions={[
             finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
-            { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: !finalHref },
-            { label: "打开交付复核", onClick: onOpenDelivery, disabled: !job?.id }
+            !finalHref ? { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: true } : null
           ].filter(Boolean)}
         />
         <div className="dual-progress-overview">
@@ -2101,7 +2092,7 @@ function DualRouteDashboard({
           <strong>{state.nextAction}</strong>
           <ul>
             <li className={state.routeA.imageDeckReady ? "done" : "active"}>图片版已经完成，可以下载交付</li>
-            <li className={state.routeB.finalReady ? "done" : "active"}>如需可编辑版，点击继续处理</li>
+            <li className={state.routeB.finalReady ? "done" : "active"}>{state.routeB.finalReady ? "可编辑版已生成，可下载检查" : "如需可编辑版，后续进入路线 B"}</li>
             <li>可编辑重建会消耗更多时间和资源</li>
           </ul>
         </div>
@@ -2109,18 +2100,6 @@ function DualRouteDashboard({
           <h2>当前状态</h2>
           <p><span className="dot green" />图片版：{routeStatusLabel(state.routeA.status)}</p>
           <p><span className="dot blue" />可编辑版：{routeStatusLabel(state.routeB.status)}</p>
-        </div>
-        <div className="dual-side-card logs">
-          <div className="dual-side-tabs"><b>日志</b><span>证据</span><span>高级诊断</span></div>
-          {events.length ? events.map((event, index) => (
-            <p key={`${event.type || "event"}-${index}`}>
-              <span className={`dot ${index % 2 ? "blue" : "green"}`} />
-              {formatEventTime(event.createdAt || event.time || event.timestamp)} {uiZh(event.message || event.type || "workflow event")}
-            </p>
-          )) : (
-            <p><span className="dot blue" />等待任务日志</p>
-          )}
-          <button className="btn wide" type="button" onClick={onOpenArtifacts} disabled={!job?.id}>查看全部日志</button>
         </div>
       </aside>
     </div>
@@ -2345,6 +2324,8 @@ function buildDualRouteState(job = null) {
       ? "先上传材料并创建图片版 PPT 任务。"
       : !imageDeckReady
         ? "优先完成路线 A：生成视觉页面并组装图片版 PPT。"
+        : finalReady && !reviewReady
+          ? "图片版和可编辑版都已生成；可先下载检查，最终交付仍需人工复核。"
         : !routeBReady
           ? "图片版已可作为阶段交付；如需要对象级编辑，再继续路线 B。"
           : "可编辑 PPT 已完成交付门禁，可进入下载与复核。",
