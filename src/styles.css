@@ -1821,174 +1821,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
 .primary-action.compact b { margin-bottom: 2px; font-size: 15px; }
 .primary-action.compact span { font-size: 12px; line-height: 1.35; }
 
-.workflow-user-guide {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 14px;
-  padding: 14px;
-  border: 1px solid rgba(40,84,216,.2);
-  border-radius: 8px;
-  background: #fff;
-}
-.agent-main-guide {
-  border-color: rgba(40,84,216,.24);
-  background: linear-gradient(180deg, #ffffff 0%, #f7f9ff 100%);
-}
-.agent-main-guide .workflow-user-guide-head b {
-  color: var(--blue);
-  font-size: 18px;
-}
-.agent-main-guide .workflow-user-guide-head span {
-  max-width: 760px;
-}
-.agent-main-guide .workflow-user-guide-step {
-  min-height: 158px;
-  background: #fff;
-}
-.agent-main-guide .workflow-user-guide-step.active {
-  box-shadow: inset 3px 0 0 var(--blue);
-}
-.agent-main-guide .workflow-user-guide-step.ready {
-  box-shadow: inset 3px 0 0 var(--green);
-}
-.agent-main-guide .workflow-user-guide-step button,
-.agent-main-guide .workflow-user-guide-step a {
-  width: 100%;
-}
-.workflow-user-guide-head {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.workflow-user-guide-head b,
-.workflow-user-guide-head span,
-.workflow-user-guide-head small,
-.workflow-user-guide-step b,
-.workflow-user-guide-step span {
-  display: block;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.workflow-user-guide-head b {
-  color: var(--ink);
-  font-size: 16px;
-}
-.workflow-user-guide-head span,
-.workflow-user-guide-head small,
-.workflow-user-guide-step span {
-  margin-top: 4px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-.workflow-user-guide-head small {
-  flex: 0 1 230px;
-  margin-top: 0;
-  text-align: right;
-}
-.workflow-user-guide-steps {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-.workflow-user-guide-step {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid rgba(25,32,48,.1);
-  border-radius: 7px;
-  background: #f8fafc;
-}
-.workflow-user-guide-step strong {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 22px;
-  border-radius: 999px;
-  background: rgba(25,32,48,.08);
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 900;
-}
-.workflow-user-guide-step b {
-  margin-top: 8px;
-  color: var(--ink);
-  font-size: 13px;
-}
-.workflow-user-guide-step button,
-.workflow-user-guide-step a {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  margin-top: 10px;
-  padding: 0 10px;
-  border: 1px solid rgba(40,84,216,.28);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--blue);
-  font-size: 12px;
-  font-weight: 900;
-  text-decoration: none;
-}
-.workflow-user-guide-step button:disabled {
-  cursor: not-allowed;
-  border-color: rgba(25,32,48,.12);
-  color: #94a3b8;
-}
-.workflow-user-guide-step > span:last-child {
-  display: inline-flex;
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
-}
-.workflow-user-guide-step.ready {
-  border-color: rgba(22,138,91,.22);
-  background: #f7fcf9;
-}
-.workflow-user-guide-step.ready strong {
-  background: rgba(22,138,91,.12);
-  color: var(--green);
-}
-.workflow-user-guide-step.active {
-  border-color: rgba(40,84,216,.24);
-  background: #f7f9ff;
-}
-.workflow-user-guide-step.active strong {
-  background: rgba(40,84,216,.12);
-  color: var(--blue);
-}
-.workflow-product-boundary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding-top: 2px;
-}
-.workflow-product-boundary div {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid rgba(25,32,48,.1);
-  border-radius: 7px;
-  background: #f8fafc;
-}
-.workflow-product-boundary b,
-.workflow-product-boundary span {
-  display: block;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.workflow-product-boundary b {
-  color: var(--ink);
-  font-size: 13px;
-}
-.workflow-product-boundary span {
-  margin-top: 5px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
 .slide-rail {
   display: grid;
   gap: 8px;
@@ -13867,7 +13699,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .skill-first-console-actions { justify-content: stretch; }
   .skill-first-console-actions .btn { width: 100%; }
   .workflow-guided-action,
-  .workflow-user-guide-head,
   .workflow-agent-simple-head,
   .workflow-agent-next,
   .workflow-rebuild-head,
@@ -13883,8 +13714,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-codex-provider-pill { min-width: 0; width: 100%; }
   .workflow-codex-stage-list { grid-template-columns: 1fr; }
   .workflow-codex-deck-actions button { width: 100%; }
-  .workflow-user-guide-steps,
-  .workflow-product-boundary,
   .workflow-agent-progress,
   .workflow-agent-recovery-banner,
   .workflow-agent-steps,
@@ -13892,13 +13721,6 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-agent-dashboard-facts,
   .workflow-agent-dashboard-steps {
     grid-template-columns: 1fr;
-  }
-  .workflow-user-guide-head small {
-    text-align: left;
-  }
-  .workflow-user-guide-step button,
-  .workflow-user-guide-step a {
-    width: 100%;
   }
   .workflow-agent-next button {
     width: 100%;
