@@ -58,6 +58,142 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   backdrop-filter: blur(10px);
 }
 
+.topbar-popover {
+  position: absolute;
+  top: 52px;
+  right: 18px;
+  z-index: 30;
+  display: grid;
+  gap: 14px;
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(760px, calc(100vh - 76px));
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 18px 48px rgba(21, 25, 34, .16);
+}
+
+.topbar-popover.settings {
+  width: min(720px, calc(100vw - 28px));
+}
+
+.topbar-popover-head,
+.topbar-popover-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.topbar-popover-head div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.topbar-popover-head b {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.topbar-popover-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topbar-popover-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.topbar-health-grid,
+.topbar-mode-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.topbar-mode-panel {
+  grid-template-columns: 1fr;
+}
+
+.topbar-status-card {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.topbar-status-card > span {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.topbar-status-card.warning > span {
+  background: var(--amber);
+}
+
+.topbar-status-card.blocked > span {
+  background: var(--red);
+}
+
+.topbar-status-card div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.topbar-status-card small,
+.topbar-status-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.topbar-status-card b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-popover .settings-panel {
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.topbar-tool.active,
+.topbar-icon.active,
+.topbar-mode.active {
+  border-color: rgba(40, 84, 216, .35);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
 .topbar > div:first-child { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .brand-lockup,
 .topbar-actions,

@@ -348,6 +348,7 @@ function App() {
   ]);
   const [activeStep, setActiveStep] = useState("generate");
   const [rightPanelMode, setRightPanelMode] = useState("agent");
+  const [topbarPanel, setTopbarPanel] = useState("");
   const [focusPreview, setFocusPreview] = useState(false);
   const [connection, setConnection] = useState({ state: "checking", message: "正在检查本地服务..." });
   const [localImage, setLocalImage] = useState({ state: "checking", message: "正在检查本地生图服务..." });
@@ -507,6 +508,10 @@ function App() {
 
   const topbarStateClass = error || connection.state === "offline" ? "state-dot error" : connection.state === "online" ? "state-dot active" : "state-dot checking";
   const topbarMessage = error || status || connection.message || "准备就绪";
+
+  function toggleTopbarPanel(panel) {
+    setTopbarPanel((current) => (current === panel ? "" : panel));
+  }
 
   useEffect(() => {
     setDraft(makeSlideDraft(currentSlide));
@@ -1448,13 +1453,44 @@ function App() {
           <span className="topbar-pill"><span className="pill-check" />模型正常</span>
         </div>
         <div className="topbar-actions">
-          <button className="topbar-tool" type="button">健康检查</button>
-          <button className="topbar-icon" type="button" aria-label="设置">
+          <button className={`topbar-tool ${topbarPanel === "health" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("health")}>健康检查</button>
+          <button className={`topbar-icon ${topbarPanel === "settings" ? "active" : ""}`} type="button" aria-label="设置" onClick={() => toggleTopbarPanel("settings")}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.4A3.6 3.6 0 1 1 12 15.6 3.6 3.6 0 0 1 12 8.4Zm7.2 3.6c0-.5-.1-1-.2-1.5l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2.5-1.4L13.8 2h-4l-.4 3.2A7 7 0 0 0 7 6.6l-2.5-1-2 3.4 2 1.5a7.5 7.5 0 0 0 0 3l-2 1.5 2 3.4 2.5-1c.7.6 1.5 1 2.4 1.3l.4 3.3h4l.4-3.3a7 7 0 0 0 2.5-1.4l2.4 1 2-3.4-2-1.5c.1-.5.2-1 .2-1.5Z" /></svg>
           </button>
           <span className="topbar-avatar">A</span>
-          <button className="topbar-mode" type="button">本地模式</button>
+          <button className={`topbar-mode ${topbarPanel === "mode" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("mode")}>本地模式</button>
         </div>
+        {topbarPanel ? (
+          <TopbarQuickPanel
+            apiConfig={apiConfig}
+            availableModels={availableModels}
+            connection={connection}
+            doctor={doctor}
+            localImage={localImage}
+            mode={topbarPanel}
+            settingsBusy={settingsBusy}
+            styleReferences={styleReferences}
+            workflowJob={workflowJob}
+            workflowJobs={workflowJobs}
+            onChangeConfig={setApiConfig}
+            onClose={() => setTopbarPanel("")}
+            onDeleteStyleReference={deleteStyleReference}
+            onDetectModels={detectModels}
+            onOpenDelivery={() => {
+              setTopbarPanel("");
+              setActiveStep("export");
+            }}
+            onOpenWorkflow={() => {
+              setTopbarPanel("");
+              setActiveStep("generate");
+            }}
+            onSaveConfig={saveApiConfig}
+            onSavePaddleOcrToken={savePaddleOcrToken}
+            onTestConfig={testApiConfig}
+            onTestImage={testImageApiConfig}
+            onUploadStyleReference={uploadStyleReference}
+          />
+        ) : null}
       </header>
 
       {!useDualRouteDashboard ? (
@@ -1857,6 +1893,107 @@ function App() {
   );
 }
 
+function TopbarQuickPanel({
+  apiConfig,
+  availableModels = [],
+  connection,
+  doctor,
+  localImage,
+  mode,
+  settingsBusy = false,
+  styleReferences = [],
+  workflowJob,
+  workflowJobs = [],
+  onChangeConfig,
+  onClose,
+  onDeleteStyleReference,
+  onDetectModels,
+  onOpenDelivery,
+  onOpenWorkflow,
+  onSaveConfig,
+  onSavePaddleOcrToken,
+  onTestConfig,
+  onTestImage,
+  onUploadStyleReference
+}) {
+  const jobState = buildDualRouteState(workflowJob);
+  const modelLabel = apiConfig?.model || "未配置";
+  const imageLabel = apiConfig?.imageModel || localImage?.details?.model || "未配置";
+  const serviceReady = connection?.state === "online";
+  const doctorReady = doctor?.state === "pass" || doctor?.state === "ready";
+
+  return (
+    <div className={`topbar-popover ${mode}`} role="dialog" aria-label={mode === "health" ? "健康检查" : mode === "settings" ? "设置" : "本地模式"}>
+      <div className="topbar-popover-head">
+        <div>
+          <b>{mode === "health" ? "健康检查" : mode === "settings" ? "设置" : "本地模式"}</b>
+          <span>{mode === "health" ? "服务、模型和交付状态" : mode === "settings" ? "模型、OCR 和参考图" : "当前全部任务都在本机工作流内执行"}</span>
+        </div>
+        <button className="topbar-popover-close" type="button" onClick={onClose} aria-label="关闭">×</button>
+      </div>
+
+      {mode === "health" ? (
+        <>
+          <div className="topbar-health-grid">
+            <TopbarStatusCard label="本地连接" state={serviceReady ? "ready" : "blocked"} value={serviceReady ? "已连接" : "未连接"} detail={connection?.message || "-"} />
+            <TopbarStatusCard label="对话模型" state={apiConfig?.hasApiKey || apiConfig?.apiKey ? "ready" : "warning"} value={modelLabel} detail={apiConfig?.baseUrl || "等待配置"} />
+            <TopbarStatusCard label="图片模型" state={imageLabel !== "未配置" ? "ready" : "warning"} value={imageLabel} detail={localImage?.message || "用于图片版 PPT"} />
+            <TopbarStatusCard label="产品环境" state={doctorReady ? "ready" : "warning"} value={doctorReady ? "通过" : "需确认"} detail={doctor?.message || "-"} />
+          </div>
+          <div className="topbar-popover-actions">
+            <button className="btn" type="button" onClick={onOpenWorkflow}>回到工作台</button>
+            <button className="btn primary" type="button" onClick={onOpenDelivery} disabled={!workflowJob?.id}>查看交付状态</button>
+          </div>
+        </>
+      ) : null}
+
+      {mode === "settings" ? (
+        <SettingsPanel
+          config={apiConfig}
+          busy={settingsBusy}
+          models={availableModels}
+          onChange={onChangeConfig}
+          onSave={onSaveConfig}
+          onSavePaddleOcrToken={onSavePaddleOcrToken}
+          onTest={onTestConfig}
+          onTestImage={onTestImage}
+          onDetectModels={onDetectModels}
+          styleReferences={styleReferences}
+          onUploadStyleReference={onUploadStyleReference}
+          onDeleteStyleReference={onDeleteStyleReference}
+        />
+      ) : null}
+
+      {mode === "mode" ? (
+        <>
+          <div className="topbar-mode-panel">
+            <TopbarStatusCard label="运行方式" state="ready" value="本地模式" detail="任务、证据和产物都在当前本机服务内管理。" />
+            <TopbarStatusCard label="当前任务" state={workflowJob?.id ? "ready" : "warning"} value={workflowJob?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || workflowJob?.id || "未选择"} detail={workflowJob?.id ? `图片版：${routeStatusLabel(jobState.routeA.status)}；可编辑版：${routeStatusLabel(jobState.routeB.status)}` : "先创建或选择一个任务"} />
+            <TopbarStatusCard label="任务数量" state={workflowJobs.length ? "ready" : "warning"} value={`${workflowJobs.length || 0} 个`} detail="左侧任务列表会展示最近任务。" />
+          </div>
+          <div className="topbar-popover-actions">
+            <button className="btn primary" type="button" onClick={onOpenWorkflow}>查看任务</button>
+            <button className="btn" type="button" onClick={onOpenDelivery} disabled={!workflowJob?.id}>查看交付</button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function TopbarStatusCard({ detail = "", label, state = "ready", value }) {
+  return (
+    <div className={`topbar-status-card ${state}`}>
+      <span />
+      <div>
+        <small>{label}</small>
+        <b>{value}</b>
+        <p>{detail}</p>
+      </div>
+    </div>
+  );
+}
+
 function DualRouteDashboard({
   busy = false,
   files = [],
@@ -1884,7 +2021,7 @@ function DualRouteDashboard({
   const imageDeckHref = job?.id && state.routeA.imageDeckReady
     ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1`
     : "";
-  const finalHref = job?.id && state.routeB.finalReady
+  const finalHref = job?.id && state.routeB.deliverableReady
     ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
     : "";
   const primaryAction = !job?.id
@@ -2010,7 +2147,7 @@ function DualRouteDashboard({
           metrics={[
             ["可编辑页", editablePages],
             ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
-            ["最终交付", state.routeB.finalReady ? "可下载" : "未完成"]
+            ["最终交付", state.routeB.deliverableReady ? "可下载" : state.routeB.finalReady ? "待复核" : "未完成"]
           ]}
           actions={[
             finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
@@ -2021,7 +2158,7 @@ function DualRouteDashboard({
           <span><b>{state.routeA.visualLabel}</b>图片页</span>
           <span><b>{editablePages}</b>可编辑页</span>
           <span><b>{state.routeB.reviewReady ? "已复核" : "待复核"}</b>人工复核</span>
-          <span className={state.routeB.reviewReady ? "ready" : "warn"}><b>{state.routeB.reviewReady ? "可交付" : "完整可编辑交付未完成"}</b>最终状态</span>
+          <span className={state.routeB.deliverableReady ? "ready" : "warn"}><b>{state.routeB.deliverableReady ? "可交付" : "完整可编辑交付未完成"}</b>最终状态</span>
         </div>
       </section>
 
@@ -2031,7 +2168,7 @@ function DualRouteDashboard({
           <strong>{state.nextAction}</strong>
           <ul>
             <li className={state.routeA.imageDeckReady ? "done" : "active"}>图片版已经完成，可以下载交付</li>
-            <li className={state.routeB.finalReady ? "done" : "active"}>{state.routeB.finalReady ? "可编辑版已生成，可下载检查" : "如需可编辑版，后续进入路线 B"}</li>
+            <li className={state.routeB.deliverableReady ? "done" : "active"}>{state.routeB.deliverableReady ? "可编辑版已复核，可以下载交付" : state.routeB.finalReady ? "可编辑版已生成，先完成人工复核" : "如需可编辑版，后续进入路线 B"}</li>
             <li>可编辑重建会消耗更多时间和资源</li>
           </ul>
         </div>
@@ -2138,9 +2275,10 @@ function buildDualRouteState(job = null) {
   const finalPages = Number(artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
   const finalReady = Boolean(artifacts.editableFinal?.path && (!expectedPages || finalPages >= expectedPages));
   const reviewReady = artifacts.manualReview?.status === "approved";
+  const deliverableReady = Boolean(finalReady && reviewReady);
   const routeAReady = Boolean(imageDeckReady);
   const routeBStarted = Boolean(recordedEditablePages || finalPages || artifacts.editableRun);
-  const routeBReady = Boolean(finalReady && reviewReady);
+  const routeBReady = deliverableReady;
   const routeAStatus = routeAReady ? "ready" : job?.id ? "active" : "pending";
   const routeBStatus = routeBReady ? "ready" : routeBStarted ? "active" : routeAReady ? "optional" : "locked";
   const imageTotal = expectedPages || imagePageCount || sourcePages || 0;
@@ -2180,6 +2318,7 @@ function buildDualRouteState(job = null) {
       status: routeBStatus,
       finalReady,
       reviewReady,
+      deliverableReady,
       editableLabel: editableTotal ? formatProgress(recordedEditablePages || finalPages, editableTotal) : routeBStarted ? `${recordedEditablePages || finalPages} 页` : "未开始",
       summary: routeAReady
         ? "按需进入 OCR、页面理解和逐页对象级重建；完整交付仍需人工复核。"
@@ -2189,7 +2328,7 @@ function buildDualRouteState(job = null) {
         { label: "OCR / 页面理解", detail: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "识别文字与版式" : "等待识别", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
         { label: "逐页重建", detail: editableTotal ? `${formatProgress(recordedEditablePages || finalPages, editableTotal)} 可编辑页` : "重建为可编辑元素", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
         { label: "人工复核", detail: reviewReady ? "校对与调整内容" : "等待人工复核", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
-        { label: "下载可编辑版", detail: finalReady ? "生成可编辑 PPT" : "等待最终交付", state: finalReady ? "done" : "pending" }
+        { label: "下载可编辑版", detail: deliverableReady ? "可下载交付物" : finalReady ? "等待人工复核后下载" : "等待最终交付", state: deliverableReady ? "done" : finalReady ? "active" : "pending" }
       ]
     }
   };

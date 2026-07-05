@@ -943,6 +943,8 @@ assert.ok(fs.readFileSync(path.join(process.cwd(), "server", "workflowV1Acceptan
 assert.ok(frontendSource.includes("DualRouteDashboard"));
 assert.ok(frontendSource.includes("buildDualRouteState"));
 assert.ok(frontendSource.includes("PRODUCT_VISUAL_STYLE_LOCK_LABEL"));
+assert.ok(frontendSource.includes("TopbarQuickPanel"));
+assert.ok(frontendSource.includes("topbarPanel"));
 assert.ok(frontendSource.includes("route-lane"));
 assert.ok(frontendSource.includes("dual-dashboard-left"));
 assert.ok(frontendSource.includes("dual-dashboard-main"));
@@ -951,6 +953,7 @@ assert.ok(frontendSource.includes('accent="visual"'));
 assert.ok(frontendSource.includes('accent="editable"'));
 assert.ok(frontendSource.includes("artifacts/image-deck?download=1"));
 assert.ok(frontendSource.includes("artifacts/final-pptx?download=1"));
+assert.ok(frontendSource.includes("state.routeB.deliverableReady"));
 assert.ok(frontendSource.includes("WorkflowDeliveryPortal"));
 assert.ok(frontendSource.includes("WorkflowPlainAgentDashboardClean"));
 assert.ok(frontendSource.includes("WorkflowDeliverySummary"));
