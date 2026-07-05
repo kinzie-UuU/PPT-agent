@@ -152,18 +152,17 @@ function checkFrontendMainFlow(files) {
   return named("Frontend keeps Skill-first main flow", () => {
     mustInclude(files.frontend, "startSkillFirstWorkflow");
     mustInclude(files.frontend, "workflowDeliveryStatus");
-    mustInclude(files.frontend, "WorkflowFinalReviewCallout");
-    mustInclude(files.frontend, "WorkflowFinalReviewCalloutV2");
+    mustInclude(files.frontend, "WorkflowPageVisualReviewWorkbench");
+    mustInclude(files.frontend, "逐页看三张图：原始页、图片版、可编辑页");
+    mustInclude(files.frontend, "全部通过，记录复核");
     mustInclude(files.frontend, "WorkflowPartialFinalNextPanel");
-    mustInclude(files.frontend, "最终 PPT 已生成，等待视觉复核");
     mustInclude(files.frontend, "继续剩余");
-    mustInclude(files.frontend, "最终 PPT 已生成，等待视觉复核");
-    mustInclude(files.frontend, "标记复核通过");
+    mustNotInclude(files.frontend, "确认人工复核通过");
+    mustNotInclude(files.frontend, "标记复核通过");
     mustInclude(files.frontend, "approveWorkflowManualReview");
     mustInclude(files.frontend, "getFinalDownloadState");
     mustInclude(files.frontend, "当前测试范围已通过阻断门禁");
     mustInclude(files.frontend, "当前范围可下载");
-    mustInclude(files.frontend, "完整产品交付仍需要覆盖全部源页");
     mustInclude(files.frontend, "最终对比图");
     mustInclude(files.frontend, "final-compare");
     mustInclude(files.frontend, "WorkflowManualReviewSummary");
@@ -172,7 +171,7 @@ function checkFrontendMainFlow(files) {
     mustInclude(files.frontend, "完整产品交付仍需要跑完全部页面并重新复核");
     mustInclude(files.frontend, "WorkflowFinalVisualQa");
     mustInclude(files.frontend, "可选参考图（非模板）");
-    mustInclude(files.styles, "workflow-final-review-callout");
+    mustInclude(files.styles, "workflow-page-review-workbench");
     mustInclude(files.styles, "workflow-delivery-link.downloadable");
     mustInclude(files.frontend, "gpt-image-2");
     mustNotInclude(files.frontend, "设计方向控制台");

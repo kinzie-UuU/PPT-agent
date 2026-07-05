@@ -1612,7 +1612,7 @@ function App() {
                 )}
                 <details className="workflow-advanced-panel workflow-agent-advanced">
                   <summary>
-                    <span>高级详情 / 环境与工作流</span>
+                    <span>环境与工作流</span>
                     <small>查看服务、模型、OCR、关卡和当前任务状态。</small>
                   </summary>
                   <SkillFirstProductConsole
@@ -4771,7 +4771,7 @@ function WorkflowPlainAgentDashboardClean({ authorizationBusy = false, bundle = 
       : needsWorkerStart
         ? `还有 ${workerPageCount || "若干"} 页等待 image-to-editable-ppt 重建。建议先小批量运行，本次默认选择 ${selectedBatchCount || 0} 页。`
         : blocked
-          ? "工程细节保留在高级详情里。普通操作先看这里的下一步按钮。"
+          ? "当前被交付门禁拦住，先按下方推荐动作处理。"
           : "继续等待后台任务或刷新状态。";
   const facts = [
     { label: "当前文件", value: sourceName },
@@ -4813,7 +4813,7 @@ function WorkflowPlainAgentDashboardClean({ authorizationBusy = false, bundle = 
               ? `先选择本次运行页数，再做启动前预检，确认 ${selectedBatchCount || "这些"} 页、图片额度和模型状态。`
               : isPartialFinal
                 ? "先复核当前小样本；完整交付仍需要继续剩余页面。"
-                : "查看下方高级详情，定位当前阻断。";
+              : "按当前推荐动作继续处理。";
 
   return (
     <section className={`workflow-agent-dashboard ${productReady ? "ready" : blocked ? "blocked" : "working"}`}>
@@ -4900,10 +4900,6 @@ function WorkflowPlainAgentDashboardClean({ authorizationBusy = false, bundle = 
           ))}
         </div>
       ) : null}
-      <details className="workflow-agent-dashboard-advanced">
-        <summary>高级详情在哪里？</summary>
-        <p>页面任务、模型配置、产物链接和校验结果都保留在下方，不放在普通入口里。</p>
-      </details>
     </section>
   );
 }
@@ -5116,7 +5112,7 @@ function WorkflowPlainAgentDashboard({ authorizationBusy = false, bundle = null,
                     ? `先选择本次运行页数，再做启动前预检，确认 ${selectedBatchCount || "这些"} 页、图片额度和模型状态。`
                     : isPartialFinal
                       ? "先复核当前小样本；完整交付仍需继续剩余页面。"
-                      : "查看下方高级详情，定位当前阻断。"}
+                      : "按当前推荐动作继续处理。"}
           </span>
         </div>
         <div className="workflow-agent-dashboard-actions">
@@ -5174,10 +5170,6 @@ function WorkflowPlainAgentDashboard({ authorizationBusy = false, bundle = null,
           ))}
         </div>
       ) : null}
-      <details className="workflow-agent-dashboard-advanced">
-        <summary>高级详情在哪里</summary>
-        <p>页面任务、模型配置、产物链接和校验结果都保留在下方，不放在普通入口里。</p>
-      </details>
     </section>
   );
 }
@@ -5251,7 +5243,7 @@ function WorkflowDeliverySummary({ artifactBundle, authorizationBusy = "", bundl
         ? `\n\n本次只记录当前小样本复核：${finalPages}/${sourcePages} 页。完整产品交付仍需要跑完全部页面并重新复核。`
         : `\n\n本次复核范围：${finalPages} 页完整最终 PPT。`
       : "";
-    const confirmed = window.confirm(`确认已经逐页对比 codex-ppt 目标图、可编辑预览和页面校验，并将当前最终 PPT 标记为人工复核通过？${reviewScopeText}`);
+    const confirmed = window.confirm(`确认已经逐页对比原始页、图片版和可编辑页，且所有页面都已点击“通过”？确认后将当前最终 PPT 标记为人工复核通过。${reviewScopeText}`);
     if (!confirmed) return;
     setManualReviewBusy(true);
     setManualReviewError("");
@@ -5295,172 +5287,24 @@ function WorkflowDeliverySummary({ artifactBundle, authorizationBusy = "", bundl
         finalDownloadState={finalDownloadState}
         finalGate={finalGate}
         job={job}
-        onApproveReview={approveFinalManualReview}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
         onOpenWorkflow={onOpenWorkflow}
         onRecomposeFinal={onRecomposeEditableFinal}
-        reviewBusy={manualReviewBusy}
         status={status}
       />
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
+      <WorkflowPageVisualReviewWorkbench
+        artifactBundle={artifactBundle}
+        busyPageId={pageReviewBusy}
+        onApproveFinalReview={approveFinalManualReview}
+        onMarkPage={markPageVisualReview}
+        onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+        pageEvidence={bundle?.pageEvidence}
+        pageVisualReview={job?.artifacts?.pageVisualReview || null}
+        reviewBusy={manualReviewBusy}
+      />
+      {pageReviewError ? <p className="workflow-error">{pageReviewError}</p> : null}
       <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
-      <details className="workflow-delivery-advanced-details">
-        <summary>高级证据与修复详情</summary>
-        <div className="workflow-delivery-advanced-grid">
-          {links.length ? (
-            <div className="workflow-delivery-link-groups">
-              <div className={`workflow-delivery-link-group final ${finalDownloadState.state}`}>
-                <div className="workflow-delivery-link-group-head">
-                  <b>最终可编辑 PPT</b>
-                  <span>{finalDownloadState.message}</span>
-                </div>
-                <div className="workflow-delivery-links">
-                  {finalLinks.length ? (
-                    finalLinks.map((link) => (
-                      <WorkflowDeliveryArtifactLinkV2
-                        finalGate={finalGate}
-                        key={`${link.key}-${link.pageId || ""}`}
-                        link={link}
-                      />
-                    ))
-                  ) : (
-                    <span className="workflow-delivery-missing-link">等待生成新的最终可编辑 PPT</span>
-                  )}
-                </div>
-              </div>
-              {evidenceLinks.length ? (
-                <div className="workflow-delivery-link-group evidence">
-                  <div className="workflow-delivery-link-group-head">
-                    <b>中间产物与证据</b>
-                    <span>图片型 PPT 是 codex-ppt 中间产物，不是最终交付。</span>
-                  </div>
-                  <div className="workflow-delivery-links">
-                    {evidenceLinks.map((link) => (
-                      <WorkflowDeliveryArtifactLinkV2
-                        finalGate={finalGate}
-                        key={`${link.key}-${link.pageId || ""}`}
-                        link={link}
-                      />
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {status.nextActions.length ? (
-            <div className="workflow-delivery-actions">
-              {status.nextActions.map((action) => <span key={action}>{action}</span>)}
-            </div>
-          ) : null}
-          <div className="workflow-delivery-head">
-            <div>
-              <b>{status.title}</b>
-              <span>{status.summary}</span>
-            </div>
-          </div>
-          <div className="workflow-delivery-facts">
-            {status.facts.map((fact) => (
-              <span key={fact.label}><b>{fact.value}</b>{fact.label}</span>
-            ))}
-          </div>
-          {status.nextStep ? (
-            <div className="workflow-delivery-next">
-              <b>下一步</b>
-              <span>{uiZh(status.nextStep.label)}：{uiZh(status.nextStep.reason)}</span>
-            </div>
-          ) : null}
-          {status.warnings.length ? (
-            <div className="workflow-delivery-warnings">
-              {status.warnings.map((warning) => <span key={warning}>{warning}</span>)}
-            </div>
-          ) : null}
-          {finalGate ? <WorkflowFinalGateV2 gate={finalGate} /> : null}
-          {finalGate ? (
-            <WorkflowFinalReviewCalloutV2
-              finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
-              finalEvidence={bundle?.finalEvidence}
-              gate={finalGate}
-              manualReview={job?.artifacts?.manualReview || null}
-              onApprove={approveFinalManualReview}
-              onOpenWorkflow={onOpenWorkflow}
-              reviewBusy={manualReviewBusy}
-            />
-          ) : null}
-          {finalGate ? (
-            <WorkflowPartialFinalNextPanel
-              coverage={bundle?.coverage}
-              gate={finalGate}
-              onContinueRemaining={onOpenPageTasks || onOpenWorkflow}
-              onReviewCurrent={onOpenWorkflow}
-            />
-          ) : null}
-          <WorkflowEditableWorkerRecoveryAction
-            busy={authorizationBusy === "editable-workers"}
-            finalGate={finalGate}
-            onAuthorize={onAuthorizeEditableWorkerSpend}
-            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-            onPreview={onPreviewEditableWorkerStart}
-            preflight={workerPreflight}
-            preflightBusy={workerPreflightBusy}
-            onStart={onStartEditableWorker}
-            startBusy={workerStartBusy}
-            status={status}
-          />
-          <WorkflowEditableFinalizeAction
-            busy={retryBusy === "editable-finalize"}
-            bundle={bundle}
-            job={job}
-            onRecompose={onRecomposeEditableFinal}
-          />
-          {stalePageIds.length ? (
-            <WorkflowStalePageEvidenceRecoveryV2
-              busy={retryBusy === "stale-page-evidence"}
-              previewBusy={retryBusy === "stale-page-evidence-preview"}
-              onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-              onPreview={onPreviewStalePageEvidence}
-              onRetry={onRetryStalePageEvidence}
-              pageIds={stalePageIds}
-            />
-          ) : null}
-          {finalGate ? (
-            <WorkflowFinalQualityChecklist
-              coverage={bundle?.coverage}
-              finalEvidence={bundle?.finalEvidence}
-              gate={finalGate}
-              pageEvidence={bundle?.pageEvidence}
-              validation={validation}
-            />
-          ) : null}
-          <WorkflowPageVisualReviewWorkbench
-            artifactBundle={artifactBundle}
-            busyPageId={pageReviewBusy}
-            onApproveFinalReview={approveFinalManualReview}
-            onMarkPage={markPageVisualReview}
-            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-            pageEvidence={bundle?.pageEvidence}
-            pageVisualReview={job?.artifacts?.pageVisualReview || null}
-            reviewBusy={manualReviewBusy}
-          />
-          {pageReviewError ? <p className="workflow-error">{pageReviewError}</p> : null}
-          <WorkflowFinalVisualQaPanel
-            finalEvidence={bundle?.finalEvidence}
-            onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-            onPreviewRetry={onPreviewFinalVisualQaRetry}
-            onRetry={onRetryFinalVisualQaPages}
-            retryBusy={retryBusy}
-          />
-          {finalGate ? (
-            <WorkflowManualReviewSummaryV2
-              finalArtifact={bundle?.final?.artifact || job?.artifacts?.editableFinal || null}
-              gate={finalGate}
-              manualReview={job?.artifacts?.manualReview || null}
-              onOpenWorkflow={onOpenWorkflow}
-            />
-          ) : null}
-          <WorkflowDeliveryValidationSummary validation={validation} validationBundle={bundle?.validation} />
-          <WorkflowDiagnosticBundleSummary link={logBundleLink} status={status} />
-        </div>
-      </details>
     </div>
   );
 }
@@ -5573,7 +5417,7 @@ function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onO
   );
 }
 
-function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onApproveReview, onOpenPageTasks, onOpenWorkflow, onRecomposeFinal, reviewBusy = false, status = {} }) {
+function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenWorkflow, onRecomposeFinal, status = {} }) {
   const checks = finalGate?.checks || {};
   const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
   const reviewReady = Boolean(
@@ -5616,6 +5460,9 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
       : failedLabels.length
         ? `未通过项：${failedLabels.join(" / ")}`
         : "等待交付检查结果。";
+  function scrollToPageReview() {
+    document.querySelector(".workflow-page-review-workbench")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   return (
     <section className={`workflow-simple-delivery ${productReady ? "ready" : reviewReady ? "review" : blocked ? "blocked" : "pending"}`}>
       <div className="workflow-simple-delivery-head">
@@ -5631,8 +5478,8 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
         {productReady ? (
           <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看最终文件</button>
         ) : reviewReady ? (
-          <button className="btn success" type="button" onClick={onApproveReview} disabled={reviewBusy || !onApproveReview}>
-            {reviewBusy ? "正在记录..." : "确认人工复核通过"}
+          <button className="btn success" type="button" onClick={scrollToPageReview}>
+            去逐页复核
           </button>
         ) : hasFinal ? (
           <>
@@ -6054,48 +5901,6 @@ function WorkflowFinalGateV2({ gate }) {
   );
 }
 
-function WorkflowFinalReviewCalloutV2({ finalArtifact = null, finalEvidence = null, gate = null, manualReview = null, onApprove, onOpenWorkflow, reviewBusy = false }) {
-  const checks = gate?.checks || {};
-  const reasons = Array.isArray(gate?.reasons) ? gate.reasons : [];
-  const reviewRecorded = checks.manualReviewRecorded === true || manualReview?.status === "approved";
-  const hasFinal = checks.hasFinal === true || Boolean(finalArtifact?.path);
-  const reviewOnly = hasFinal
-    && checks.validationPassed === true
-    && checks.editabilityPassed === true
-    && checks.powerPointOpenable === true
-    && checks.noFullSlideRaster === true
-    && !reviewRecorded
-    && reasons.some((reason) => reason.includes("final-visual-qa-needs-review") || reason.includes("视觉 QA") || reason.includes("人工复核"));
-  if (!reviewOnly) return null;
-  const visualQa = finalEvidence?.summary?.visualQa || {};
-  const reviewedPages = visualQa?.pageCount || finalEvidence?.summary?.expectedPages || finalArtifact?.summary?.page_count || checks.finalPages || 0;
-  const finalSize = finalArtifact?.size || finalEvidence?.summary?.finalSize || 0;
-  return (
-    <div className="workflow-final-review-callout">
-      <div className="workflow-final-review-copy">
-        <b>最终 PPT 已生成，等待视觉复核</b>
-        <span>结构校验、PowerPoint 打开、对象可编辑和整页截图风险检查已经通过；当前阻断不是文件损坏，而是需要人工对比目标图和可编辑预览。</span>
-      </div>
-      <div className="workflow-final-review-facts">
-        <span>最终文件<b>{finalSize ? formatFileSize(finalSize) : "已生成"}</b></span>
-        <span>复核范围<b>{reviewedPages || "待确认"} 页</b></span>
-        <span>人工复核<b>未记录</b></span>
-        <span>下载状态<b>门禁阻断</b></span>
-      </div>
-      <div className="workflow-final-review-actions">
-        <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>
-          打开页面复核区
-        </button>
-        <button className="btn success" type="button" onClick={onApprove} disabled={reviewBusy || !onApprove || !hasFinal}>
-          {reviewBusy ? "正在记录..." : "标记复核通过"}
-        </button>
-        <small>在复核区逐页查看 codex-ppt 目标图、可编辑预览、页面校验和资产分离结果。</small>
-        <small>复核通过后会解锁当前测试范围下载；完整产品交付仍需要覆盖全部源页。</small>
-      </div>
-    </div>
-  );
-}
-
 function WorkflowPartialFinalNextPanel({ coverage = null, gate = null, onContinueRemaining, onReviewCurrent }) {
   const sourcePages = Number(gate?.checks?.sourcePages || coverage?.sourcePages || 0);
   const finalPages = Number(gate?.checks?.finalPages || coverage?.finalPages || 0);
@@ -6151,51 +5956,6 @@ function WorkflowManualReviewSummaryV2({ finalArtifact = null, gate = null, manu
           打开页面复核区
         </button>
       ) : null}
-    </div>
-  );
-}
-
-function WorkflowFinalReviewCallout({ finalArtifact = null, finalEvidence = null, gate = null, manualReview = null, onApprove, onOpenWorkflow, reviewBusy = false }) {
-  const checks = gate?.checks || {};
-  const visualQa = finalEvidence?.summary?.visualQa || null;
-  const reasons = [...(gate?.reasons || []), ...(finalEvidence?.issues || []), ...(visualQa?.blockingIssues || [])].map(String);
-  const reviewRecorded = checks.manualReviewRecorded === true || manualReview?.status === "approved";
-  const hasFinal = checks.hasFinal === true || Boolean(finalArtifact?.path || finalEvidence?.finalPath);
-  const reviewOnly = hasFinal
-    && gate?.level === "blocked"
-    && checks.validationPassed === true
-    && checks.editabilityPassed === true
-    && checks.powerPointOpenable === true
-    && checks.noFullSlideRaster === true
-    && !reviewRecorded
-    && reasons.some((reason) => reason.includes("final-visual-qa-needs-review") || reason.includes("视觉 QA") || reason.includes("人工复核"));
-  if (!reviewOnly) return null;
-  const pages = Array.isArray(visualQa?.pages) ? visualQa.pages : [];
-  const reviewedPages = pages.length || visualQa?.pageCount || finalEvidence?.summary?.expectedPages || 0;
-  const finalSize = finalArtifact?.size || finalEvidence?.summary?.finalSize || 0;
-  const pageIssues = Array.isArray(visualQa?.pageIssues) ? visualQa.pageIssues.length : 0;
-  return (
-    <div className="workflow-final-review-callout">
-      <div className="workflow-final-review-copy">
-        <b>最终 PPT 已生成，等待视觉复核</b>
-        <span>结构校验、PowerPoint 打开性、可编辑对象和整页截图风险已经通过；当前阻断不是文件损坏，而是需要人工对比目标图和可编辑预览后确认。</span>
-      </div>
-      <div className="workflow-final-review-facts">
-        <span>最终文件<b>{finalSize ? formatFileSize(finalSize) : "已生成"}</b></span>
-        <span>复核范围<b>{reviewedPages || "待确认"} 页</b></span>
-        <span>页面问题<b>{pageIssues ? `${pageIssues} 项` : "未发现"}</b></span>
-        <span>人工复核<b>未记录</b></span>
-      </div>
-      <div className="workflow-final-review-actions">
-        <button className="btn primary" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>
-          打开页面复核区
-        </button>
-        <button className="btn success" type="button" onClick={onApprove} disabled={reviewBusy || !onApprove || !hasFinal}>
-          {reviewBusy ? "正在记录..." : "标记复核通过"}
-        </button>
-        <small>在复核区逐页查看 codex-ppt 目标图、可编辑预览和页面校验，通过后点击“标记已复核”。</small>
-        <small>复核通过后会解锁当前测试范围下载；完整产品交付仍需要覆盖全部源页。</small>
-      </div>
     </div>
   );
 }
@@ -6433,7 +6193,7 @@ function WorkflowFinalVisualQaPanel({ finalEvidence = null, onOpenPageTasks, onP
           ))}
         </div>
       ) : null}
-      {failedPages.length > 8 ? <small>还有 {failedPages.length - 8} 页未展开，请在高级详情里查看完整证据。</small> : null}
+      {failedPages.length > 8 ? <small>还有 {failedPages.length - 8} 页未展开，请在完整记录里查看。</small> : null}
       {visualQa.status === "failed" ? (
         <div className="workflow-final-visual-qa-next">
           <span>下一步：回到页面任务，优先重跑这些失败页；重跑前先检查对话模型额度和 image-to-editable-ppt 页面 worker 证据。</span>
@@ -6569,11 +6329,10 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
   const pages = Array.isArray(pageEvidence?.pages) ? pageEvidence.pages : [];
   if (!pages.length) return null;
   const linkIndex = buildWorkflowArtifactLinkIndex(artifactBundle?.links || []);
-  const completePages = pages.filter((page) => page.complete).length;
-  const markedPages = Object.keys(marks).length;
-  const persistedSummary = pageVisualReview?.summary || {};
-  const incompletePages = pages.length - completePages;
-  const canRecordFinalReview = Boolean(pageEvidence?.complete && onApproveFinalReview);
+  const reviewedPages = pages.filter((page) => ["pass", "rerun"].includes(String(marks[page.pageId]?.status || marks[page.pageId] || ""))).length;
+  const failedPages = pages.filter((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "rerun").length;
+  const allPassed = Boolean(pages.length && pages.every((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "pass"));
+  const canRecordFinalReview = Boolean(pageEvidence?.complete && allPassed && onApproveFinalReview);
   async function markPage(pageId, value) {
     const previous = marks[pageId] || null;
     setMarks((current) => ({
@@ -6601,24 +6360,16 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
     <div className="workflow-page-review-workbench">
       <div className="workflow-page-review-head">
         <div>
-          <b>逐页人工复核</b>
-          <span>按页对比 codex-ppt 目标图、可编辑 PPT 预览、页面校验和资产分离结果。</span>
-          <small>页面标记用于当前复核视图；真正打开最终下载门禁仍需点击“记录人工复核”。</small>
+          <b>人工复核</b>
+          <span>逐页看三张图：原始页、图片版、可编辑页。能接受就通过，不接受就不通过。</span>
         </div>
         <div className="workflow-page-review-actions">
-          <small>{completePages}/{pages.length} 页证据完整；{markedPages} 页已保存标记；需重跑 {persistedSummary.rerunCount || 0} 页</small>
-          <button className="btn ghost" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>重跑/查看页面任务</button>
+          <small>{reviewedPages}/{pages.length} 页已判断{failedPages ? `，${failedPages} 页不通过` : ""}</small>
           <button className="btn primary" type="button" onClick={onApproveFinalReview} disabled={!canRecordFinalReview || reviewBusy}>
-            {reviewBusy ? "记录中..." : "记录人工复核"}
+            {reviewBusy ? "记录中..." : "全部通过，记录复核"}
           </button>
         </div>
       </div>
-      {incompletePages ? (
-        <div className="workflow-page-review-alert">
-          <b>当前还不能做最终产品级复核</b>
-          <span>还有 {incompletePages} 页缺少完整证据。先重跑这些页，成功页会保留，失败页单独处理。</span>
-        </div>
-      ) : null}
       <div className="workflow-page-review-list">
         {pages.map((page) => (
           <WorkflowPageVisualReviewRow
@@ -6627,48 +6378,41 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, busyPageId =
             links={linkIndex.get(page.pageId) || {}}
             mark={marks[page.pageId]?.status || marks[page.pageId] || ""}
             onMark={markPage}
-            onOpenPageTasks={onOpenPageTasks}
             page={page}
           />
         ))}
       </div>
+      {failedPages ? (
+        <div className="workflow-page-review-footer">
+          <span>有页面未通过，进入页面任务区处理后再回来复核。</span>
+          <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>处理不通过页面</button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function WorkflowPageVisualReviewRow({ busy = false, links = {}, mark = "", onMark, onOpenPageTasks, page = {} }) {
+function WorkflowPageVisualReviewRow({ busy = false, links = {}, mark = "", onMark, page = {} }) {
   const pageId = page.pageId || "";
-  const target = links["visual-page"];
-  const preview = links["rebuild-preview"];
-  const contact = links["asset-contact-sheet"];
-  const validation = links["page-validation"];
+  const original = links["rendered-page"];
+  const imagePage = links["visual-page"];
+  const editablePage = links["rebuild-preview"];
   const complete = page.complete === true;
-  const state = complete ? "complete" : page.status === "failed" ? "failed" : "pending";
-  const issues = Array.isArray(page.issues) ? page.issues : [];
-  const issueText = issues.length ? issues.slice(0, 4).map(describePageEvidenceIssue).join("；") : "证据完整";
+  const state = mark === "rerun" ? "failed" : mark === "pass" ? "complete" : complete ? "ready" : "pending";
   return (
     <div className={`workflow-page-review-row ${state} ${mark ? `marked-${mark}` : ""}`}>
       <div className="workflow-page-review-title">
-        <b>{pageId}</b>
-        <span>{complete ? "证据完整，可进入人工视觉复核" : "等待补齐页面重建证据"}</span>
-        <small>{issueText}{issues.length > 4 ? `；另有 ${issues.length - 4} 项` : ""}</small>
+        <b>{formatWorkflowPageLabel(pageId)}</b>
+        <span>{mark === "pass" ? "已通过" : mark === "rerun" ? "不通过" : complete ? "待判断" : "图片未齐"}</span>
       </div>
       <div className="workflow-page-review-previews">
-        <WorkflowPageReviewThumb link={target} label="目标图" />
-        <WorkflowPageReviewThumb link={preview} label="可编辑预览" />
-        <WorkflowPageReviewThumb link={contact} label="资产分离" />
-      </div>
-      <div className="workflow-page-review-evidence">
-        <span className={page.validationPassed ? "pass" : "warn"}>校验<b>{page.validationPassed ? "通过" : "缺失/失败"}</b></span>
-        <span className={page.pagePptxOpenable ? "pass" : "warn"}>PPT 打开<b>{page.pagePptxOpenable ? "通过" : "失败"}</b></span>
-        <span className={page.manifestContractOk ? "pass" : "warn"}>对象证据<b>{page.manifestContractOk ? "完整" : "缺失"}</b></span>
-        {validation?.href ? <a href={validation.href} target="_blank" rel="noreferrer">查看校验</a> : <em>校验未生成</em>}
+        <WorkflowPageReviewThumb link={original} label="原始页" />
+        <WorkflowPageReviewThumb link={imagePage} label="图片版" />
+        <WorkflowPageReviewThumb link={editablePage} label="可编辑页" />
       </div>
       <div className="workflow-page-review-mark">
-        <button type="button" className={mark === "pass" ? "active" : ""} onClick={() => onMark?.(pageId, "pass")} disabled={busy || !complete}>{busy ? "保存中" : "通过"}</button>
-        <button type="button" className={mark === "accept" ? "active" : ""} onClick={() => onMark?.(pageId, "accept")} disabled={busy || !complete}>暂时接受</button>
-        <button type="button" className={mark === "rerun" ? "active danger" : "danger"} onClick={() => onMark?.(pageId, "rerun")} disabled={busy}>需要重跑</button>
-        {mark === "rerun" && onOpenPageTasks ? <button type="button" onClick={onOpenPageTasks}>去重跑</button> : null}
+        <button type="button" className={mark === "pass" ? "active pass" : ""} onClick={() => onMark?.(pageId, "pass")} disabled={busy || !complete}>{busy ? "保存中..." : "通过"}</button>
+        <button type="button" className={mark === "rerun" ? "active danger" : "danger"} onClick={() => onMark?.(pageId, "rerun")} disabled={busy}>不通过</button>
       </div>
     </div>
   );
@@ -6681,6 +6425,11 @@ function WorkflowPageReviewThumb({ label = "", link = null }) {
       <b>{label}</b>
     </a>
   );
+}
+
+function formatWorkflowPageLabel(pageId = "") {
+  const number = String(pageId || "").match(/(\d+)/)?.[1];
+  return number ? `第 ${Number(number)} 页` : pageId || "未命名页";
 }
 
 function buildWorkflowArtifactLinkIndex(links = []) {
