@@ -374,7 +374,12 @@ function App() {
       .then((meta) => {
         const id = meta?.primaryWorkflowJobId || "";
         if (!id) return null;
-        setPrimaryWorkflow((current) => current?.id ? current : { id, found: true });
+        const primary = meta?.primaryWorkflow || { id, found: true };
+        setPrimaryWorkflow((current) => current?.id ? current : primary);
+        if (meta?.primaryWorkflowJob?.id) {
+          setWorkflowJob((current) => current?.id ? current : meta.primaryWorkflowJob);
+          setWorkflowJobs((current) => uniqueWorkflowJobs([meta.primaryWorkflowJob, ...current]));
+        }
         return api.workflowJob(id);
       })
       .then((primaryJob) => {
@@ -758,12 +763,17 @@ function App() {
       setWorkflowJobs(nextJobs);
       const active = activeId ? nextJobs.find((item) => item.id === activeId) : null;
       const latest = restoreLatest ? selectDefaultWorkflowJob(nextJobs, primary) : null;
-      if (active || (restoreLatest && (!workflowJob || isInternalWorkflowJob(workflowJob)) && latest)) {
-        const selected = active || latest;
-        const hydrated = selected?.id ? await api.workflowJob(selected.id).catch(() => selected) : selected;
-        setWorkflowJob(hydrated);
-      } else if (restoreLatest && !latest && (!workflowJob || isInternalWorkflowJob(workflowJob))) {
-        setWorkflowJob(null);
+      const selected = active || latest;
+      if (selected) {
+        const shouldHydrate = Boolean(active || restoreLatest);
+        const hydrated = shouldHydrate && selected?.id ? await api.workflowJob(selected.id).catch(() => selected) : selected;
+        setWorkflowJob((current) => {
+          if (active) return hydrated;
+          if (restoreLatest && (!current || isInternalWorkflowJob(current))) return hydrated;
+          return current;
+        });
+      } else if (restoreLatest) {
+        setWorkflowJob((current) => ((!current || isInternalWorkflowJob(current)) ? null : current));
       }
       return nextJobs;
     } catch {
@@ -1950,6 +1960,8 @@ function DualRouteDashboard({
     ? onCreateWorkflow
     : noCostApprovalSummary?.readyCount
       ? onApproveNoCostGates
+      : state.routeB.finalReady && !state.routeB.reviewReady
+        ? onOpenDelivery
       : state.routeA.imageDeckReady
         ? onOpenEditable
         : onOpenVisual;
@@ -1957,6 +1969,8 @@ function DualRouteDashboard({
     ? "新建任务"
     : noCostApprovalSummary?.readyCount
       ? "确认就绪关卡"
+      : state.routeB.finalReady && !state.routeB.reviewReady
+        ? "继续人工复核"
       : state.routeA.imageDeckReady
         ? "继续转可编辑 PPT"
         : "继续生成图片版 PPT";
@@ -2234,6 +2248,8 @@ function RouteLane({ accent = "visual", actions = [], badge, metrics = [], statu
     ? "图片版 PPT 已完成"
     : accent === "editable" && status === "ready"
       ? "可编辑 PPT 已完成"
+      : accent === "editable" && status === "active"
+        ? "可编辑 PPT 待复核"
       : accent === "editable"
         ? "可编辑重建尚未开始"
         : "图片版 PPT 生成中";

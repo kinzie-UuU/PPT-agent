@@ -12193,6 +12193,113 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   overflow: hidden;
 }
 
+@media (max-width: 760px) {
+  .workspace-shell:has(.dual-dashboard) {
+    display: block;
+  }
+
+  .workspace-shell:has(.dual-dashboard) .topbar {
+    position: static;
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .workspace-shell:has(.dual-dashboard) .brand-lockup,
+  .workspace-shell:has(.dual-dashboard) .topbar-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .workspace-shell:has(.dual-dashboard) .brand-name {
+    font-size: 20px;
+  }
+
+  .workspace-shell:has(.dual-dashboard) .workspace-grid {
+    padding: 12px;
+  }
+
+  .workspace-shell:has(.dual-dashboard) .main-stage {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .dual-dashboard {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+  }
+
+  .dual-dashboard-left,
+  .dual-dashboard-right {
+    position: static;
+    min-height: auto;
+  }
+
+  .dual-task-titlebar,
+  .route-completion,
+  .dual-create-head,
+  .dual-create-actions {
+    display: grid;
+  }
+
+  .dual-create-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dual-dashboard .route-lane-head {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .route-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+  }
+
+  .dual-dashboard .route-stepper,
+  .dual-dashboard .route-lane.editable .route-stepper {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    padding: 0;
+  }
+
+  .dual-dashboard .route-step {
+    justify-items: start;
+    min-height: auto;
+    padding: 9px 10px 9px 38px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #fff;
+    text-align: left;
+  }
+
+  .dual-dashboard .route-step::before,
+  .dual-dashboard .route-step::after {
+    display: none;
+  }
+
+  .dual-dashboard .route-step i {
+    position: absolute;
+    left: 10px;
+    top: 11px;
+  }
+
+  .route-completion .route-actions,
+  .dual-dashboard .route-actions {
+    justify-content: stretch;
+  }
+
+  .route-completion .btn,
+  .route-completion .btn.primary {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 .export-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; }
 .format-list { display: grid; gap: 10px; align-content: start; }
 .format-option {

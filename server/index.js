@@ -419,12 +419,18 @@ app.delete("/api/style-references/:id", async (req, res, next) => {
   }
 });
 
-app.get("/api/workflow-jobs/meta", (_req, res) => {
+app.get("/api/workflow-jobs/meta", async (_req, res) => {
   const primaryJobId = getPrimaryWorkflowJobId();
+  const primaryJob = primaryJobId
+    ? await readWorkflowJob(primaryJobId).catch(() => null)
+    : null;
+  const primaryWorkflow = buildPrimaryWorkflowPayload(primaryJob);
   res.json({
     ok: true,
     rootDir: workflowRootDir,
     primaryWorkflowJobId: primaryJobId,
+    primaryWorkflow,
+    primaryWorkflowJob: primaryJob ? toClientWorkflowJob(primaryJob, { primaryWorkflow }) : null,
     stages: WORKFLOW_STAGE_ORDER,
     stageStatuses: WORKFLOW_STAGE_STATUS,
     pageStatuses: WORKFLOW_PAGE_STATUS
