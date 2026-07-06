@@ -1510,10 +1510,6 @@ function App() {
         ) : null}
       </header>
 
-      {!useDualRouteDashboard && activeStep !== "export" ? (
-        <WorkflowStrip activeStep={activeStep} completion={completion} rightPanelMode={rightPanelMode} setActiveStep={setActiveStep} setRightPanelMode={toggleSettingsPanel} stepState={stepState} />
-      ) : null}
-
       <div className={`workspace-grid ${activeStep !== "preview" ? "no-left" : ""} ${!showRightPanel ? "solo-stage" : ""}`}>
         {activeStep === "preview" && (
           <WorkspaceLeftPanel
@@ -2481,29 +2477,6 @@ function routeStatusLabel(status = "") {
   if (status === "optional") return "可选继续";
   if (status === "locked") return "等待前置";
   return "待开始";
-}
-
-function WorkflowStrip({ activeStep, completion, rightPanelMode, setActiveStep, setRightPanelMode, stepState }) {
-  const currentStep = STEPS.find((step) => step.id === activeStep);
-  return (
-    <div className="workflow-strip">
-      <div className="workflow-current">
-        <span>{"\u5f53\u524d\u9636\u6bb5"}</span>
-        <b>{currentStep?.title || "\u5de5\u4f5c\u53f0"}</b>
-        <em><i style={{ width: `${completion}%` }} /></em>
-      </div>
-      <div className="workflow-steps">
-        {STEPS.map((step, index, list) => (
-          <button className={activeStep === step.id ? "active" : ""} type="button" key={step.id} onClick={() => setActiveStep(step.id)}>
-            <strong>{step.title}</strong>
-            <span>{stepState[step.id]}</span>
-            {index < list.length - 1 ? <i /> : null}
-          </button>
-        ))}
-      </div>
-      <button className="workflow-settings" type="button" onClick={() => setRightPanelMode(rightPanelMode === "settings" ? "history" : "settings")}>{"\u8bbe\u7f6e"}</button>
-    </div>
-  );
 }
 
 function WorkflowPrimaryJobNotice({ currentJob = null, onOpenDelivery, onOpenPrimary, primaryWorkflow = null }) {

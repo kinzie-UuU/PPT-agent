@@ -156,6 +156,9 @@ function checkFrontendMainFlow(files) {
     mustInclude(files.frontend, "workflow-review-modal");
     mustInclude(files.frontend, "逐页对比：原始页、图片版、可编辑页");
     mustInclude(files.frontend, "全部通过，记录复核");
+    mustNotInclude(files.frontend, "WorkflowStrip");
+    mustNotInclude(files.frontend, "workflow-strip");
+    mustNotInclude(files.styles, "workflow-strip");
     mustNotInclude(files.frontend, "WorkflowPartialFinalNextPanel");
     mustNotInclude(files.frontend, "继续剩余");
     mustNotInclude(files.frontend, "确认人工复核通过");
