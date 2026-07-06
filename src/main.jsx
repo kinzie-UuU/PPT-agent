@@ -624,13 +624,17 @@ function App() {
     }
   }
 
-  async function runWorkflowRebuildPipeline() {
+  async function runWorkflowRebuildPipeline(options = {}) {
     const sourceUploadId = fileIds[0];
     if (!sourceUploadId) {
       setError("请先上传 PPT/PDF/图片作为可编辑重建源文件。");
       setActiveStep("materials");
       return;
     }
+    const deliveryMode = options.deliveryMode === "editable" ? "editable" : "visual";
+    const routeNote = deliveryMode === "editable"
+      ? "frontend-workflow-pipeline route=B editable requested; run route A image deck first, then continue route B editable rebuild"
+      : "frontend-workflow-pipeline route=A image deck requested";
     setWorkflowBusy(true);
     setError("");
     setStatus("正在创建可编辑重建 workflow...");
@@ -638,7 +642,7 @@ function App() {
       let next = await api.createWorkflowJob({
         sourceUploadId,
         mode: "ppt-rebuild",
-        notes: "frontend-workflow-pipeline"
+        notes: routeNote
       });
       setWorkflowJob(next);
       await loadWorkflowJobs({ activeId: next.id });
@@ -659,7 +663,9 @@ function App() {
       next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-upload-skill-first"));
       setWorkflowJob(next);
       await loadWorkflowJobs({ activeId: next.id });
-      setStatus("重制任务已创建。请复核源页面，确认大纲、视觉方向和生成方式后，再生成视觉样张。");
+      setStatus(deliveryMode === "editable"
+        ? "重制任务已创建。会先完成路线 A 图片版；确认后再进入路线 B 可编辑版，可编辑重建耗时较长。"
+        : "重制任务已创建。请复核源页面，确认大纲、视觉方向和生成方式后，再生成视觉样张。");
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
@@ -668,13 +674,17 @@ function App() {
     }
   }
 
-  async function runBriefWorkflowPipeline() {
+  async function runBriefWorkflowPipeline(options = {}) {
     const sourceBrief = buildSkillFirstBriefSource({ form, outlinePlan, files, inferredMaterials });
     if (!sourceBrief.trim()) {
       setError("创建 PPT 重制任务前，请先输入需求简述或确认大纲。");
       setActiveStep("materials");
       return;
     }
+    const deliveryMode = options.deliveryMode === "editable" ? "editable" : "visual";
+    const routeNote = deliveryMode === "editable"
+      ? "frontend-brief-skill-first-workflow route=B editable requested; run route A image deck first, then continue route B editable rebuild"
+      : "frontend-brief-skill-first-workflow route=A image deck requested";
     setWorkflowBusy(true);
     setError("");
     setStatus("正在根据需求创建 PPT 重制任务...");
@@ -684,7 +694,7 @@ function App() {
         sourceOriginalName: getEffectiveProjectName(form, files) + "-brief.md",
         sourceMimeType: "text/markdown",
         mode: "codex-ppt-brief",
-        notes: "frontend-brief-skill-first-workflow"
+        notes: routeNote
       });
       setWorkflowJob(next);
       await loadWorkflowJobs({ activeId: next.id });
@@ -700,7 +710,9 @@ function App() {
       next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-brief-skill-first"));
       setWorkflowJob(next);
       await loadWorkflowJobs({ activeId: next.id });
-      setStatus("简述重制任务已创建。请确认大纲、视觉方向和生成方式后，再生成视觉样张。");
+      setStatus(deliveryMode === "editable"
+        ? "简述重制任务已创建。会先完成路线 A 图片版；确认后再进入路线 B 可编辑版，可编辑重建耗时较长。"
+        : "简述重制任务已创建。请确认大纲、视觉方向和生成方式后，再生成视觉样张。");
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
@@ -709,12 +721,12 @@ function App() {
     }
   }
 
-  async function startSkillFirstWorkflow() {
+  async function startSkillFirstWorkflow(options = {}) {
     if (!fileIds.length) {
-      await runBriefWorkflowPipeline();
+      await runBriefWorkflowPipeline(options);
       return;
     }
-    await runWorkflowRebuildPipeline();
+    await runWorkflowRebuildPipeline(options);
   }
 
   function buildCodexPptOutlineRecordBody(source, sourceBrief = "") {
@@ -2073,6 +2085,7 @@ function DualRouteDashboard({
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState("visual");
   const state = buildDualRouteState(job);
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
@@ -2107,12 +2120,33 @@ function DualRouteDashboard({
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
   const canCreateFromPanel = !busy && hasCreateInput;
+  const selectedDeliveryMode = deliveryMode === "editable" ? "editable" : "visual";
+  const createModeCopy = selectedDeliveryMode === "editable"
+    ? {
+      label: "创建路线 B 任务",
+      ready: "准备就绪：会先完成路线 A 图片版，再进入路线 B 可编辑版。",
+      pending: "请先上传材料，或填写一句任务需求。",
+      busy: "正在创建路线 B...",
+      confirm: "路线 B 可编辑 PPT 会耗时更长。\n\n系统仍会先完成路线 A 图片版 PPT；确认图片版后，再继续路线 B 可编辑重建。\n\n确认创建路线 B 任务？"
+    }
+    : {
+      label: "创建路线 A 任务",
+      ready: "准备就绪：会先进入路线 A 图片版 PPT 生成。",
+      pending: "请先上传材料，或填写一句任务需求。",
+      busy: "正在创建路线 A...",
+      confirm: ""
+    };
   function handleArchiveTask(event, item) {
     event.stopPropagation();
     if (!item?.id || item.id === job?.id || !onArchiveJob) return;
     const title = item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id);
     const confirmed = window.confirm(`从任务列表移除「${title}」？\n\n只会隐藏这条历史记录，不删除源文件、PPT 产物和证据。后续可在高级诊断里恢复。`);
     if (confirmed) onArchiveJob(item.id, true);
+  }
+  function handleCreateWorkflow() {
+    if (!canCreateFromPanel) return;
+    if (selectedDeliveryMode === "editable" && !window.confirm(createModeCopy.confirm)) return;
+    onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode });
   }
 
   return (
@@ -2207,6 +2241,23 @@ function DualRouteDashboard({
                 />
               </label>
             </div>
+            <div className="dual-route-choice" role="group" aria-label="选择任务路线">
+              <button className={selectedDeliveryMode === "visual" ? "active" : ""} type="button" onClick={() => setDeliveryMode("visual")}>
+                <b>路线 A</b>
+                <strong>图片版 PPT</strong>
+                <span>先生成高质量图片页，完成后可以先下载交付。</span>
+              </button>
+              <button className={selectedDeliveryMode === "editable" ? "active" : ""} type="button" onClick={() => setDeliveryMode("editable")}>
+                <b>路线 B</b>
+                <strong>可编辑 PPT</strong>
+                <span>会先完成路线 A，再做 OCR、重建和人工复核，耗时更长。</span>
+              </button>
+            </div>
+            {selectedDeliveryMode === "editable" ? (
+              <div className="dual-route-warning">
+                路线 B 会消耗更多时间：系统会先生成图片版 PPT，确认后再进入可编辑重建。
+              </div>
+            ) : null}
             {files.length ? (
               <div className="dual-file-chips">
                 {files.slice(0, 6).map((file) => (
@@ -2215,9 +2266,9 @@ function DualRouteDashboard({
               </div>
             ) : null}
             <div className="dual-create-actions">
-              <span>{canCreateFromPanel ? "准备就绪：会先进入图片版 PPT 生成路线。" : "请先上传材料，或填写一句任务需求。"}</span>
-              <button className="btn primary" type="button" onClick={onCreateWorkflow} disabled={!canCreateFromPanel}>
-                {busy && hasCreateInput ? "正在创建..." : "创建任务"}
+              <span>{canCreateFromPanel ? createModeCopy.ready : createModeCopy.pending}</span>
+              <button className="btn primary" type="button" onClick={handleCreateWorkflow} disabled={!canCreateFromPanel}>
+                {busy && hasCreateInput ? createModeCopy.busy : createModeCopy.label}
               </button>
             </div>
           </section>

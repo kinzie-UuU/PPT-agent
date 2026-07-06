@@ -7087,6 +7087,55 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   resize: vertical;
 }
 
+.dual-route-choice {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dual-route-choice button {
+  display: grid;
+  gap: 5px;
+  min-height: 94px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+}
+
+.dual-route-choice button.active {
+  border-color: rgba(40,84,216,.48);
+  background: #f5f8ff;
+  box-shadow: inset 0 0 0 1px rgba(40,84,216,.16);
+}
+
+.dual-route-choice b {
+  color: var(--blue);
+  font-size: 12px;
+}
+
+.dual-route-choice strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.dual-route-choice span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dual-route-warning {
+  padding: 10px 12px;
+  border: 1px solid rgba(217,119,6,.26);
+  border-radius: 8px;
+  background: #fff8ea;
+  color: #9a5a00;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .dual-file-chips {
   display: flex;
   flex-wrap: wrap;
@@ -7660,6 +7709,10 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   }
 
   .dual-create-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dual-route-choice {
     grid-template-columns: minmax(0, 1fr);
   }
 
