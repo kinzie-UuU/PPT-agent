@@ -951,6 +951,8 @@ assert.ok(frontendSource.includes("DualCleanupPanel"));
 assert.ok(frontendSource.includes("高级诊断"));
 assert.ok(frontendSource.includes("route-lane"));
 assert.ok(frontendSource.includes("dual-dashboard-left"));
+assert.ok(frontendSource.includes("dual-task-remove"));
+assert.ok(frontendSource.includes("window.confirm"));
 assert.ok(frontendSource.includes("dual-dashboard-main"));
 assert.ok(!frontendSource.includes("dual-dashboard-right"));
 assert.ok(frontendSource.includes('accent="visual"'));

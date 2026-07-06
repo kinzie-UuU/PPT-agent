@@ -6875,14 +6875,62 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
 }
 
 .dual-task-row {
+  position: relative;
   display: grid;
   gap: 7px;
   min-height: 86px;
-  padding: 13px;
+  padding: 0;
   text-align: left;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
+  overflow: hidden;
+}
+
+.dual-task-row-main {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  min-height: 86px;
+  padding: 13px 54px 13px 13px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.dual-task-row-main:disabled {
+  cursor: default;
+}
+
+.dual-task-remove {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  opacity: .72;
+}
+
+.dual-task-row:hover .dual-task-remove,
+.dual-task-row:focus-within .dual-task-remove {
+  opacity: 1;
+}
+
+.dual-task-remove:hover:not(:disabled) {
+  border-color: rgba(226, 73, 73, .22);
+  background: #fff4f4;
+  color: var(--red);
+}
+
+.dual-task-remove:disabled {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .dual-task-row.active {

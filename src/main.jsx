@@ -2107,6 +2107,13 @@ function DualRouteDashboard({
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
   const canCreateFromPanel = !busy && hasCreateInput;
+  function handleArchiveTask(event, item) {
+    event.stopPropagation();
+    if (!item?.id || item.id === job?.id || !onArchiveJob) return;
+    const title = item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id);
+    const confirmed = window.confirm(`从任务列表移除「${title}」？\n\n只会隐藏这条历史记录，不删除源文件、PPT 产物和证据。后续可在高级诊断里恢复。`);
+    if (confirmed) onArchiveJob(item.id, true);
+  }
 
   return (
     <div className="dual-dashboard">
@@ -2122,11 +2129,22 @@ function DualRouteDashboard({
             const rowState = buildDualRouteState(item);
             const pages = rowState.routeA.visualLabel || workflowJobLabel(item);
             return (
-              <button className={`dual-task-row ${active ? "active" : ""}`} type="button" key={item.id} onClick={() => item.id && onSelectJob?.(item.id)}>
-                <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
-                <span>{pages} · {rowState.routeB.editableLabel} 可编辑</span>
-                <em>{routeStatusLabel(rowState.routeB.status)}</em>
-              </button>
+              <div className={`dual-task-row ${active ? "active" : ""}`} key={item.id}>
+                <button className="dual-task-row-main" type="button" onClick={() => item.id && onSelectJob?.(item.id)}>
+                  <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
+                  <span>{pages} · {rowState.routeB.editableLabel} 可编辑</span>
+                  <em>{routeStatusLabel(rowState.routeB.status)}</em>
+                </button>
+                <button
+                  className="dual-task-remove"
+                  type="button"
+                  onClick={(event) => handleArchiveTask(event, item)}
+                  disabled={active || !onArchiveJob}
+                  title={active ? "当前任务不能移除" : "从列表移除"}
+                >
+                  移除
+                </button>
+              </div>
             );
           }) : <p>暂无任务，先上传材料创建。</p>}
         </div>
