@@ -1780,7 +1780,7 @@ function App() {
                   setActiveStep("generate");
                   window.setTimeout(() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
                 }}
-                onOpenWorkflow={openDeliveryReviewPanel}
+                onOpenWorkflow={() => setActiveStep("generate")}
               />
             </SectionCard>
           )}
