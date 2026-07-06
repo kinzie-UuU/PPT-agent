@@ -945,6 +945,8 @@ assert.ok(frontendSource.includes("buildDualRouteState"));
 assert.ok(frontendSource.includes("不需要用户操作的 codex-ppt 步骤保持后台处理"));
 assert.ok(frontendSource.includes("TopbarQuickPanel"));
 assert.ok(frontendSource.includes("topbarPanel"));
+assert.ok(frontendSource.includes("aria-label=\"本地账户\""));
+assert.ok(frontendSource.includes("topbar-mode-caret"));
 assert.ok(frontendSource.includes("DualCleanupPanel"));
 assert.ok(frontendSource.includes("高级诊断"));
 assert.ok(frontendSource.includes("route-lane"));

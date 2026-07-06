@@ -188,6 +188,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 
 .topbar-tool.active,
 .topbar-icon.active,
+.topbar-avatar.active,
 .topbar-mode.active {
   border-color: rgba(40, 84, 216, .35);
   background: var(--blue-soft);
@@ -267,6 +268,11 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   font-weight: 800;
 }
 .topbar-tool { padding: 0 14px; }
+.topbar-tool-icon {
+  margin-right: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
 .topbar-icon {
   justify-content: center;
   width: 34px;
@@ -283,14 +289,23 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   justify-content: center;
   width: 34px;
   height: 34px;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
   background: linear-gradient(135deg, #8cb3ff, #5178ed);
   color: #fff;
+  cursor: pointer;
   font-weight: 900;
 }
 .topbar-mode {
+  gap: 6px;
   padding: 0 10px;
   border-color: transparent;
+}
+.topbar-mode-caret {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
 }
 .state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
 .state-dot.active { background: var(--green); }

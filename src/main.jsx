@@ -1466,12 +1466,18 @@ function App() {
           <span className="topbar-pill"><span className="pill-check" />模型正常</span>
         </div>
         <div className="topbar-actions">
-          <button className={`topbar-tool ${topbarPanel === "health" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("health")}>健康检查</button>
+          <button className={`topbar-tool ${topbarPanel === "health" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("health")}>
+            <span className="topbar-tool-icon" aria-hidden="true">⌘</span>
+            健康检查
+          </button>
           <button className={`topbar-icon ${topbarPanel === "settings" ? "active" : ""}`} type="button" aria-label="设置" onClick={() => toggleTopbarPanel("settings")}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.4A3.6 3.6 0 1 1 12 15.6 3.6 3.6 0 0 1 12 8.4Zm7.2 3.6c0-.5-.1-1-.2-1.5l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2.5-1.4L13.8 2h-4l-.4 3.2A7 7 0 0 0 7 6.6l-2.5-1-2 3.4 2 1.5a7.5 7.5 0 0 0 0 3l-2 1.5 2 3.4 2.5-1c.7.6 1.5 1 2.4 1.3l.4 3.3h4l.4-3.3a7 7 0 0 0 2.5-1.4l2.4 1 2-3.4-2-1.5c.1-.5.2-1 .2-1.5Z" /></svg>
           </button>
-          <span className="topbar-avatar">A</span>
-          <button className={`topbar-mode ${topbarPanel === "mode" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("mode")}>本地模式</button>
+          <button className={`topbar-avatar ${topbarPanel === "mode" ? "active" : ""}`} type="button" aria-label="本地账户" onClick={() => toggleTopbarPanel("mode")}>A</button>
+          <button className={`topbar-mode ${topbarPanel === "mode" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("mode")}>
+            本地模式
+            <span className="topbar-mode-caret" aria-hidden="true">⌄</span>
+          </button>
         </div>
         {topbarPanel ? (
           <TopbarQuickPanel
