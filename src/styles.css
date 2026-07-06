@@ -4985,6 +4985,27 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   border-radius: 8px;
   background: #fff;
 }
+.workflow-review-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(12,18,32,.46);
+}
+.workflow-review-modal-panel {
+  width: min(1320px, calc(100vw - 44px));
+  max-height: calc(100vh - 44px);
+  overflow: auto;
+  border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(15,23,42,.28);
+  background: #fff;
+}
+.workflow-review-modal .workflow-page-review-workbench {
+  border: 0;
+  border-radius: 10px;
+}
 .workflow-page-review-head {
   display: flex;
   justify-content: space-between;

@@ -153,7 +153,8 @@ function checkFrontendMainFlow(files) {
     mustInclude(files.frontend, "startSkillFirstWorkflow");
     mustInclude(files.frontend, "workflowDeliveryStatus");
     mustInclude(files.frontend, "WorkflowPageVisualReviewWorkbench");
-    mustInclude(files.frontend, "逐页看三张图：原始页、图片版、可编辑页");
+    mustInclude(files.frontend, "workflow-review-modal");
+    mustInclude(files.frontend, "逐页对比：原始页、图片版、可编辑页");
     mustInclude(files.frontend, "全部通过，记录复核");
     mustNotInclude(files.frontend, "WorkflowPartialFinalNextPanel");
     mustNotInclude(files.frontend, "继续剩余");

@@ -4529,6 +4529,7 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
         note: `Final delivery visual review approved from delivery panel${finalPages ? ` for ${finalPages}/${sourcePages || finalPages} page(s)` : ""}.`
       });
       await onRefreshDelivery?.();
+      setShowReviewWorkbench(false);
     } catch (error) {
       setManualReviewError(getErrorMessage(error));
     } finally {
@@ -4561,15 +4562,20 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
       />
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
       {showReviewWorkbench ? (
-        <WorkflowPageVisualReviewWorkbench
-          artifactBundle={artifactBundle}
-          onApproveFinalReview={approveFinalManualReview}
-          onMarkPage={markPageVisualReview}
-          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
-          pageEvidence={bundle?.pageEvidence}
-          pageVisualReview={job?.artifacts?.pageVisualReview || null}
-          reviewBusy={manualReviewBusy}
-        />
+        <div className="workflow-review-modal" role="dialog" aria-modal="true" aria-label="人工复核">
+          <div className="workflow-review-modal-panel">
+            <WorkflowPageVisualReviewWorkbench
+              artifactBundle={artifactBundle}
+              onApproveFinalReview={approveFinalManualReview}
+              onClose={() => setShowReviewWorkbench(false)}
+              onMarkPage={markPageVisualReview}
+              onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+              pageEvidence={bundle?.pageEvidence}
+              pageVisualReview={job?.artifacts?.pageVisualReview || null}
+              reviewBusy={manualReviewBusy}
+            />
+          </div>
+        </div>
       ) : null}
       <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
     </div>
@@ -4831,7 +4837,7 @@ function getFinalDownloadState(finalGate = null) {
   };
 }
 
-function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFinalReview, onMarkPage, onOpenPageTasks, pageEvidence = null, pageVisualReview = null, reviewBusy = false }) {
+function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFinalReview, onClose, onMarkPage, onOpenPageTasks, pageEvidence = null, pageVisualReview = null, reviewBusy = false }) {
   const persistedMarks = pageVisualReview?.marks || {};
   const [marks, setMarks] = useState(persistedMarks);
   const [pendingPageMarks, setPendingPageMarks] = useState({});
@@ -4904,13 +4910,14 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFin
       <div className="workflow-page-review-head">
         <div>
           <b>人工复核</b>
-          <span>逐页看三张图：原始页、图片版、可编辑页。能接受就通过，不接受就不通过。</span>
+          <span>逐页对比：原始页、图片版、可编辑页。可以就通过，不可以就不通过。</span>
         </div>
         <div className="workflow-page-review-actions">
           <small>{reviewedPages}/{pages.length} 页已判断{failedPages ? `，${failedPages} 页不通过` : ""}{savingPages.length ? `，${savingPages.length} 页保存中` : ""}{failedSaves.length ? `，${failedSaves.length} 页保存失败` : ""}</small>
           <button className="btn primary" type="button" onClick={onApproveFinalReview} disabled={!canRecordFinalReview || reviewBusy}>
             {reviewBusy ? "记录中..." : "全部通过，记录复核"}
           </button>
+          <button className="btn ghost" type="button" onClick={onClose} disabled={reviewBusy}>关闭</button>
         </div>
       </div>
       <div className="workflow-page-review-list">
