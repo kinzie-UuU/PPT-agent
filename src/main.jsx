@@ -2062,6 +2062,25 @@ function DualCleanupPanel({ activeJobId = "", jobs = [], onArchiveJob, onRefresh
   );
 }
 
+function getWorkflowTaskBucket(job = null) {
+  if (!job?.id) return "running";
+  const state = buildDualRouteState(job);
+  const hasFailure = Boolean(
+    job.stageStatus === "failed"
+    || /fail|error/i.test(String(job.status || ""))
+    || /fail|error/i.test(String(job.currentStage || ""))
+    || (Array.isArray(job.errors) && job.errors.length && !state.routeA.imageDeckReady)
+  );
+  if (hasFailure) return "failed";
+  const notes = String(job.input?.notes || job.notes || "");
+  const routeAOnly = /route=A/i.test(notes) && !/route=B/i.test(notes);
+  const complete = Boolean(
+    state.routeB.status === "ready"
+    || (routeAOnly && state.routeA.status === "ready")
+  );
+  return complete ? "complete" : "running";
+}
+
 function DualRouteDashboard({
   busy = false,
   files = [],
@@ -2086,6 +2105,7 @@ function DualRouteDashboard({
   const [createOpen, setCreateOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deliveryMode, setDeliveryMode] = useState("visual");
+  const [taskFilter, setTaskFilter] = useState("running");
   const state = buildDualRouteState(job);
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
@@ -2117,6 +2137,17 @@ function DualRouteDashboard({
   const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
+  const taskTabs = [
+    ["running", "进行中"],
+    ["complete", "已完成"],
+    ["failed", "已失败"]
+  ];
+  const taskTabCounts = visibleTaskRows.reduce((counts, item) => {
+    const bucket = getWorkflowTaskBucket(item);
+    counts[bucket] = (counts[bucket] || 0) + 1;
+    return counts;
+  }, { running: 0, complete: 0, failed: 0 });
+  const filteredTaskRows = visibleTaskRows.filter((item) => getWorkflowTaskBucket(item) === taskFilter);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
   const canCreateFromPanel = !busy && hasCreateInput;
@@ -2155,10 +2186,16 @@ function DualRouteDashboard({
         <button className="dual-new-task" type="button" onClick={() => setCreateOpen(true)}>+ 新建任务</button>
         <div className="dual-task-head">
           <h2>任务列表</h2>
-          <div><span className="active">进行中</span><span>已完成</span><span>已失败</span></div>
+          <div className="dual-task-tabs" role="tablist" aria-label="任务状态筛选">
+            {taskTabs.map(([id, label]) => (
+              <button className={taskFilter === id ? "active" : ""} type="button" role="tab" aria-selected={taskFilter === id} key={id} onClick={() => setTaskFilter(id)}>
+                {label}<em>{taskTabCounts[id] || 0}</em>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="dual-task-list">
-          {visibleTaskRows.length ? visibleTaskRows.map((item) => {
+          {filteredTaskRows.length ? filteredTaskRows.map((item) => {
             const active = item?.id && item.id === job?.id;
             const rowState = buildDualRouteState(item);
             const pages = rowState.routeA.visualLabel || workflowJobLabel(item);
@@ -2180,7 +2217,7 @@ function DualRouteDashboard({
                 </button>
               </div>
             );
-          }) : <p>暂无任务，先上传材料创建。</p>}
+          }) : <p>{visibleTaskRows.length ? "这个分类下暂无任务。" : "暂无任务，先上传材料创建。"}</p>}
         </div>
         <button className="dual-cleanup-entry" type="button" onClick={() => setAdvancedOpen((current) => !current)}>高级诊断</button>
       </aside>

@@ -6857,16 +6857,48 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   font-size: 16px;
 }
 
-.dual-task-head div {
+.dual-task-tabs {
   display: flex;
-  gap: 16px;
+  gap: 8px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
 }
 
-.dual-task-head .active {
+.dual-task-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.dual-task-tabs button:hover {
+  background: #f5f8ff;
   color: var(--blue);
+}
+
+.dual-task-tabs button.active {
+  border-color: rgba(40,84,216,.22);
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.dual-task-tabs em {
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(100,116,139,.12);
+  color: inherit;
+  font-size: 11px;
+  font-style: normal;
+  text-align: center;
 }
 
 .dual-task-list {
