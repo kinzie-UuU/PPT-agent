@@ -4749,6 +4749,62 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   gap: 8px;
 }
 
+.workflow-delivery-repair-guide {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(245,158,11,.24);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.workflow-delivery-repair-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.workflow-delivery-repair-head div {
+  display: grid;
+  gap: 4px;
+}
+
+.workflow-delivery-repair-head b {
+  color: #92400e;
+}
+
+.workflow-delivery-repair-head span,
+.workflow-delivery-repair-item span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.workflow-delivery-repair-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-delivery-repair-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245,158,11,.2);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.workflow-delivery-repair-item b {
+  color: var(--ink);
+}
+
+.workflow-delivery-repair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .workflow-delivery-user-hint {
   display: flex;
   align-items: center;
@@ -7877,8 +7933,13 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .dual-cleanup-head,
   .dual-cleanup-row,
   .workflow-simple-delivery-head,
+  .workflow-delivery-repair-head,
   .workflow-delivery-user-hint {
     display: grid;
+  }
+
+  .workflow-delivery-repair-list {
+    grid-template-columns: 1fr;
   }
 
   .workflow-delivery-user-actions,

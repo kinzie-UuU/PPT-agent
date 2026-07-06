@@ -4476,6 +4476,7 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
   const [manualReviewBusy, setManualReviewBusy] = useState(false);
   const [manualReviewError, setManualReviewError] = useState("");
   const [showReviewWorkbench, setShowReviewWorkbench] = useState(false);
+  const [showRepairGuide, setShowRepairGuide] = useState(false);
 
   async function approveFinalManualReview() {
     if (!job?.id || manualReviewBusy) return;
@@ -4525,10 +4526,21 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
         job={job}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
         onOpenWorkflow={onOpenWorkflow}
+        onOpenRepair={() => setShowRepairGuide((current) => !current)}
         onOpenReview={() => setShowReviewWorkbench(true)}
         onRecomposeFinal={onRecomposeEditableFinal}
         status={status}
       />
+      {showRepairGuide ? (
+        <WorkflowDeliveryRepairGuide
+          finalGate={finalGate}
+          onClose={() => setShowRepairGuide(false)}
+          onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+          onRefreshDelivery={onRefreshDelivery}
+          onRecomposeFinal={onRecomposeEditableFinal}
+          status={status}
+        />
+      ) : null}
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
       {showReviewWorkbench ? (
         <div className="workflow-review-modal" role="dialog" aria-modal="true" aria-label="人工复核">
@@ -4575,7 +4587,7 @@ function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onB
   );
 }
 
-function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenReview, onOpenWorkflow, onRecomposeFinal, status = {} }) {
+function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenRepair, onOpenReview, onOpenWorkflow, onRecomposeFinal, status = {} }) {
   const checks = finalGate?.checks || {};
   const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
   const reviewReady = Boolean(
@@ -4638,13 +4650,48 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
           </button>
         ) : hasFinal ? (
           <>
-            <button className="btn primary" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>修复问题</button>
+            <button className="btn primary" type="button" onClick={onOpenRepair} disabled={!onOpenRepair}>修复问题</button>
             <button className="btn" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
           </>
         ) : (
           <button className="btn primary" type="button" onClick={onOpenPageTasks || onOpenWorkflow} disabled={!onOpenPageTasks && !onOpenWorkflow}>继续可编辑重建</button>
         )}
         <button className="btn ghost" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看工作流</button>
+      </div>
+    </section>
+  );
+}
+
+function WorkflowDeliveryRepairGuide({ finalGate = null, onClose, onOpenPageTasks, onRefreshDelivery, onRecomposeFinal, status = {} }) {
+  const checks = finalGate?.checks || {};
+  const failedItems = [
+    { label: "页数", failed: checks.fullSourceCoverage !== true, detail: "最终 PPT 页数或来源覆盖不完整。" },
+    { label: "可打开", failed: checks.powerPointOpenable !== true, detail: "PowerPoint 打开性还没有通过。" },
+    { label: "可编辑性", failed: checks.editabilityPassed !== true || checks.noFullSlideRaster !== true, detail: "仍存在不可编辑或整页图片风险。" },
+    { label: "视觉复核", failed: checks.manualReviewRecorded !== true, detail: "需要逐页确认原始页、图片版和可编辑页。" }
+  ].filter((item) => item.failed);
+  const reason = buildDeliveryUserIssue(finalGate, status);
+  return (
+    <section className="workflow-delivery-repair-guide">
+      <div className="workflow-delivery-repair-head">
+        <div>
+          <b>修复建议</b>
+          <span>{reason}</span>
+        </div>
+        <button className="btn ghost" type="button" onClick={onClose}>收起</button>
+      </div>
+      <div className="workflow-delivery-repair-list">
+        {(failedItems.length ? failedItems : [{ label: "等待检查", detail: "当前没有明确失败项，请刷新交付状态后再看。", failed: true }]).map((item) => (
+          <div className="workflow-delivery-repair-item" key={item.label}>
+            <b>{item.label}</b>
+            <span>{item.detail}</span>
+          </div>
+        ))}
+      </div>
+      <div className="workflow-delivery-repair-actions">
+        <button className="btn primary" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
+        <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>去主工作台处理</button>
+        <button className="btn ghost" type="button" onClick={onRefreshDelivery} disabled={!onRefreshDelivery}>刷新交付</button>
       </div>
     </section>
   );
