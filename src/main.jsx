@@ -953,6 +953,12 @@ function App() {
 
   async function runRouteAAction() {
     if (!workflowJob?.id) {
+      const hasCurrentCreateInput = Boolean(fileIds.length || form.notes.trim());
+      if (!hasCurrentCreateInput) {
+        setError("请先上传材料，或填写一句任务需求。");
+        setStatus("");
+        return;
+      }
       if (!outlinePlan?.layoutSequence?.length) {
         await planOutline();
         return;
@@ -1892,7 +1898,7 @@ function App() {
             <DualRouteDashboard
               busy={workflowBusy || generationProgress.active}
               files={files}
-              hasInput={Boolean(fileIds.length || form.notes.trim() || outlinePlan?.layoutSequence?.length)}
+              hasInput={Boolean(fileIds.length || form.notes.trim())}
               job={workflowJob}
               jobs={workflowJobs}
               notes={form.notes}
@@ -2247,8 +2253,11 @@ function getWorkflowTaskBucket(job = null) {
   return complete ? "complete" : "running";
 }
 
-function getRouteAPrimaryLabel({ job = null, noCostApprovalSummary = null, outlineReady = false, state = null } = {}) {
-  if (!job?.id) return outlineReady ? "确认大纲并创建路线 A" : "生成 outline.md";
+function getRouteAPrimaryLabel({ hasInput = false, job = null, noCostApprovalSummary = null, outlineReady = false, state = null } = {}) {
+  if (!job?.id) {
+    if (!hasInput) return "先上传或填写需求";
+    return outlineReady ? "确认大纲并创建路线 A" : "生成 outline.md";
+  }
   const routeA = state?.routeA || {};
   if (noCostApprovalSummary?.readyCount) return "确认大纲/风格/后端";
   if (!routeA.codexPptDecisionReady) return "查看确认项";
@@ -2299,7 +2308,7 @@ function DualRouteDashboard({
   const finalHref = job?.id && state.routeB.deliverableReady
     ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
     : "";
-  const routeAPrimaryLabel = getRouteAPrimaryLabel({ job, noCostApprovalSummary, outlineReady, state });
+  const routeAPrimaryLabel = getRouteAPrimaryLabel({ hasInput, job, noCostApprovalSummary, outlineReady, state });
   const routeAPrimaryAction = onRouteAAction || onOpenVisual;
   const primaryAction = state.routeB.finalReady && !state.routeB.reviewReady
     ? onOpenDelivery
@@ -2311,7 +2320,7 @@ function DualRouteDashboard({
     : state.routeA.status === "ready"
       ? "继续转可编辑 PPT"
       : "先完成图片版 PPT";
-  const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput || outlineReady);
+  const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
   const taskTabs = [
