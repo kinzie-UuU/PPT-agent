@@ -2169,9 +2169,10 @@ function DualRouteDashboard({
     };
   function handleArchiveTask(event, item) {
     event.stopPropagation();
-    if (!item?.id || item.id === job?.id || !onArchiveJob) return;
+    if (!item?.id || !onArchiveJob) return;
     const title = item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id);
-    const confirmed = window.confirm(`从任务列表移除「${title}」？\n\n只会隐藏这条历史记录，不删除源文件、PPT 产物和证据。后续可在高级诊断里恢复。`);
+    const currentHint = item.id === job?.id ? "\n\n这是当前正在查看的任务，移除后会自动切到下一条任务。" : "";
+    const confirmed = window.confirm(`从任务列表移除「${title}」？\n\n只会隐藏这条历史记录，不删除源文件、PPT 产物和证据。后续可在高级诊断里恢复。${currentHint}`);
     if (confirmed) onArchiveJob(item.id, true);
   }
   function handleCreateWorkflow() {
@@ -2210,8 +2211,8 @@ function DualRouteDashboard({
                   className="dual-task-remove"
                   type="button"
                   onClick={(event) => handleArchiveTask(event, item)}
-                  disabled={active || !onArchiveJob}
-                  title={active ? "当前任务不能移除" : "从列表移除"}
+                  disabled={!onArchiveJob}
+                  title="从列表移除"
                 >
                   移除
                 </button>
