@@ -61,14 +61,6 @@ const UI = {
   delete: cp(0x5220, 0x9664)
 };
 
-const STEPS = [
-  { id: "materials", number: "01", title: "\u8d44\u6599\u8bc6\u522b", desc: "\u62bd\u53d6\u6587\u5b57 / \u56fe\u7247 / \u7d20\u6750\u8eab\u4efd" },
-  { id: "outline", number: "02", title: "\u5927\u7eb2\u89c4\u5212", desc: "\u9875\u9762\u89d2\u8272\u548c\u53d9\u4e8b\u8def\u7ebf" },
-  { id: "generate", number: "03", title: "\u751f\u6210", desc: "视觉统一 / 可编辑重建" },
-  { id: "preview", number: "04", title: "\u590d\u6838", desc: "\u9875\u9762\u8bc1\u636e / \u4ea4\u4ed8\u9884\u89c8" },
-  { id: "export", number: "05", title: "\u4ea4\u4ed8", desc: "最终可编辑 PPT" }
-];
-
 const CODEX_PPT_APPROVAL_GATES = [
   { id: "outline", label: "大纲" },
   { id: "style", label: "视觉风格" },
@@ -501,7 +493,6 @@ function App() {
   const intakeReadiness = useMemo(() => getIntakeReadiness(form.notes, files), [form.notes, files]);
   const inferredMaterials = useMemo(() => inferMaterialTypes(files), [files]);
   const completion = useMemo(() => getCompletion({ form, fileIds, job }), [form, fileIds, job]);
-  const stepState = useMemo(() => getStepState({ activeStep, fileIds, job, formats }), [activeStep, fileIds, job, formats]);
   const finalExportBlocked = isJobBlockedForFinal(job);
   const noCostApprovalSummary = useMemo(() => getNoCostCodexApprovalSummary(workflowJob), [workflowJob]);
 
@@ -1531,7 +1522,6 @@ function App() {
             setInsertLayout={setInsertLayout}
             setSelectedSlide={setSelectedSlide}
             slides={slides}
-            stepState={stepState}
             onSlideAction={slideAction}
           />
         )}
@@ -2452,13 +2442,13 @@ function buildDualRouteState(job = null) {
       deliverableReady,
       editableLabel: editableTotal ? formatProgress(recordedEditablePages || finalPages, editableTotal) : routeBStarted ? `${recordedEditablePages || finalPages} 页` : "未开始",
       summary: routeAReady
-        ? "按需进入 OCR、页面理解和逐页对象级重建；完整交付仍需人工复核。"
-        : "等待图片版 PPT 完成后再开启，避免把两套 Skill 混成黑盒。",
+        ? "如需可编辑 PPT，系统会在后台准备；完成后只需要逐页确认是否合格。"
+        : "等待图片版 PPT 完成后再开启，可先完成阶段交付。",
       steps: [
-        { label: "选择图片版", detail: imageDeckReady ? "选择已完成的图片版" : "等待图片版", state: imageDeckReady ? "done" : "locked" },
-        { label: "OCR / 页面理解", detail: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "识别文字与版式" : "等待识别", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
-        { label: "逐页重建", detail: editableTotal ? `${formatProgress(recordedEditablePages || finalPages, editableTotal)} 可编辑页` : "重建为可编辑元素", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
-        { label: "人工复核", detail: reviewReady ? "校对与调整内容" : "等待人工复核", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
+        { label: "使用图片版", detail: imageDeckReady ? "图片版已就绪" : "等待图片版", state: imageDeckReady ? "done" : "locked" },
+        { label: "准备可编辑版", detail: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "后台处理中" : "等待开始", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
+        { label: "生成可编辑页", detail: editableTotal ? `${formatProgress(recordedEditablePages || finalPages, editableTotal)} 可编辑页` : "后台处理中", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
+        { label: "逐页确认", detail: reviewReady ? "可以逐页确认" : "等待确认", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
         { label: "下载可编辑版", detail: deliverableReady ? "可下载交付物" : finalReady ? "等待人工复核后下载" : "等待最终交付", state: deliverableReady ? "done" : finalReady ? "active" : "pending" }
       ]
     }
@@ -2560,7 +2550,7 @@ function SkillFirstProductConsole({ approvalSummary = null, busy, fileCount = 0,
     { key: "source", title: "输入", state: hasInput || workflowHasSource ? "ready" : "waiting" },
     { key: "codex", title: "视觉统一", state: job?.artifacts?.visualImages?.length || job?.artifacts?.imageDeck ? "ready" : job?.id ? "working" : "waiting" },
     { key: "editable", title: "可编辑重建", state: job?.artifacts?.editableRun ? "ready" : job?.id ? "working" : "waiting" },
-    { key: "workers", title: "逐页重建", state: job?.artifacts?.editableWorkerPrompts?.length ? "ready" : job?.id ? "working" : "waiting" },
+    { key: "workers", title: "生成可编辑页", state: job?.artifacts?.editableWorkerPrompts?.length ? "ready" : job?.id ? "working" : "waiting" },
     { key: "final", title: "最终 PPTX", state: finalReady ? "ready" : "waiting" }
   ];
 
@@ -7233,19 +7223,6 @@ function generationProgressLabel(value = 0, mode = "") {
   if (value < 55) return "正在生成页面结构和文案";
   if (value < 78) return "正在渲染 PPTX";
   return "正在生成预览图和执行质检";
-}
-
-function getStepState({ activeStep, fileIds, job, formats }) {
-  const blocked = isJobBlockedForFinal(job);
-  return Object.fromEntries(STEPS.map((step) => {
-    if (step.id === activeStep) return [step.id, UI.current];
-    if (step.id === "materials") return [step.id, fileIds.length ? UI.done : UI.pending];
-    if (step.id === "outline") return [step.id, job ? UI.done : UI.optional];
-    if (step.id === "generate") return [step.id, job ? UI.done : UI.pending];
-    if (step.id === "preview") return [step.id, job ? (blocked ? UI.pending : UI.editable) : UI.waitingGenerate];
-    if (step.id === "export") return [step.id, job && formats.length && !blocked ? UI.exportable : UI.pending];
-    return [step.id, UI.pending];
-  }));
 }
 
 function isJobBlockedForFinal(job) {
