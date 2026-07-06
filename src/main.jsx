@@ -2099,7 +2099,8 @@ function DualRouteDashboard({
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
-  const canCreateFromPanel = !busy && Boolean(files.length || notes.trim());
+  const hasCreateInput = Boolean(files.length || notes.trim());
+  const canCreateFromPanel = !busy && hasCreateInput;
 
   return (
     <div className="dual-dashboard">
@@ -2177,7 +2178,7 @@ function DualRouteDashboard({
             <div className="dual-create-actions">
               <span>{canCreateFromPanel ? "准备就绪：会先进入图片版 PPT 生成路线。" : "请先上传材料，或填写一句任务需求。"}</span>
               <button className="btn primary" type="button" onClick={onCreateWorkflow} disabled={!canCreateFromPanel}>
-                {busy ? "正在创建..." : "创建任务"}
+                {busy && hasCreateInput ? "正在创建..." : "创建任务"}
               </button>
             </div>
           </section>
