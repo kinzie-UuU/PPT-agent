@@ -84,6 +84,13 @@ const CODEX_PPT_NO_COST_APPROVAL_GATES = [
   { id: "backend", label: "生图后端", artifactKey: "codexPptBackendDecision" }
 ];
 const LEGACY_CODEX_PPT_STYLE_RE = /轻盈渐变风|东方自然风|黑白画册风|蓝白科技风|暗黑科技风|旧模板|旧版模板|模板包|template[-_\s]?pack/i;
+const FIRST_USE_GUIDE = [
+  "先生成 outline.md，确认页数、标题和每页要点。",
+  "不要跳过样张确认：先看 1 页效果，再批量生成整套 PPT。",
+  "某一页不满意时，优先只改那一页，不整套重做。",
+  "有参考 PPT、截图或 PDF 时，先分析风格，再生成新 PPT。"
+];
+const CODEX_PPT_OUTPUTS = ["outline.md", "origin_image/slide_XX.png", "speech.md", "{PPT名称}.pptx"];
 
 function getApprovedCodexPptGateSet(job = {}) {
   return new Set((Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
@@ -919,6 +926,119 @@ function App() {
     }
   }
 
+  async function approveCodexGate(gate, note = "frontend-route-a-approval") {
+    if (!workflowJob?.id || !gate) return null;
+    const preflight = await api.preflightCodexPptGate(workflowJob.id, gate, { note });
+    if (!preflight.ready && !preflight.passed) {
+      throw new Error(preflight.error || `${gate} 还不能确认`);
+    }
+    if (!preflight.passed) {
+      await api.approveCodexPptGate(workflowJob.id, gate, {
+        note,
+        approvedBy: "frontend-route-a"
+      });
+    }
+    return api.workflowJob(workflowJob.id);
+  }
+
+  async function refreshActiveWorkflow(nextJob = null, nextStatus = "") {
+    if (!workflowJob?.id && !nextJob?.id) return null;
+    const activeId = nextJob?.id || workflowJob.id;
+    const hydrated = nextJob?.id ? nextJob : await api.workflowJob(activeId);
+    setWorkflowJob(hydrated);
+    await loadWorkflowJobs({ activeId: hydrated.id });
+    if (nextStatus) setStatus(nextStatus);
+    return hydrated;
+  }
+
+  async function runRouteAAction() {
+    if (!workflowJob?.id) {
+      if (!outlinePlan?.layoutSequence?.length) {
+        await planOutline();
+        return;
+      }
+      await startSkillFirstWorkflow({ deliveryMode: "visual" });
+      return;
+    }
+
+    const routeState = buildDualRouteState(workflowJob);
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      if (noCostApprovalSummary?.readyCount) {
+        setWorkflowBusy(false);
+        await approveNoCostCodexGates();
+        return;
+      }
+
+      if (!routeState.routeA.codexPptDecisionReady) {
+        setActiveStep("outline");
+        setStatus("请先确认大纲、视觉风格和生图后端。");
+        return;
+      }
+
+      if (!routeState.routeA.sampleReady) {
+        const confirmed = window.confirm("将生成 1 页真实样张用于确认风格和文字质量。\n\n这一步可能调用外部图片 API 并消耗 1 次额度。确认继续？");
+        if (!confirmed) return;
+        setStatus("正在生成 1 页样张...");
+        const next = await api.workflowAction(workflowJob.id, "visual/sample", {
+          confirmExternalImageSpend: true,
+          requestedBy: "frontend-route-a-sample"
+        });
+        await refreshActiveWorkflow(next, "样张已生成。请先查看样张，满意后再确认样张。");
+        return;
+      }
+
+      if (!routeState.routeA.sampleApproved) {
+        const confirmed = window.confirm("确认当前样张通过？\n\n确认后才允许进入整套图片版 PPT 生成；如果不满意，建议先只重做这一页样张。");
+        if (!confirmed) return;
+        setStatus("正在确认样张...");
+        const next = await approveCodexGate("sample", "frontend-route-a-sample-approval");
+        await refreshActiveWorkflow(next, "样张已确认。下一步确认是否生成整套图片版 PPT。");
+        return;
+      }
+
+      if (!routeState.routeA.fullDeckApproved) {
+        const pages = routeState.routeA.imageTotal || routeState.routeA.sourceCount || "整套";
+        const confirmed = window.confirm(`确认开始批量生成${pages}页图片版 PPT？\n\n这一步会调用外部图片 API，耗时更长；确认后后台生成整套图片页。`);
+        if (!confirmed) return;
+        setStatus("正在记录整套生成授权...");
+        const next = await approveCodexGate("fullDeck", "frontend-route-a-full-deck-approval");
+        await refreshActiveWorkflow(next, "已确认整套生成授权。下一步将批量生成图片页。");
+        return;
+      }
+
+      if (!routeState.routeA.slideResultsRecorded) {
+        const pages = routeState.routeA.imageTotal || routeState.routeA.sourceCount || 0;
+        const confirmed = window.confirm(`开始后台生成整套图片页？${pages ? `\n\n预计生成 ${pages} 页。` : ""}\n\n生成过程中可以先做别的，完成后会开放图片版 PPT 下载。`);
+        if (!confirmed) return;
+        setStatus("正在批量生成图片页...");
+        const next = await api.workflowAction(workflowJob.id, "visual/generate", {
+          confirmExternalImageSpend: true,
+          requestedBy: "frontend-route-a-full-deck"
+        });
+        await refreshActiveWorkflow(next, "整套图片页已生成，下一步组装图片版 PPT。");
+        return;
+      }
+
+      if (!routeState.routeA.imageDeckReady) {
+        setStatus("正在组装图片版 PPT...");
+        const next = await api.workflowAction(workflowJob.id, "image-deck/assemble", {
+          requestedBy: "frontend-route-a-assemble"
+        });
+        await refreshActiveWorkflow(next, "图片版 PPT 已完成，可以下载交付。");
+        return;
+      }
+
+      setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
   function getGenerationMode() {
     return files.some((file) => /\.(ppt|pptx)$/i.test(file.originalName || "")) ? "optimize" : "generate";
   }
@@ -1737,10 +1857,13 @@ function App() {
               noCostApprovalSummary={noCostApprovalSummary}
               onApproveNoCostGates={approveNoCostCodexGates}
               onCreateWorkflow={startSkillFirstWorkflow}
+              onPlanOutline={planOutline}
               onOpenDelivery={openDeliveryReviewPanel}
               onOpenEditable={() => window.setTimeout(() => document.getElementById("dual-route-editable")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onOpenVisual={() => window.setTimeout(() => document.getElementById("dual-route-visual")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
+              onRouteAAction={runRouteAAction}
               onNotesChange={(value) => update("notes", value)}
+              outlineReady={Boolean(outlinePlan?.layoutSequence?.length)}
               onArchiveJob={toggleWorkflowArchive}
               onRefreshJobs={(includeArchived = false) => loadWorkflowJobs({ activeId: workflowJob?.id || "", includeArchived })}
               onSelectJob={selectWorkflowJob}
@@ -2081,6 +2204,19 @@ function getWorkflowTaskBucket(job = null) {
   return complete ? "complete" : "running";
 }
 
+function getRouteAPrimaryLabel({ job = null, noCostApprovalSummary = null, outlineReady = false, state = null } = {}) {
+  if (!job?.id) return outlineReady ? "确认大纲并创建路线 A" : "生成 outline.md";
+  const routeA = state?.routeA || {};
+  if (noCostApprovalSummary?.readyCount) return "确认大纲/风格/后端";
+  if (!routeA.codexPptDecisionReady) return "查看确认项";
+  if (!routeA.sampleReady) return "生成 1 页样张";
+  if (!routeA.sampleApproved) return "确认样张通过";
+  if (!routeA.fullDeckApproved) return "确认生成整套图片";
+  if (!routeA.slideResultsRecorded) return "后台生成整套图片";
+  if (!routeA.imageDeckReady) return "组装图片版 PPT";
+  return "图片版已完成";
+}
+
 function DualRouteDashboard({
   busy = false,
   files = [],
@@ -2097,10 +2233,13 @@ function DualRouteDashboard({
   onOpenDelivery,
   onOpenEditable,
   onOpenVisual,
+  onPlanOutline,
   onRefreshJobs,
   onRefresh,
+  onRouteAAction,
   onSelectJob,
-  onUploadFiles
+  onUploadFiles,
+  outlineReady = false
 }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -2116,25 +2255,19 @@ function DualRouteDashboard({
   const finalHref = job?.id && state.routeB.deliverableReady
     ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/final-pptx?download=1`
     : "";
-  const primaryAction = !job?.id
-    ? onCreateWorkflow
-    : noCostApprovalSummary?.readyCount
-      ? onApproveNoCostGates
-      : state.routeB.finalReady && !state.routeB.reviewReady
-        ? onOpenDelivery
-      : state.routeA.status === "ready"
-        ? onOpenEditable
-        : onOpenVisual;
-  const primaryLabel = !job?.id
-    ? "新建任务"
-    : noCostApprovalSummary?.readyCount
-      ? "确认就绪关卡"
-      : state.routeB.finalReady && !state.routeB.reviewReady
-        ? "继续人工复核"
-      : state.routeA.status === "ready"
-        ? "继续转可编辑 PPT"
-        : "继续生成图片版 PPT";
-  const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
+  const routeAPrimaryLabel = getRouteAPrimaryLabel({ job, noCostApprovalSummary, outlineReady, state });
+  const routeAPrimaryAction = onRouteAAction || onOpenVisual;
+  const primaryAction = state.routeB.finalReady && !state.routeB.reviewReady
+    ? onOpenDelivery
+    : state.routeA.status === "ready"
+      ? onOpenEditable
+      : onRouteAAction;
+  const primaryLabel = state.routeB.finalReady && !state.routeB.reviewReady
+    ? "继续人工复核"
+    : state.routeA.status === "ready"
+      ? "继续转可编辑 PPT"
+      : "先完成图片版 PPT";
+  const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput || outlineReady);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
   const taskTabs = [
@@ -2150,20 +2283,20 @@ function DualRouteDashboard({
   const filteredTaskRows = visibleTaskRows.filter((item) => getWorkflowTaskBucket(item) === taskFilter);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
-  const canCreateFromPanel = !busy && hasCreateInput;
+  const canCreateFromPanel = !busy && (hasCreateInput || outlineReady);
   const selectedDeliveryMode = deliveryMode === "editable" ? "editable" : "visual";
   const createModeCopy = selectedDeliveryMode === "editable"
     ? {
       label: "创建路线 B 任务",
       ready: "准备就绪：会先完成路线 A 图片版，再进入路线 B 可编辑版。",
-      pending: "请先上传材料，或填写一句任务需求。",
+      pending: outlineReady ? "大纲已生成，可以确认后创建路线 B。" : "请先上传材料，或填写一句任务需求。",
       busy: "正在创建路线 B...",
       confirm: "路线 B 可编辑 PPT 会耗时更长。\n\n系统仍会先完成路线 A 图片版 PPT；确认图片版后，再继续路线 B 可编辑重建。\n\n确认创建路线 B 任务？"
     }
     : {
       label: "创建路线 A 任务",
       ready: "准备就绪：会先进入路线 A 图片版 PPT 生成。",
-      pending: "请先上传材料，或填写一句任务需求。",
+      pending: outlineReady ? "大纲已生成，可以确认后创建路线 A。" : "请先上传材料，或填写一句任务需求。",
       busy: "正在创建路线 A...",
       confirm: ""
     };
@@ -2177,6 +2310,10 @@ function DualRouteDashboard({
   }
   function handleCreateWorkflow() {
     if (!canCreateFromPanel) return;
+    if (!outlineReady) {
+      onPlanOutline?.();
+      return;
+    }
     if (selectedDeliveryMode === "editable" && !window.confirm(createModeCopy.confirm)) return;
     onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode });
   }
@@ -2304,13 +2441,23 @@ function DualRouteDashboard({
               </div>
             ) : null}
             <div className="dual-create-actions">
-              <span>{canCreateFromPanel ? createModeCopy.ready : createModeCopy.pending}</span>
+              <span>{canCreateFromPanel ? (outlineReady ? createModeCopy.ready : "第一步：先生成 outline.md，确认页数、标题和每页要点。") : createModeCopy.pending}</span>
               <button className="btn primary" type="button" onClick={handleCreateWorkflow} disabled={!canCreateFromPanel}>
-                {busy && hasCreateInput ? createModeCopy.busy : createModeCopy.label}
+                {busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成 outline.md"}
               </button>
             </div>
           </section>
         ) : null}
+        <section className="dual-first-use">
+          <div>
+            <b>第一次使用建议</b>
+            {FIRST_USE_GUIDE.map((item) => <span key={item}>{item}</span>)}
+          </div>
+          <div>
+            <b>生成结果</b>
+            {CODEX_PPT_OUTPUTS.map((item) => <span key={item}>{item}</span>)}
+          </div>
+        </section>
         <DualRouteLane
           accent="visual"
           id="dual-route-visual"
@@ -2324,7 +2471,9 @@ function DualRouteDashboard({
             ["图片版", state.routeA.imageDeckReady ? "可下载" : "未完成"]
           ]}
           actions={[
+            state.routeA.sampleHref && !state.routeA.sampleApproved ? { label: "查看样张", href: state.routeA.sampleHref } : null,
             imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: true } : null,
+            !imageDeckHref ? { label: routeAPrimaryLabel, onClick: routeAPrimaryAction, disabled: !canRunPrimary, primary: true } : null,
           ].filter(Boolean)}
         />
         <DualRouteLane
@@ -2425,6 +2574,9 @@ function buildDualRouteState(job = null) {
   const imageDeckReady = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
   const approvedGates = getApprovedCodexPptGateSet(job);
   const visualSample = artifacts.visualSample || {};
+  const sampleHref = job?.id && (visualSample.path || visualSample.relativePath)
+    ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-sample`
+    : "";
   const sampleReady = Boolean(
     visualSample.path
     && visualSample.sha256
@@ -2508,11 +2660,15 @@ function buildDualRouteState(job = null) {
       slideDispatchReady,
       slideResultsRecorded,
       qaAssemblyReady,
+      fullDeckApproved,
       nextUserConfirmation,
       userConfirmLabel: !codexPptDecisionReady ? "待确认方案" : !sampleApproved ? "待确认样张" : "已确认",
       backgroundLabel: backgroundComplete ? "已完成" : backgroundActive ? "后台处理中" : "等待确认",
       sampleReady,
       sampleApproved,
+      sampleHref,
+      imageTotal,
+      sourceCount: sourcePages,
       sourceLabel: sourcePages ? `${sourcePages} 页` : "待解析",
       visualLabel: imageTotal ? formatProgress(imagePageCount, imageTotal) : imagePageCount ? `${imagePageCount} 页` : "待生成",
       summary: routeAReady

@@ -7034,6 +7034,38 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   font-weight: 800;
 }
 
+.dual-first-use {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(220px, .9fr);
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(40,84,216,.14);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.dual-first-use div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dual-first-use b {
+  flex: 0 0 100%;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.dual-first-use span {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #f6f8fb;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .dual-create-panel {
   display: grid;
   gap: 14px;
@@ -7327,7 +7359,8 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
 
 @media (max-width: 760px) {
   .dual-task-list,
-  .dual-diagnostic-strip {
+  .dual-diagnostic-strip,
+  .dual-first-use {
     grid-template-columns: 1fr;
   }
 
