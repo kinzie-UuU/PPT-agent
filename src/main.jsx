@@ -2066,7 +2066,7 @@ function DualRouteDashboard({
   onUploadFiles
 }) {
   const [createOpen, setCreateOpen] = useState(false);
-  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const state = buildDualRouteState(job);
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
@@ -2124,7 +2124,7 @@ function DualRouteDashboard({
             );
           }) : <p>暂无任务，先上传材料创建。</p>}
         </div>
-        <button className="dual-cleanup-entry" type="button" onClick={() => setCleanupOpen((current) => !current)}>清理 / 回收站</button>
+        <button className="dual-cleanup-entry" type="button" onClick={() => setAdvancedOpen((current) => !current)}>高级诊断</button>
       </aside>
 
       <section className="dual-dashboard-main">
@@ -2132,17 +2132,32 @@ function DualRouteDashboard({
           <div>
             <h1>{currentTitle}</h1>
             <span>{job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务"} · {sourcePages}</span>
+            <strong>下一步：{state.nextAction}</strong>
           </div>
         </div>
         <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
-        {cleanupOpen ? (
-          <DualCleanupPanel
-            activeJobId={job?.id || ""}
-            jobs={taskRows}
-            onArchiveJob={onArchiveJob}
-            onRefreshJobs={onRefreshJobs}
-            onSelectJob={onSelectJob}
-          />
+        {advancedOpen ? (
+          <section className="dual-advanced-panel">
+            <div className="dual-advanced-head">
+              <div>
+                <h2>高级诊断</h2>
+                <span>这里放清理、归档和状态诊断；普通流程不需要看。</span>
+              </div>
+              <button className="btn" type="button" onClick={() => setAdvancedOpen(false)}>收起</button>
+            </div>
+            <div className="dual-diagnostic-strip">
+              <span><b>{routeStatusLabel(state.routeA.status)}</b>图片版</span>
+              <span><b>{routeStatusLabel(state.routeB.status)}</b>可编辑版</span>
+              <span><b>{state.routeB.reviewReady ? "已复核" : "待复核"}</b>人工复核</span>
+            </div>
+            <DualCleanupPanel
+              activeJobId={job?.id || ""}
+              jobs={taskRows}
+              onArchiveJob={onArchiveJob}
+              onRefreshJobs={onRefreshJobs}
+              onSelectJob={onSelectJob}
+            />
+          </section>
         ) : null}
         {createOpen ? (
           <section className="dual-create-panel">
@@ -2190,7 +2205,6 @@ function DualRouteDashboard({
           title="图片版 PPT"
           summary={state.routeA.summary}
           status={state.routeA.status}
-          steps={state.routeA.steps}
           metrics={[
             ["用户确认", state.routeA.userConfirmLabel],
             ["后台生成", state.routeA.backgroundLabel],
@@ -2207,7 +2221,6 @@ function DualRouteDashboard({
           title="可编辑 PPT"
           summary={state.routeB.summary}
           status={state.routeB.status}
-          steps={state.routeB.steps}
           metrics={[
             ["可编辑页", editablePages],
             ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
@@ -2218,37 +2231,14 @@ function DualRouteDashboard({
             !finalHref ? { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: true } : null
           ].filter(Boolean)}
         />
-        <div className="dual-progress-overview">
-          <span><b>{state.routeA.visualLabel}</b>图片页</span>
-          <span><b>{editablePages}</b>可编辑页</span>
-          <span><b>{state.routeB.reviewReady ? "已复核" : "待复核"}</b>人工复核</span>
-          <span className={state.routeB.deliverableReady ? "ready" : "warn"}><b>{state.routeB.deliverableReady ? "可交付" : "完整可编辑交付未完成"}</b>最终状态</span>
-        </div>
       </section>
-
-      <aside className="dual-dashboard-right">
-        <div className="dual-side-card next">
-          <h2>下一步建议</h2>
-          <strong>{state.nextAction}</strong>
-          <ul>
-            <li className={state.routeA.status === "ready" ? "done" : "active"}>{state.routeA.status === "ready" ? "图片版 PPT 已完成，可以下载交付" : state.routeA.nextUserConfirmation || "需要你确认的地方会弹出确认界面，其余生成步骤在后台完成"}</li>
-            <li className={state.routeB.deliverableReady ? "done" : "active"}>{state.routeB.deliverableReady ? "可编辑版已复核，可以下载交付" : state.routeB.finalReady ? "可编辑版已生成，先完成人工复核" : "如需可编辑版，后续进入路线 B"}</li>
-            <li>可编辑重建会消耗更多时间和资源</li>
-          </ul>
-        </div>
-        <div className="dual-side-card">
-          <h2>当前状态</h2>
-          <p><span className="dot green" />图片版：{routeStatusLabel(state.routeA.status)}</p>
-          <p><span className="dot blue" />可编辑版：{routeStatusLabel(state.routeB.status)}</p>
-        </div>
-      </aside>
     </div>
   );
 }
 
-function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metrics = [], status = "pending", steps = [], summary, title }) {
+function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metrics = [], status = "pending", summary, title }) {
   const primaryAction = actions.find((action) => action.primary) || actions[0];
-  const secondaryActions = actions.filter((action) => action !== primaryAction);
+  const secondaryActions = actions.filter((action) => action !== primaryAction).slice(0, 1);
   const completionMetric = metrics[1] || metrics[0] || ["进度", "-"];
   const completionTitle = accent === "visual" && status === "ready"
     ? "图片版 PPT 已完成"
@@ -2275,20 +2265,6 @@ function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metric
           <h3>{title} <em>{routeStatusLabel(status)}</em></h3>
           <p>{summary}</p>
         </div>
-      </div>
-      <div className="route-stepper">
-        {steps.map((step, index) => (
-          <div className={`route-step ${step.state}`} key={step.label}>
-            <i>{String(index + 1).padStart(2, "0")}</i>
-            <span>{step.label}</span>
-            <small>{step.detail}</small>
-          </div>
-        ))}
-      </div>
-      <div className="route-metrics">
-        {metrics.map(([label, value]) => (
-          <span key={label}><b>{value}</b>{label}</span>
-        ))}
       </div>
       <div className="route-completion">
         <div>

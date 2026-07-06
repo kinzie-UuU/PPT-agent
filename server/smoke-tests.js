@@ -946,11 +946,11 @@ assert.ok(frontendSource.includes("不需要用户操作的 codex-ppt 步骤保�
 assert.ok(frontendSource.includes("TopbarQuickPanel"));
 assert.ok(frontendSource.includes("topbarPanel"));
 assert.ok(frontendSource.includes("DualCleanupPanel"));
-assert.ok(frontendSource.includes("清理 / 回收站"));
+assert.ok(frontendSource.includes("高级诊断"));
 assert.ok(frontendSource.includes("route-lane"));
 assert.ok(frontendSource.includes("dual-dashboard-left"));
 assert.ok(frontendSource.includes("dual-dashboard-main"));
-assert.ok(frontendSource.includes("dual-dashboard-right"));
+assert.ok(!frontendSource.includes("dual-dashboard-right"));
 assert.ok(frontendSource.includes('accent="visual"'));
 assert.ok(frontendSource.includes('accent="editable"'));
 assert.ok(frontendSource.includes("artifacts/image-deck?download=1"));
