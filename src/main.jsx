@@ -971,9 +971,14 @@ function App() {
         return;
       }
 
+      if (routeState.routeA.imageDeckReady) {
+        setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
+        return;
+      }
+
       if (!routeState.routeA.codexPptDecisionReady) {
-        setActiveStep("outline");
-        setStatus("请先确认大纲、视觉风格和生图后端。");
+        window.alert("还缺少可确认项：请先确认大纲、视觉风格和生图后端。\n\n如果这里没有可确认按钮，通常是生图后端还未配置，或当前任务缺少 outline.md / 风格证据。");
+        setStatus("请先补齐大纲、视觉风格和生图后端确认项。");
         return;
       }
 
@@ -1031,6 +1036,43 @@ function App() {
       }
 
       setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function runRouteBAction() {
+    if (!workflowJob?.id) return;
+    const routeState = buildDualRouteState(workflowJob);
+    if (!routeState.routeA.imageDeckReady) {
+      setStatus("请先完成路线 A 图片版 PPT，再进入路线 B。");
+      return;
+    }
+    if (routeState.routeB.finalReady && !routeState.routeB.reviewReady) {
+      openDeliveryReviewPanel();
+      return;
+    }
+    const confirmed = window.confirm("路线 B 会把图片版 PPT 转成可编辑 PPT，通常耗时更长，并可能调用 OCR / 模型服务。\n\n确认开始路线 B？");
+    if (!confirmed) return;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus("正在启动路线 B 可编辑重建...");
+    try {
+      const result = await api.workflowNextAction(workflowJob.id, {
+        requestedBy: "frontend-route-b",
+        confirmRouteB: true,
+        confirmExternalImageSpend: true
+      });
+      if (result.job) {
+        setWorkflowJob(result.job);
+        await loadWorkflowJobs({ activeId: result.job.id });
+      } else {
+        await refreshActiveWorkflow(null);
+      }
+      setStatus(result.didRun ? "路线 B 已启动，后台会继续处理可编辑重建。" : uiZh(result.reason || "路线 B 状态已刷新。"));
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
@@ -1862,6 +1904,7 @@ function App() {
               onOpenEditable={() => window.setTimeout(() => document.getElementById("dual-route-editable")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onOpenVisual={() => window.setTimeout(() => document.getElementById("dual-route-visual")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onRouteAAction={runRouteAAction}
+              onRouteBAction={runRouteBAction}
               onNotesChange={(value) => update("notes", value)}
               outlineReady={Boolean(outlinePlan?.layoutSequence?.length)}
               onArchiveJob={toggleWorkflowArchive}
@@ -2237,6 +2280,7 @@ function DualRouteDashboard({
   onRefreshJobs,
   onRefresh,
   onRouteAAction,
+  onRouteBAction,
   onSelectJob,
   onUploadFiles,
   outlineReady = false
@@ -2260,7 +2304,7 @@ function DualRouteDashboard({
   const primaryAction = state.routeB.finalReady && !state.routeB.reviewReady
     ? onOpenDelivery
     : state.routeA.status === "ready"
-      ? onOpenEditable
+      ? onRouteBAction || onOpenEditable
       : onRouteAAction;
   const primaryLabel = state.routeB.finalReady && !state.routeB.reviewReady
     ? "继续人工复核"
@@ -2268,7 +2312,7 @@ function DualRouteDashboard({
       ? "继续转可编辑 PPT"
       : "先完成图片版 PPT";
   const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput || outlineReady);
-  const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean).slice(0, 5);
+  const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
   const taskTabs = [
     ["running", "进行中"],
@@ -2283,20 +2327,20 @@ function DualRouteDashboard({
   const filteredTaskRows = visibleTaskRows.filter((item) => getWorkflowTaskBucket(item) === taskFilter);
   const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
-  const canCreateFromPanel = !busy && (hasCreateInput || outlineReady);
+  const canCreateFromPanel = !busy && hasCreateInput;
   const selectedDeliveryMode = deliveryMode === "editable" ? "editable" : "visual";
   const createModeCopy = selectedDeliveryMode === "editable"
     ? {
       label: "创建路线 B 任务",
       ready: "准备就绪：会先完成路线 A 图片版，再进入路线 B 可编辑版。",
-      pending: outlineReady ? "大纲已生成，可以确认后创建路线 B。" : "请先上传材料，或填写一句任务需求。",
+      pending: "请先上传材料，或填写一句任务需求。",
       busy: "正在创建路线 B...",
       confirm: "路线 B 可编辑 PPT 会耗时更长。\n\n系统仍会先完成路线 A 图片版 PPT；确认图片版后，再继续路线 B 可编辑重建。\n\n确认创建路线 B 任务？"
     }
     : {
       label: "创建路线 A 任务",
       ready: "准备就绪：会先进入路线 A 图片版 PPT 生成。",
-      pending: outlineReady ? "大纲已生成，可以确认后创建路线 A。" : "请先上传材料，或填写一句任务需求。",
+      pending: "请先上传材料，或填写一句任务需求。",
       busy: "正在创建路线 A...",
       confirm: ""
     };
@@ -2333,7 +2377,7 @@ function DualRouteDashboard({
           </div>
         </div>
         <div className="dual-task-list">
-          {filteredTaskRows.length ? filteredTaskRows.map((item) => {
+          {filteredTaskRows.length ? filteredTaskRows.slice(0, 5).map((item) => {
             const active = item?.id && item.id === job?.id;
             const rowState = buildDualRouteState(item);
             const pages = rowState.routeA.visualLabel || workflowJobLabel(item);
@@ -2490,7 +2534,7 @@ function DualRouteDashboard({
           ]}
           actions={[
             finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
-            !finalHref ? { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: true } : null
+            !finalHref && state.routeB.status !== "locked" ? { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: true } : null
           ].filter(Boolean)}
         />
       </section>
@@ -2501,7 +2545,9 @@ function DualRouteDashboard({
 function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metrics = [], status = "pending", summary, title }) {
   const primaryAction = actions.find((action) => action.primary) || actions[0];
   const secondaryActions = actions.filter((action) => action !== primaryAction).slice(0, 1);
-  const completionMetric = metrics[1] || metrics[0] || ["进度", "-"];
+  const completionMetric = accent === "editable" && (status === "locked" || status === "optional")
+    ? metrics[0] || ["进度", "-"]
+    : metrics[1] || metrics[0] || ["进度", "-"];
   const completionTitle = accent === "visual" && status === "ready"
     ? "图片版 PPT 已完成"
     : accent === "editable" && status === "ready"
