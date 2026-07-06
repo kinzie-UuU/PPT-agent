@@ -965,7 +965,7 @@ assert.ok(!frontendSource.includes("workflow-strip"));
 assert.ok(!fs.readFileSync(path.join(process.cwd(), "src", "styles.css"), "utf8").includes("workflow-strip"));
 assert.ok(frontendSource.includes("这里只看能不能交付"));
 assert.ok(frontendSource.includes("开始人工复核"));
-assert.ok(frontendSource.includes("不想等可编辑版？"));
+assert.ok(frontendSource.includes("图片版可先交付"));
 assert.ok(frontendSource.includes("workflow-simple-delivery-strip"));
 assert.ok(!frontendSource.includes("workflow-delivery-advanced-details"));
 assert.ok(!frontendSource.includes("WorkflowPlainAgentDashboardClean"));

@@ -1359,6 +1359,11 @@ function App() {
     scrollToDeliveryPanel();
   }
 
+  function goMainWorkbench() {
+    setActiveStep("generate");
+    window.setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 80);
+  }
+
   async function sendDirectorMessage(textOverride = "") {
     const text = (textOverride || directorDraft).trim();
     if (!text || directorBusy) return;
@@ -1780,7 +1785,7 @@ function App() {
                   setActiveStep("generate");
                   window.setTimeout(() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
                 }}
-                onOpenWorkflow={() => setActiveStep("generate")}
+                onOpenWorkflow={goMainWorkbench}
               />
             </SectionCard>
           )}
@@ -4540,7 +4545,7 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
           </div>
         </div>
       ) : null}
-      <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onOpenWorkflow={onOpenWorkflow} />
+      <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onBackToWorkbench={onOpenWorkflow} />
     </div>
   );
 }
@@ -4551,18 +4556,20 @@ function workflowFactNumber(status = {}, label = "") {
   return Number.isFinite(value) ? value : 0;
 }
 
-function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onOpenWorkflow }) {
+function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onBackToWorkbench }) {
   const imageDeck = (artifactBundle?.links || []).find((link) => link.key === "image-deck");
   const productReady = Boolean(finalGate?.productReady);
   if (productReady || !imageDeck?.href) return null;
   return (
     <div className="workflow-delivery-user-hint">
       <div>
-        <b>不想等可编辑版？</b>
+        <b>图片版可先交付</b>
         <span>图片版 PPT 已经可以作为阶段交付。可编辑版未通过前，先下载图片版给客户看也可以。</span>
       </div>
-      <a className="btn primary" href={imageDeck.href}>下载图片版 PPT</a>
-      <button className="btn" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>回到工作台</button>
+      <div className="workflow-delivery-user-actions">
+        <a className="btn primary" href={imageDeck.href}>下载图片版 PPT</a>
+        <button className="btn" type="button" onClick={onBackToWorkbench} disabled={!onBackToWorkbench}>回到工作台</button>
+      </div>
     </div>
   );
 }
