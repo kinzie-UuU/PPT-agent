@@ -167,6 +167,9 @@ export const api = {
   async recordCodexPptBackend(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/codex-ppt/backend`, body);
   },
+  async recordCodexPptInformationAssets(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/codex-ppt/information-assets`, body);
+  },
   async refreshCodexPptBackendApproval(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/codex-ppt/backend/refresh-approval`, body);
   },
@@ -195,6 +198,12 @@ export const api = {
   },
   async markWorkflowPageReview(id, pageId, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/review/pages/${encodeURIComponent(pageId)}`, body);
+  },
+  async markImageDeckReviewPage(id, pageId, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/image-deck/review/pages/${encodeURIComponent(pageId)}`, body);
+  },
+  async approveImageDeckReview(id, body = {}) {
+    return this.create(`/api/workflow-jobs/${id}/image-deck/review/approve`, body);
   },
   async correctWorkflowOcrTextHint(id, body = {}) {
     return this.create(`/api/workflow-jobs/${id}/ocr/text-hints/correct`, body);

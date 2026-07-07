@@ -10,6 +10,7 @@ export const WORKFLOW_STAGE_ORDER = [
   "created",
   "source_ready",
   "source_rendered",
+  "information_assets",
   "visual_sample_ready",
   "visual_generating",
   "image_deck_ready",

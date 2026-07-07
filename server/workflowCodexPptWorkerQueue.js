@@ -179,6 +179,7 @@ export async function completeWorkflowCodexPptSlideTask(jobId, pageId, options =
       source: cleanString(options.source || "external-slide-worker"),
       qaNote: cleanString(options.qaNote || "")
     },
+    job,
     page,
     pageNumber: pageTask.pageNumber,
     outputPath,

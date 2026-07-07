@@ -37,9 +37,11 @@ import { listWorkflowArtifactLinks, resolveWorkflowArtifact } from "./workflowAr
 import { buildWorkflowLogBundle } from "./workflowLogBundle.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
 import { approveWorkflowManualReview, approveWorkflowVisualQualityReview, recordWorkflowPageVisualReview, resetWorkflowManualReview } from "./workflowManualReview.js";
+import { approveWorkflowImageDeckReview, assertWorkflowImageDeckReviewReady, recordWorkflowImageDeckPageReview } from "./workflowImageDeckReview.js";
 import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
 import { buildSkillFirstOutlineDraft, recordWorkflowCodexPptOutline } from "./workflowOutline.js";
 import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } from "./workflowCodexPptDecisions.js";
+import { assertWorkflowInformationAssetMapReady, buildWorkflowInformationAssetMap } from "./workflowInformationAssets.js";
 import { claimWorkflowCodexPptSlideTask, completeWorkflowCodexPptSlideTask, heartbeatWorkflowCodexPptSlideTask, listWorkflowCodexPptSlideTasks, resetWorkflowCodexPptSlideTask, resetWorkflowNonProductCodexPptSlides, syncWorkflowCodexPptSlideTasks } from "./workflowCodexPptWorkerQueue.js";
 import { getWorkflowCodexPptSlideBatchPreflight, runWorkflowCodexPptSlideBatch } from "./workflowCodexPptSlideBatchRunner.js";
 import { runProductDoctor } from "./doctor.js";
@@ -71,7 +73,7 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage, limits: { fileSize: 600 * 1024 * 1024 } });
-const DEFAULT_PRIMARY_WORKFLOW_JOB_ID = "workflow_20260629-021146Z_619d82";
+const DEFAULT_PRIMARY_WORKFLOW_JOB_ID = "";
 
 await ensureDirs();
 app.use(cors());
@@ -1535,6 +1537,27 @@ app.post("/api/workflow-jobs/:id/review/pages/:pageId", async (req, res) => {
   }
 });
 
+app.post("/api/workflow-jobs/:id/image-deck/review/pages/:pageId", async (req, res) => {
+  try {
+    const job = await recordWorkflowImageDeckPageReview(req.params.id, {
+      ...(req.body || {}),
+      pageId: req.params.pageId
+    });
+    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+  } catch (error) {
+    res.status(error.status || 400).json({ ok: false, error: error.message || "Image deck page review failed", code: error.code || "" });
+  }
+});
+
+app.post("/api/workflow-jobs/:id/image-deck/review/approve", async (req, res) => {
+  try {
+    const job = await approveWorkflowImageDeckReview(req.params.id, req.body || {});
+    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+  } catch (error) {
+    res.status(error.status || 400).json({ ok: false, error: error.message || "Image deck review approval failed", code: error.code || "", summary: error.summary || null });
+  }
+});
+
 app.post("/api/workflow-jobs/:id/visual-quality/review/approve", async (req, res) => {
   try {
     const job = await approveWorkflowVisualQualityReview(req.params.id, req.body || {});
@@ -1715,8 +1738,11 @@ app.post("/api/workflow-jobs/:id/source/render", async (req, res, next) => {
 
 app.post("/api/workflow-jobs/:id/visual/sample", async (req, res, next) => {
   try {
-    const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(await readWorkflowJob(req.params.id), { scope: "visual-sample", imageCalls: 1 }));
+    const currentJob = await readWorkflowJob(req.params.id);
+    const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, { scope: "visual-sample", imageCalls: 1 }));
     await assertCodexPptApprovals(req.params.id, CODEX_PPT_VISUAL_SAMPLE_GATES);
+    assertWorkflowInformationAssetMapReady(currentJob);
+    assertWorkflowOcrTextHintsReady(currentJob);
     assertWorkflowVisualGenerationAllowed(body);
     await updateWorkflowStage(req.params.id, {
       stage: "visual_sample_ready",
@@ -1745,12 +1771,38 @@ app.post("/api/workflow-jobs/:id/visual/sample", async (req, res, next) => {
   }
 });
 
+app.post("/api/workflow-jobs/:id/codex-ppt/information-assets", async (req, res, next) => {
+  try {
+    await assertCodexPptApprovals(req.params.id, CODEX_PPT_VISUAL_SAMPLE_GATES);
+    const job = await buildWorkflowInformationAssetMap(req.params.id, req.body || {});
+    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+  } catch (error) {
+    if (isCodexPptApprovalError(error)) {
+      res.status(409).json(formatCodexPptApprovalError(error));
+      return;
+    }
+    try {
+      const job = await updateWorkflowStage(req.params.id, {
+        stage: "source_rendered",
+        status: "failed",
+        message: error.message || "Information asset analysis failed",
+        details: { requestedBy: "api" }
+      });
+      res.status(400).json(toClientWorkflowJob(job, { includeEvents: true }));
+    } catch {
+      next(error);
+    }
+  }
+});
+
 app.post("/api/workflow-jobs/:id/visual/generate", async (req, res, next) => {
   try {
     const currentJob = await readWorkflowJob(req.params.id);
     const pageCount = Array.isArray(currentJob.artifacts?.renderedPages) ? currentJob.artifacts.renderedPages.length : 0;
     const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, { scope: "full-deck", imageCalls: pageCount }));
     await assertCodexPptApprovals(req.params.id, CODEX_PPT_VISUAL_DECK_GATES);
+    assertWorkflowInformationAssetMapReady(currentJob);
+    assertWorkflowOcrTextHintsReady(currentJob);
     assertWorkflowVisualGenerationAllowed(body);
     await updateWorkflowStage(req.params.id, {
       stage: "visual_generating",
@@ -1898,6 +1950,7 @@ app.post("/api/workflow-jobs/:id/codex-ppt/slide-tasks/:pageId/reset", async (re
 
 app.post("/api/workflow-jobs/:id/image-deck/assemble", async (req, res, next) => {
   try {
+    assertWorkflowImageDeckReviewReady(await readWorkflowJob(req.params.id));
     await updateWorkflowStage(req.params.id, {
       stage: "image_deck_ready",
       status: "running",
@@ -1907,6 +1960,15 @@ app.post("/api/workflow-jobs/:id/image-deck/assemble", async (req, res, next) =>
     const job = await assembleWorkflowImageDeck(req.params.id, req.body || {});
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
+    if (error?.code === "IMAGE_DECK_REVIEW_REQUIRED") {
+      res.status(error.status || 409).json({
+        ok: false,
+        error: error.message || "Image deck review is required before assembly.",
+        code: error.code,
+        summary: error.summary || null
+      });
+      return;
+    }
     try {
       const job = await updateWorkflowStage(req.params.id, {
         stage: "image_deck_ready",
@@ -4827,11 +4889,37 @@ function canExposeWorkflowJob(job = null, primaryJob = null) {
   return Boolean(primaryJob?.id && job.id === primaryJob.id);
 }
 
+function assertWorkflowOcrTextHintsReady(job = {}) {
+  const artifact = job.artifacts?.ocrTextHints || {};
+  if (artifact.path || artifact.relativePath) return;
+  const error = new Error("Source-page OCR text hints are required before visual image generation.");
+  error.status = 409;
+  error.code = "OCR_TEXT_HINTS_REQUIRED";
+  throw error;
+}
+
 function buildPrimaryWorkflowPayload(job = null) {
+  const primaryId = getPrimaryWorkflowJobId();
+  if (!primaryId) {
+    return {
+      id: "",
+      found: false,
+      configured: false,
+      sourceName: "",
+      sourcePages: 0,
+      finalPages: 0,
+      recordedEditablePages: 0,
+      deliveryLevel: "not-configured",
+      deliveryHint: "",
+      isSample: false,
+      job: null
+    };
+  }
   if (!job?.id) {
     return {
-      id: getPrimaryWorkflowJobId(),
+      id: primaryId,
       found: false,
+      configured: true,
       sourceName: "",
       sourcePages: 0,
       finalPages: 0,
@@ -4849,6 +4937,7 @@ function buildPrimaryWorkflowPayload(job = null) {
   const payload = {
     id: job.id,
     found: true,
+    configured: true,
     sourceName: workflowSourceName(job),
     sourcePages,
     finalPages,

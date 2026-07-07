@@ -2,11 +2,14 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import pptxgen from "pptxgenjs";
 import { imageSize } from "image-size";
 import { analyzeGeneratedImage } from "./imageQa.js";
 import { editImageWithProvider, generateImageWithProvider, getProviderConfig } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { assertWorkflowImageDeckReviewReady } from "./workflowImageDeckReview.js";
 import { prepareCodexPptSlideRun, recordCodexPptSlideDispatch, recordCodexPptSlideResult } from "./workflowCodexPptRunState.js";
 
 const SLIDE_W = 13.333;
@@ -17,6 +20,7 @@ const IMAGE_RE = /\.(png|jpe?g|webp|svg)$/i;
 const VISUAL_IMAGES_MANIFEST = "visual_images_manifest.json";
 const VISUAL_SAMPLE_MANIFEST = "visual_sample_manifest.json";
 const VISUAL_QUALITY_REPORT = "visual_quality_report.json";
+const execFileAsync = promisify(execFile);
 
 export async function generateWorkflowVisualSample(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
@@ -45,6 +49,7 @@ export async function generateWorkflowVisualSample(jobId, options = {}) {
   await fs.copyFile(result.path, samplePath);
   const sampleRecord = await buildVisualImageRecord({
     result: sampleRecordDraft,
+    job,
     page,
     pageNumber,
     outputPath: samplePath,
@@ -113,7 +118,7 @@ export async function generateWorkflowVisualImages(jobId, options = {}) {
       });
       const outputPath = path.join(job.dirs.visualImages, `${page.pageId}${path.extname(result.path) || ".png"}`);
       await fs.copyFile(result.path, outputPath);
-      const record = await buildVisualImageRecord({ result, page, pageNumber, outputPath, prompt: prompt.prompt });
+      const record = await buildVisualImageRecord({ result, job, page, pageNumber, outputPath, prompt: prompt.prompt });
       slideRun = await recordCodexPptSlideResult(slideRun, { pageNumber, imageRecord: record });
       records.push(record);
       job.pages = upsertPage(job.pages, pageNumber, "recorded", "visual image ready", { visualImagePath: outputPath });
@@ -166,6 +171,7 @@ export async function generateWorkflowVisualImages(jobId, options = {}) {
 
 export async function assembleWorkflowImageDeck(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
+  assertWorkflowImageDeckReviewReady(job);
   const visualImages = await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || visualManifestPath(job));
   if (!visualImages.length) throw new Error("No visual images to assemble. Run visual/generate first.");
   await fs.mkdir(job.dirs.imageDeck, { recursive: true });
@@ -303,6 +309,7 @@ export async function writeVisualPrompts(job, renderedPages, options = {}) {
 export function buildVisualPromptsPayload(job = {}, renderedPages = [], options = {}) {
   const styleLock = buildCodexPptStyleLock(job, options);
   const styleBrief = cleanText(options.styleBrief || options.style || styleLock.styleBrief);
+  const informationAssetMap = readInformationAssetMap(job);
   return {
     version: 1,
     jobId: job.id,
@@ -322,6 +329,7 @@ export function buildVisualPromptsPayload(job = {}, renderedPages = [], options 
         page.outlineTitle ? `Slide title: ${page.outlineTitle}.` : "",
         page.outlinePurpose ? `Slide purpose: ${page.outlinePurpose}.` : "",
         page.outlineEvidence ? `Approved outline evidence: ${page.outlineEvidence}.` : "",
+        buildInformationAssetPrompt(informationAssetMap, page),
         "Respect the source page structure and approximate information density, but redraw with a consistent visual system.",
         "Preserve clearly visible logos, brand color blocks, short slide titles, cover subtitles, title positions, key visual anchors, charts, icons, and content density from the source.",
         "Keep short visible headings readable when they are legible in the source image; only long paragraphs or dense body copy should become clean text-safe placeholder regions or subtle blurred/abstract text texture.",
@@ -396,12 +404,66 @@ function buildStyleLockPrompt(styleLock = {}) {
   return parts.filter(Boolean).join(" ");
 }
 
+function readInformationAssetMap(job = {}) {
+  const filePath = cleanText(job.artifacts?.codexPptInformationAssets?.path || job.artifacts?.informationAssetMap?.path || "");
+  if (!filePath || !fsSync.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fsSync.readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function buildInformationAssetPrompt(assetMap = null, page = {}) {
+  const pages = Array.isArray(assetMap?.pages) ? assetMap.pages : [];
+  const record = pages.find((item) => {
+    const itemNumber = Number(item.pageNumber || 0);
+    return item.pageId === page.pageId || (itemNumber && itemNumber === Number(page.pageNumber || 0));
+  });
+  if (!record) return "";
+  const preserveTypes = (Array.isArray(record.mustPreserve) ? record.mustPreserve : [])
+    .map((item) => cleanText(item.type || item.label || ""))
+    .filter(Boolean)
+    .slice(0, 8);
+  const reusableAssets = (Array.isArray(record.reusableAssets) ? record.reusableAssets : [])
+    .filter((item) => item?.role === "reuse-or-compare" || item?.role === "text-rerender-reference")
+    .map((item) => `${cleanText(item.type)}=${cleanText(item.relativePath || item.path || item.assetId)}`)
+    .filter(Boolean)
+    .slice(0, 8);
+  const guardrails = (Array.isArray(record.promptGuardrails) ? record.promptGuardrails : [])
+    .map(cleanText)
+    .filter(Boolean)
+    .slice(0, 6);
+  const risks = (Array.isArray(record.risks) ? record.risks : [])
+    .map(cleanText)
+    .filter(Boolean)
+    .slice(0, 6);
+  return [
+    "SOURCE INFORMATION ASSET MAP:",
+    preserveTypes.length ? `Must preserve asset types: ${preserveTypes.join(", ")}.` : "",
+    reusableAssets.length ? `Reusable source assets are recorded for later composition or comparison: ${reusableAssets.join("; ")}.` : "",
+    reusableAssets.length ? "Design around preserved assets; do not invent replacement products, logos, screenshots, charts, or QR/data visuals." : "",
+    "Model work should focus on design layer: background, layout atmosphere, card containers, decorative elements, spacing, and unified style.",
+    "Readable factual text and strict source assets may be re-rendered or overlaid by the product pipeline after image generation; leave clean, well-composed regions for them instead of hallucinating details.",
+    risks.length ? `Fidelity risks: ${risks.join(", ")}.` : "",
+    guardrails.length ? `Guardrails: ${guardrails.join(" ")}` : ""
+  ].filter(Boolean).join(" ");
+}
+
 export function getRenderedPages(job) {
   const pages = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages : [];
   return pages.filter((page) => page?.path && fsSync.existsSync(page.path)).sort((a, b) => a.pageNumber - b.pageNumber);
 }
 
-export async function buildVisualImageRecord({ result = {}, page = {}, pageNumber = 1, outputPath = "", prompt = "", extra = {} }) {
+export async function buildVisualImageRecord({ result = {}, job = null, page = {}, pageNumber = 1, outputPath = "", prompt = "", extra = {} }) {
+  const fidelityOverlay = await applyFidelityOverlayToVisualImage({ job, page, outputPath, result }).catch((error) => ({
+    applied: false,
+    error: error.message || "fidelity overlay failed"
+  }));
+  const textOverlay = await applyProgramTextOverlayToVisualImage({ job, page, outputPath, result }).catch((error) => ({
+    applied: false,
+    error: error.message || "program text overlay failed"
+  }));
   const dimensions = getImageDimensions(outputPath);
   const stat = await fs.stat(outputPath);
   return {
@@ -417,9 +479,243 @@ export async function buildVisualImageRecord({ result = {}, page = {}, pageNumbe
     sha256: await hashFile(outputPath),
     width: dimensions?.width || result.width || page.width || null,
     height: dimensions?.height || result.height || page.height || null,
+    fidelityOverlay,
+    textOverlay,
     createdAt: new Date().toISOString(),
     ...extra
   };
+}
+
+async function applyFidelityOverlayToVisualImage({ job = null, page = {}, outputPath = "", result = {} } = {}) {
+  if (!job?.id || !outputPath || result?.dryRun || result?.provider === "passthrough") {
+    return { applied: false, reason: result?.dryRun || result?.provider === "passthrough" ? "passthrough-result" : "missing-job-or-output" };
+  }
+  const pageId = page.pageId || `page_${String(page.pageNumber || 1).padStart(3, "0")}`;
+  const pageAssets = getFidelityAssetsForPage(job, pageId);
+  const overlayAssets = pageAssets.filter(isStrictOverlayAsset);
+  if (!overlayAssets.length) return { applied: false, reason: "no-strict-overlay-assets" };
+  const designLayerPath = path.join(path.dirname(outputPath), `design_layer_${path.basename(outputPath)}`);
+  await fs.copyFile(outputPath, designLayerPath);
+  const spec = {
+    outputPath,
+    designLayerPath,
+    sourcePagePath: page.path || page.sourcePagePath || "",
+    assets: overlayAssets.map((asset) => ({
+      assetId: asset.assetId,
+      type: asset.type,
+      path: asset.path,
+      sourceBoxPx: asset.sourceBoxPx
+    }))
+  };
+  const composeResult = await composeFidelityOverlay(spec);
+  return {
+    applied: Boolean(composeResult.applied),
+    mode: "design-layer-plus-source-assets",
+    designLayerPath,
+    designLayerRelativePath: path.relative(process.cwd(), designLayerPath),
+    overlayCount: composeResult.overlayCount || 0,
+    overlayAssets: overlayAssets.map((asset) => ({
+      assetId: asset.assetId,
+      type: asset.type,
+      path: asset.path,
+      relativePath: asset.relativePath,
+      sourceBoxPx: asset.sourceBoxPx
+    }))
+  };
+}
+
+function getFidelityAssetsForPage(job = {}, pageId = "") {
+  const manifestPath = job.artifacts?.codexPptFidelityAssets?.path || job.artifacts?.codexPptInformationAssets?.fidelityAssetManifestPath || "";
+  if (!manifestPath || !fsSync.existsSync(manifestPath)) return [];
+  try {
+    const manifest = JSON.parse(fsSync.readFileSync(manifestPath, "utf8"));
+    const page = (Array.isArray(manifest.pages) ? manifest.pages : []).find((item) => item.pageId === pageId);
+    return Array.isArray(page?.assets) ? page.assets : [];
+  } catch {
+    return [];
+  }
+}
+
+function isStrictOverlayAsset(asset = {}) {
+  const type = cleanText(asset.type);
+  if (!["brand-mark", "photo-screenshot", "chart-table"].includes(type)) return false;
+  if (!asset.path || !fsSync.existsSync(asset.path)) return false;
+  const box = Array.isArray(asset.sourceBoxPx) ? asset.sourceBoxPx.map(Number) : [];
+  return box.length === 4 && box.every(Number.isFinite) && box[2] > 8 && box[3] > 8;
+}
+
+async function composeFidelityOverlay(spec = {}) {
+  const code = [
+    "import json, sys",
+    "from pathlib import Path",
+    "from PIL import Image",
+    "spec = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))",
+    "out = Path(spec['outputPath'])",
+    "base = Image.open(out).convert('RGBA')",
+    "source_path = spec.get('sourcePagePath') or ''",
+    "source_size = Image.open(source_path).size if source_path and Path(source_path).exists() else base.size",
+    "sw, sh = source_size",
+    "bw, bh = base.size",
+    "sx = bw / max(1, sw)",
+    "sy = bh / max(1, sh)",
+    "overlays = []",
+    "for asset in spec.get('assets', []):",
+    "    asset_path = Path(asset.get('path') or '')",
+    "    box = asset.get('sourceBoxPx') or []",
+    "    if not asset_path.exists() or len(box) != 4:",
+    "        continue",
+    "    x, y, w, h = [float(v) for v in box]",
+    "    dx = max(0, min(int(round(x * sx)), bw - 1))",
+    "    dy = max(0, min(int(round(y * sy)), bh - 1))",
+    "    dw = max(1, min(int(round(w * sx)), bw - dx))",
+    "    dh = max(1, min(int(round(h * sy)), bh - dy))",
+    "    patch = Image.open(asset_path).convert('RGBA').resize((dw, dh), Image.LANCZOS)",
+    "    base.alpha_composite(patch, (dx, dy))",
+    "    overlays.append({'assetId': asset.get('assetId'), 'type': asset.get('type'), 'targetBoxPx': [dx, dy, dw, dh]})",
+    "base.convert('RGB').save(out)",
+    "print(json.dumps({'applied': bool(overlays), 'overlayCount': len(overlays), 'overlays': overlays}, ensure_ascii=False))"
+  ].join("\n");
+  const specPath = `${spec.outputPath}.fidelity_overlay_spec.json`;
+  await fs.writeFile(specPath, JSON.stringify(spec, null, 2), "utf8");
+  const { stdout } = await execFileAsync("python", ["-c", code, specPath], {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 60000,
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: "utf-8"
+    }
+  });
+  const result = JSON.parse(String(stdout || "{}"));
+  result.specPath = specPath;
+  return result;
+}
+
+async function applyProgramTextOverlayToVisualImage({ job = null, page = {}, outputPath = "", result = {} } = {}) {
+  if (!job?.id || !outputPath || result?.dryRun || result?.provider === "passthrough") {
+    return { applied: false, reason: result?.dryRun || result?.provider === "passthrough" ? "passthrough-result" : "missing-job-or-output" };
+  }
+  const pageId = page.pageId || `page_${String(page.pageNumber || 1).padStart(3, "0")}`;
+  const lines = getOcrLinesForPage(job, pageId)
+    .filter(isRenderableOcrLine)
+    .slice(0, 80);
+  if (!lines.length) return { applied: false, reason: "no-ocr-lines" };
+  const spec = {
+    outputPath,
+    sourcePagePath: page.path || page.sourcePagePath || "",
+    lines: lines.map((line) => ({
+      id: line.id || "",
+      text: cleanText(line.correctedText || line.text || "").slice(0, 180),
+      boxPx: Array.isArray(line.box_px) ? line.box_px : line.boxPx,
+      confidence: line.confidence ?? null
+    }))
+  };
+  const composeResult = await composeProgramTextOverlay(spec);
+  return {
+    applied: Boolean(composeResult.applied),
+    mode: "program-rendered-source-text",
+    lineCount: composeResult.lineCount || 0,
+    specPath: composeResult.specPath || "",
+    specRelativePath: composeResult.specPath ? path.relative(process.cwd(), composeResult.specPath) : ""
+  };
+}
+
+function getOcrLinesForPage(job = {}, pageId = "") {
+  const hintsPath = cleanText(job.artifacts?.ocrTextHints?.path || "");
+  if (!hintsPath || !fsSync.existsSync(hintsPath)) return [];
+  try {
+    const hints = JSON.parse(fsSync.readFileSync(hintsPath, "utf8"));
+    const page = (Array.isArray(hints.pages) ? hints.pages : []).find((item) => normalizePageId(item.pageId) === normalizePageId(pageId));
+    return Array.isArray(page?.ocrLines) ? page.ocrLines : [];
+  } catch {
+    return [];
+  }
+}
+
+function isRenderableOcrLine(line = {}) {
+  const text = cleanText(line.correctedText || line.text || "");
+  if (!text || text.length > 180) return false;
+  if (line.low_confidence || line.mojibake_suspect) return false;
+  const box = Array.isArray(line.box_px) ? line.box_px.map(Number) : Array.isArray(line.boxPx) ? line.boxPx.map(Number) : [];
+  if (box.length !== 4 || !box.every(Number.isFinite)) return false;
+  return box[2] >= 12 && box[3] >= 8;
+}
+
+function normalizePageId(value = "") {
+  const match = String(value || "").match(/\d+/);
+  return match ? `page_${String(Number(match[0])).padStart(3, "0")}` : "";
+}
+
+async function composeProgramTextOverlay(spec = {}) {
+  const code = [
+    "import json, sys",
+    "from pathlib import Path",
+    "from PIL import Image, ImageDraw, ImageFont",
+    "spec = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))",
+    "out = Path(spec['outputPath'])",
+    "base = Image.open(out).convert('RGBA')",
+    "source_path = spec.get('sourcePagePath') or ''",
+    "source_size = Image.open(source_path).size if source_path and Path(source_path).exists() else base.size",
+    "sw, sh = source_size",
+    "bw, bh = base.size",
+    "sx = bw / max(1, sw)",
+    "sy = bh / max(1, sh)",
+    "draw = ImageDraw.Draw(base)",
+    "font_candidates = [r'C:\\Windows\\Fonts\\msyh.ttc', r'C:\\Windows\\Fonts\\simhei.ttf', r'C:\\Windows\\Fonts\\arial.ttf']",
+    "def pick_font(size):",
+    "    for fp in font_candidates:",
+    "        if Path(fp).exists():",
+    "            try: return ImageFont.truetype(fp, max(8, int(size)))",
+    "            except Exception: pass",
+    "    return ImageFont.load_default()",
+    "def text_size(font, text):",
+    "    try:",
+    "        box = draw.textbbox((0,0), text, font=font)",
+    "        return box[2]-box[0], box[3]-box[1]",
+    "    except Exception:",
+    "        return draw.textlength(text, font=font), max(10, getattr(font, 'size', 14))",
+    "rendered = []",
+    "for line in spec.get('lines', []):",
+    "    text = (line.get('text') or '').strip()",
+    "    box = line.get('boxPx') or []",
+    "    if not text or len(box) != 4:",
+    "        continue",
+    "    x, y, w, h = [float(v) for v in box]",
+    "    dx = max(0, min(int(round(x * sx)), bw - 1))",
+    "    dy = max(0, min(int(round(y * sy)), bh - 1))",
+    "    dw = max(1, min(int(round(w * sx)), bw - dx))",
+    "    dh = max(1, min(int(round(h * sy)), bh - dy))",
+    "    font_size = max(10, min(48, int(dh * 0.76)))",
+    "    font = pick_font(font_size)",
+    "    tw, th = text_size(font, text)",
+    "    while tw > max(8, dw - 6) and font_size > 8:",
+    "        font_size -= 1",
+    "        font = pick_font(font_size)",
+    "        tw, th = text_size(font, text)",
+    "    pad_x = max(2, int(font_size * 0.18))",
+    "    pad_y = max(1, int(font_size * 0.1))",
+    "    bg = (255, 255, 255, 210)",
+    "    fg = (18, 24, 38, 255)",
+    "    draw.rounded_rectangle([dx, dy, min(bw, dx + dw), min(bh, dy + dh)], radius=max(2, int(font_size * 0.12)), fill=bg)",
+    "    draw.text((dx + pad_x, dy + max(0, (dh - th) // 2) - pad_y), text, font=font, fill=fg)",
+    "    rendered.append({'id': line.get('id'), 'targetBoxPx': [dx, dy, dw, dh]})",
+    "base.convert('RGB').save(out)",
+    "print(json.dumps({'applied': bool(rendered), 'lineCount': len(rendered), 'rendered': rendered}, ensure_ascii=False))"
+  ].join("\n");
+  const specPath = `${spec.outputPath}.program_text_overlay_spec.json`;
+  await fs.writeFile(specPath, JSON.stringify(spec, null, 2), "utf8");
+  const { stdout } = await execFileAsync("python", ["-c", code, specPath], {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 60000,
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: "utf-8"
+    }
+  });
+  const result = JSON.parse(String(stdout || "{}"));
+  result.specPath = specPath;
+  return result;
 }
 
 export async function discoverVisualImages(dir, manifestPath = "") {

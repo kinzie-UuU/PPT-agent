@@ -26,6 +26,9 @@ export async function listWorkflowArtifactLinks(id) {
       makeLink(job, "codex-ppt-style-md", "codex-ppt Style Markdown", artifacts.codexPptStyle?.markdownPath),
       makeLink(job, "codex-ppt-backend", "codex-ppt Backend JSON", artifacts.codexPptBackendDecision?.path),
       makeLink(job, "codex-ppt-backend-md", "codex-ppt Backend Markdown", artifacts.codexPptBackendDecision?.markdownPath),
+      makeLink(job, "codex-ppt-information-assets", "codex-ppt Information Asset Map", artifacts.codexPptInformationAssets?.path || artifacts.informationAssetMap?.path),
+      makeLink(job, "codex-ppt-information-assets-md", "codex-ppt Information Asset Map Markdown", artifacts.codexPptInformationAssets?.markdownPath || artifacts.informationAssetMap?.markdownPath),
+      makeLink(job, "codex-ppt-fidelity-assets", "codex-ppt Fidelity Assets Manifest", artifacts.codexPptFidelityAssets?.path || artifacts.codexPptInformationAssets?.fidelityAssetManifestPath),
       makeLink(job, "codex-ppt-sample-prompt-preview", "codex-ppt 样张 Prompt 预览", artifacts.codexPptSamplePromptPreview?.path),
       makeLink(job, "visual-sample", "codex-ppt 视觉样张", artifacts.visualSample?.path),
       makeLink(job, "codex-ppt-deck-spec", "codex-ppt Deck Spec", artifacts.codexPptDeckSpec?.path),
@@ -97,6 +100,15 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
   } else if (normalizedKey === "codex-ppt-backend-md") {
     filePath = artifacts.codexPptBackendDecision?.markdownPath || "";
     fileName = "codex-ppt-backend.md";
+  } else if (normalizedKey === "codex-ppt-information-assets") {
+    filePath = artifacts.codexPptInformationAssets?.path || artifacts.informationAssetMap?.path || "";
+    fileName = "information_asset_map.json";
+  } else if (normalizedKey === "codex-ppt-information-assets-md") {
+    filePath = artifacts.codexPptInformationAssets?.markdownPath || artifacts.informationAssetMap?.markdownPath || "";
+    fileName = "information_asset_map.md";
+  } else if (normalizedKey === "codex-ppt-fidelity-assets") {
+    filePath = artifacts.codexPptFidelityAssets?.path || artifacts.codexPptInformationAssets?.fidelityAssetManifestPath || "";
+    fileName = "fidelity_assets_manifest.json";
   } else if (normalizedKey === "codex-ppt-sample-prompt-preview") {
     filePath = artifacts.codexPptSamplePromptPreview?.path || "";
     fileName = "sample_prompt_preview.json";
