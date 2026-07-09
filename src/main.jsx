@@ -85,12 +85,12 @@ const CODEX_PPT_NO_COST_APPROVAL_GATES = [
 ];
 const LEGACY_CODEX_PPT_STYLE_RE = /轻盈渐变风|东方自然风|黑白画册风|蓝白科技风|暗黑科技风|旧模板|旧版模板|模板包|template[-_\s]?pack/i;
 const FIRST_USE_GUIDE = [
-  "先生成 outline.md，确认页数、标题和每页要点。",
+  "先生成大纲，确认页数、标题和每页要点。",
   "不要跳过样张确认：先看 1 页效果，再批量生成整套 PPT。",
   "某一页不满意时，优先只改那一页，不整套重做。",
   "有参考 PPT、截图或 PDF 时，先分析风格，再生成新 PPT。"
 ];
-const CODEX_PPT_OUTPUTS = ["outline.md", "origin_image/slide_XX.png", "speech.md", "{PPT名称}.pptx"];
+const CODEX_PPT_OUTPUTS = ["大纲文件", "每页高清图片", "演讲备注", "最终 PPT"];
 
 function getApprovedCodexPptGateSet(job = {}) {
   return new Set((Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
@@ -168,7 +168,7 @@ const UI_TEXT_REPLACEMENTS = [
   ["Product sample required", "需要产品级样张"],
   ["Ready for human review", "等待人工复核"],
   ["Waiting for sample evidence", "等待样张证据"],
-  ["codex-ppt full-deck image stage", "codex-ppt 全量图片阶段"],
+  ["codex-ppt full-deck image stage", "整套图片生成"],
   ["Cost estimate", "费用预估"],
   ["Workflow cleanup", "工作流清理"],
   ["Preview cleanup", "预览清理页"],
@@ -210,12 +210,12 @@ const UI_TEXT_REPLACEMENTS = [
   ["LLM provider", "对话模型服务商"],
   ["Fresh editable run", "重建 fresh editable run"],
   ["Editable task sync", "同步可编辑页面任务"],
-  ["Editable worker batch", "可编辑页面 worker 批处理"],
-  ["Local editable preparation must run before model page workers can select pages.", "需要先完成本地可编辑重建准备，model 页面 worker 才能选择页面。"],
+  ["Editable worker batch", "可编辑页面批处理"],
+  ["Local editable preparation must run before model page workers can select pages.", "需要先完成本地可编辑重建准备，页面任务才能选择页面。"],
   ["Editable rebuild needs local preparation before model workers can run; no external image or LLM call is needed for this preparation.", "可编辑重建需要先做本地准备；这一步不调用外部图片 API，也不调用 LLM。"],
   ["Run fresh editable run recovery first; this clears stale editable evidence and rebuilds editppt inputs.", "先重建 fresh editable run，清理过期可编辑证据并重新准备 editppt 输入。"],
   ["Run editable worker task sync after fresh recovery.", "fresh run 重建后，同步可编辑页面任务。"],
-  ["Then rerun this readiness preflight before starting model page workers.", "然后重新检查总预检，再启动 model 页面 worker。"],
+  ["Then rerun this readiness preflight before starting model page workers.", "然后重新检查总预检，再启动页面任务。"],
   ["Confirm LLM provider recovery.", "确认对话模型服务商已经恢复。"],
   ["Confirm external spend before running model editable workers.", "运行 model 可编辑 worker 前，先确认外部额度消耗。"],
   ["Run 1-2 pages first, then review page-level PPTX output.", "先跑 1-2 页，再复核页面级 PPTX 输出。"],
@@ -946,7 +946,7 @@ function App() {
     return api.workflowJob(workflowJob.id);
   }
 
-  function askUserConfirm({ title = "确认操作", body = "", primaryLabel = "确认", danger = false } = {}) {
+  function askUserConfirm({ title = "确认操作", body = "", primaryLabel = "确认", danger = false, variant = "", kicker = "", reviewItems = [], note = "" } = {}) {
     if (confirmResolverRef.current) {
       confirmResolverRef.current(false);
     }
@@ -956,7 +956,11 @@ function App() {
         title,
         body,
         primaryLabel,
-        danger
+        danger,
+        variant,
+        kicker,
+        reviewItems,
+        note
       });
     });
   }
@@ -1010,7 +1014,7 @@ function App() {
       }
 
       if (!routeState.routeA.codexPptDecisionReady) {
-        setError("还缺少可确认项：请先确认大纲、视觉风格和生图后端。如果这里没有可确认按钮，通常是生图后端未配置，或当前任务缺少 outline.md / 风格证据。");
+        setError("还缺少可确认项：请先确认大纲、视觉风格和图片生成方式。如果这里没有可确认按钮，通常是图片生成服务未配置，或当前任务缺少大纲 / 风格证据。");
         setStatus("");
         return;
       }
@@ -1038,7 +1042,15 @@ function App() {
         const confirmed = await askUserConfirm({
           title: "生成 1 页样张",
           body: "先生成 1 页真实样张，用来确认风格和文字质量。这一步可能调用外部图片 API 并消耗 1 次额度。",
-          primaryLabel: "生成样张"
+          primaryLabel: "生成样张",
+          variant: "route-a",
+          kicker: "路线 A 确认",
+          reviewItems: [
+            "这一步只确认大纲、视觉方向和图片生成方式",
+            "生成后先看原始页和样张对比",
+            "整套生成后仍会逐页复核"
+          ],
+          note: "不需要用户操作的步骤会在后台处理。"
         });
         if (!confirmed) return;
         setStatus("正在生成 1 页样张...");
@@ -1822,16 +1834,8 @@ function App() {
           <span className="topbar-pill"><span className="pill-check" />模型正常</span>
         </div>
         <div className="topbar-actions">
-          <button className={`topbar-tool ${topbarPanel === "health" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("health")}>
-            <span className="topbar-tool-icon" aria-hidden="true">⌘</span>
-            健康检查
-          </button>
-          <button className={`topbar-icon ${topbarPanel === "settings" ? "active" : ""}`} type="button" aria-label="设置" onClick={() => toggleTopbarPanel("settings")}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.4A3.6 3.6 0 1 1 12 15.6 3.6 3.6 0 0 1 12 8.4Zm7.2 3.6c0-.5-.1-1-.2-1.5l2-1.5-2-3.4-2.4 1a7 7 0 0 0-2.5-1.4L13.8 2h-4l-.4 3.2A7 7 0 0 0 7 6.6l-2.5-1-2 3.4 2 1.5a7.5 7.5 0 0 0 0 3l-2 1.5 2 3.4 2.5-1c.7.6 1.5 1 2.4 1.3l.4 3.3h4l.4-3.3a7 7 0 0 0 2.5-1.4l2.4 1 2-3.4-2-1.5c.1-.5.2-1 .2-1.5Z" /></svg>
-          </button>
-          <button className={`topbar-avatar ${topbarPanel === "mode" ? "active" : ""}`} type="button" aria-label="本地账户" onClick={() => toggleTopbarPanel("mode")}>A</button>
-          <button className={`topbar-mode ${topbarPanel === "mode" ? "active" : ""}`} type="button" onClick={() => toggleTopbarPanel("mode")}>
-            本地模式
+          <button className={`topbar-system-entry topbar-mode ${topbarPanel ? "active" : ""}`} type="button" aria-label="系统面板" onClick={() => toggleTopbarPanel("health")}>
+            系统
             <span className="topbar-mode-caret" aria-hidden="true">⌄</span>
           </button>
         </div>
@@ -2284,11 +2288,13 @@ function App() {
       />
       <ImageDeckReviewDialog
         busy={workflowBusy}
+        error={error}
         job={workflowJob}
         onApproveAll={approveImageDeckReviewFromPanel}
         onClose={() => setImageDeckReviewOpen(false)}
         onMarkPage={markImageDeckReviewPage}
         open={imageDeckReviewOpen}
+        status={status}
       />
     </div>
   );
@@ -2296,14 +2302,22 @@ function App() {
 
 function ConfirmDialog({ onCancel, onConfirm, request }) {
   if (!request) return null;
+  const reviewItems = Array.isArray(request.reviewItems) ? request.reviewItems : [];
+  const variantClass = request.variant === "route-a" ? "route-a-confirm-dialog" : "";
   return (
     <div className="confirm-overlay" role="presentation" onMouseDown={onCancel}>
-      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`confirm-dialog ${variantClass}`} role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
         <div>
-          <span className="confirm-kicker">需要确认</span>
+          <span className="confirm-kicker">{request.kicker || "需要确认"}</span>
           <h2 id="confirm-dialog-title">{request.title || "确认操作"}</h2>
           {request.body ? <p>{request.body}</p> : null}
         </div>
+        {reviewItems.length ? (
+          <div className="route-a-confirm-checks">
+            {reviewItems.map((item) => <span key={item}><b>✓</b>{item}</span>)}
+          </div>
+        ) : null}
+        {request.note ? <p className="route-a-confirm-note">{request.note}</p> : null}
         <div className="confirm-actions">
           <button className="btn ghost" type="button" onClick={onCancel}>取消</button>
           <button className={`btn primary ${request.danger ? "danger" : ""}`} type="button" onClick={onConfirm}>{request.primaryLabel || "确认"}</button>
@@ -2357,7 +2371,8 @@ function SampleReviewDialog({ busy = false, job = null, onApprove, onClose, onRe
   const risks = Array.isArray(pageRecord?.risks) ? pageRecord.risks : [];
   const checklist = Array.isArray(pageRecord?.reviewChecklist) ? pageRecord.reviewChecklist : [];
   const preserve = Array.isArray(pageRecord?.mustPreserve) ? pageRecord.mustPreserve : [];
-  const canApprove = Boolean(pageRecord && preserve.length && sampleHref && sourceHref);
+  const canApprove = Boolean(sampleHref && sourceHref);
+  const canApproveSample = Boolean(canApprove && pageRecord && preserve.length);
 
   return (
     <div className="sample-review-overlay" role="presentation" onMouseDown={onClose}>
@@ -2391,9 +2406,8 @@ function SampleReviewDialog({ busy = false, job = null, onApprove, onClose, onRe
         />
 
         <footer className="sample-review-actions">
-          <a className="btn ghost" href={sampleHref} target="_blank" rel="noreferrer">打开样张</a>
           <button className="btn" type="button" onClick={onRegenerate} disabled={busy}>重新生成样张</button>
-          <button className="btn primary" type="button" onClick={onApprove} disabled={busy || !canApprove} title={canApprove ? "" : "等待信息资产拆解读取完成后才能通过"}>通过样张</button>
+          <button className="btn primary" type="button" onClick={onApprove} disabled={busy || !canApproveSample} title={canApproveSample ? "" : "等待信息资产拆解读取完成后才能通过"}>通过样张</button>
         </footer>
       </section>
     </div>
@@ -2436,8 +2450,9 @@ function ReviewThreePointChecklist({ assetError = "", checklist = [], currentSta
   );
 }
 
-function ImageDeckReviewDialog({ busy = false, job = null, onApproveAll, onClose, onMarkPage, open = false }) {
+function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApproveAll, onClose, onMarkPage, open = false, status = "" }) {
   const [selectedPageId, setSelectedPageId] = useState("");
+  const [previewImage, setPreviewImage] = useState(null);
   const [assetMap, setAssetMap] = useState(null);
   const [assetError, setAssetError] = useState("");
   const visualImages = useMemo(() => (
@@ -2501,7 +2516,11 @@ function ImageDeckReviewDialog({ busy = false, job = null, onApproveAll, onClose
     const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
     return ["pass", "accept"].includes(marks[id]?.status);
   }).length;
-  const canApproveAll = Boolean(visualImages.length && !hasRerun && assetMap);
+  const canApproveAll = Boolean(visualImages.length && reviewedCount === visualImages.length && !hasRerun && assetMap);
+  const openPreview = (src, label) => {
+    if (!src) return;
+    setPreviewImage({ src, label, alt: label });
+  };
 
   return (
     <div className="sample-review-overlay image-deck-review-overlay" role="presentation" onMouseDown={onClose}>
@@ -2516,50 +2535,80 @@ function ImageDeckReviewDialog({ busy = false, job = null, onApproveAll, onClose
         </header>
 
         <div className="image-deck-review-layout">
-          <nav className="image-deck-review-pages" aria-label="图片页列表">
+          <div className="image-deck-review-summary">
+            <strong>可以就通过，不可以就重新生成</strong>
+            <span>一排排对比原始页和生成页，只确认三件事：信息保真、文字清楚、设计更好看。</span>
+          </div>
+          {error || assetError || status ? (
+            <div className={`image-deck-review-message ${error || assetError ? "error" : ""}`} role={error || assetError ? "alert" : "status"}>
+              {error || assetError || status}
+            </div>
+          ) : null}
+
+          <div className="image-deck-review-rows" aria-label="一排排对比原始页和生成页">
             {visualImages.length ? visualImages.map((image, index) => {
               const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
               const mark = marks[id];
+              const sourcePageHref = open && job?.id && id
+                ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/rendered-page/${encodeURIComponent(id)}`
+                : "";
+              const visualPageHref = open && job?.id && id
+                ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-page/${encodeURIComponent(id)}`
+                : "";
+              const pageRecordForRow = findSampleAssetPage(assetMap, image || {});
+              const hasRisks = Array.isArray(pageRecordForRow?.risks) && pageRecordForRow.risks.length > 0;
+              const statusLabel = mark?.status === "rerun" ? "需重做" : ["pass", "accept"].includes(mark?.status) ? "已通过" : "待确认";
               return (
-                <button className={id === pageId ? "active" : ""} type="button" key={id || index} onClick={() => setSelectedPageId(id)}>
-                  <b>{String(index + 1).padStart(2, "0")}</b>
-                  <span>{mark?.status === "rerun" ? "需重做" : ["pass", "accept"].includes(mark?.status) ? "已通过" : "待确认"}</span>
-                </button>
+                <article className={`image-deck-review-row ${mark?.status === "rerun" ? "needs-rerun" : ["pass", "accept"].includes(mark?.status) ? "passed" : ""}`} key={id || index}>
+                  <div className="image-deck-review-row-head">
+                    <b>{String(index + 1).padStart(2, "0")}</b>
+                    <span>{statusLabel}</span>
+                  </div>
+                  <div className="image-deck-review-pair">
+                    <figure>
+                      <figcaption>原始页</figcaption>
+                      {sourcePageHref ? (
+                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(sourcePageHref, `原始页 ${String(index + 1).padStart(2, "0")}`)} aria-label={`放大查看第 ${index + 1} 页原始页`}>
+                          <img src={sourcePageHref} alt={`第 ${index + 1} 页原始页`} />
+                        </button>
+                      ) : <div className="sample-review-empty">没有原始页预览</div>}
+                    </figure>
+                    <figure>
+                      <figcaption>生成页</figcaption>
+                      {visualPageHref ? (
+                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(visualPageHref, `生成页 ${String(index + 1).padStart(2, "0")}`)} aria-label={`放大查看第 ${index + 1} 页生成页`}>
+                          <img src={visualPageHref} alt={`第 ${index + 1} 页生成页`} />
+                        </button>
+                      ) : <div className="sample-review-empty">没有生成页预览</div>}
+                    </figure>
+                  </div>
+                  <div className="image-deck-review-row-actions">
+                    <small>{hasRisks ? "重点检查保真风险" : "看图确认即可"}</small>
+                    <button className="btn" type="button" onClick={() => id && onMarkPage?.(id, "rerun", "needs regeneration from image deck review")} disabled={busy || !id}>标记重做</button>
+                    <button className="btn primary" type="button" onClick={() => id && onMarkPage?.(id, "pass", "page approved from image deck review")} disabled={busy || !id}>通过本页</button>
+                  </div>
+                </article>
               );
             }) : <p>还没有生成图片页。</p>}
-          </nav>
-
-          <div className="image-deck-review-main">
-            <div className="sample-review-grid">
-              <figure>
-                <figcaption>原始页</figcaption>
-                {sourceHref ? <img src={sourceHref} alt="原始页" /> : <div className="sample-review-empty">没有原始页预览</div>}
-              </figure>
-              <figure>
-                <figcaption>生成页</figcaption>
-                {visualHref ? <img src={visualHref} alt="生成页" /> : <div className="sample-review-empty">没有生成页预览</div>}
-              </figure>
-            </div>
-
-            <ReviewThreePointChecklist
-              assetError={assetError}
-              checklist={checklist}
-              currentStatus={currentMark?.status === "rerun" ? "当前页已标记重做" : ["pass", "accept"].includes(currentMark?.status) ? "当前页已通过" : "当前页待确认"}
-              mode="deck"
-              preserve={preserve}
-              risks={risks}
-            />
           </div>
         </div>
 
         <footer className="sample-review-actions image-deck-review-actions">
           <span>{reviewedCount}/{visualImages.length} 页已通过{hasRerun ? "，有页面被标记重做" : ""}</span>
-          {visualHref ? <a className="btn ghost" href={visualHref} target="_blank" rel="noreferrer">打开生成页</a> : null}
-          <button className="btn" type="button" onClick={() => pageId && onMarkPage?.(pageId, "rerun", "needs regeneration from image deck review")} disabled={busy || !pageId}>标记重做</button>
-          <button className="btn" type="button" onClick={() => pageId && onMarkPage?.(pageId, "pass", "page approved from image deck review")} disabled={busy || !pageId}>通过本页</button>
           <button className="btn primary" type="button" onClick={onApproveAll} disabled={busy || !canApproveAll} title={canApproveAll ? "" : "等待信息资产拆解读取完成，且不能有重做页"}>全部通过并继续</button>
         </footer>
       </section>
+      {previewImage ? (
+        <div className="image-deck-lightbox" role="presentation" onMouseDown={(event) => { event.stopPropagation(); setPreviewImage(null); }}>
+          <section className="image-deck-lightbox-panel" role="dialog" aria-modal="true" aria-label={previewImage.label} onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <b>{previewImage.label}</b>
+              <button className="topbar-popover-close" type="button" onClick={() => setPreviewImage(null)} aria-label="关闭放大图">×</button>
+            </header>
+            <img src={previewImage.src} alt={previewImage.alt} />
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2610,23 +2659,40 @@ function TopbarQuickPanel({
   onTestImage,
   onUploadStyleReference
 }) {
+  const [activeMode, setActiveMode] = useState(mode || "health");
   const jobState = buildDualRouteState(workflowJob);
   const modelLabel = apiConfig?.model || "未配置";
   const imageLabel = apiConfig?.imageModel || localImage?.details?.model || "未配置";
   const serviceReady = connection?.state === "online";
   const doctorReady = doctor?.state === "pass" || doctor?.state === "ready";
 
+  useEffect(() => {
+    setActiveMode(mode || "health");
+  }, [mode]);
+
   return (
-    <div className={`topbar-popover ${mode}`} role="dialog" aria-label={mode === "health" ? "健康检查" : mode === "settings" ? "设置" : "本地模式"}>
+    <div className={`topbar-popover ${activeMode}`} role="dialog" aria-label={activeMode === "health" ? "健康检查" : activeMode === "settings" ? "设置" : "本地模式"}>
       <div className="topbar-popover-head">
         <div>
-          <b>{mode === "health" ? "健康检查" : mode === "settings" ? "设置" : "本地模式"}</b>
-          <span>{mode === "health" ? "服务、模型和交付状态" : mode === "settings" ? "模型、OCR 和参考图" : "当前全部任务都在本机工作流内执行"}</span>
+          <b>{activeMode === "health" ? "健康检查" : activeMode === "settings" ? "设置" : "本地模式"}</b>
+          <span>{activeMode === "health" ? "服务、模型和交付状态" : activeMode === "settings" ? "模型、OCR 和参考图" : "当前全部任务都在本机工作流内执行"}</span>
         </div>
         <button className="topbar-popover-close" type="button" onClick={onClose} aria-label="关闭">×</button>
       </div>
 
-      {mode === "health" ? (
+      <div className="topbar-popover-tabs" role="tablist" aria-label="系统面板">
+        {[
+          ["health", "健康"],
+          ["settings", "设置"],
+          ["mode", "本地"]
+        ].map(([id, label]) => (
+          <button className={activeMode === id ? "active" : ""} type="button" role="tab" aria-selected={activeMode === id} key={id} onClick={() => setActiveMode(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeMode === "health" ? (
         <>
           <div className="topbar-health-grid">
             <TopbarStatusCard label="本地连接" state={serviceReady ? "ready" : "blocked"} value={serviceReady ? "已连接" : "未连接"} detail={connection?.message || "-"} />
@@ -2641,24 +2707,29 @@ function TopbarQuickPanel({
         </>
       ) : null}
 
-      {mode === "settings" ? (
-        <SettingsPanel
-          config={apiConfig}
-          busy={settingsBusy}
-          models={availableModels}
-          onChange={onChangeConfig}
-          onSave={onSaveConfig}
-          onSavePaddleOcrToken={onSavePaddleOcrToken}
-          onTest={onTestConfig}
-          onTestImage={onTestImage}
-          onDetectModels={onDetectModels}
-          styleReferences={styleReferences}
-          onUploadStyleReference={onUploadStyleReference}
-          onDeleteStyleReference={onDeleteStyleReference}
-        />
+      {activeMode === "settings" ? (
+        <>
+          <div className="topbar-settings-guide">
+            {["模型与生成设置", "测试图片生成", "可编辑重建文字识别", "图片版生成确认", "整套图片生成", "图片生成服务", "流程检查"].map((item) => <span key={item}>{item}</span>)}
+          </div>
+          <SettingsPanel
+            config={apiConfig}
+            busy={settingsBusy}
+            models={availableModels}
+            onChange={onChangeConfig}
+            onSave={onSaveConfig}
+            onSavePaddleOcrToken={onSavePaddleOcrToken}
+            onTest={onTestConfig}
+            onTestImage={onTestImage}
+            onDetectModels={onDetectModels}
+            styleReferences={styleReferences}
+            onUploadStyleReference={onUploadStyleReference}
+            onDeleteStyleReference={onDeleteStyleReference}
+          />
+        </>
       ) : null}
 
-      {mode === "mode" ? (
+      {activeMode === "mode" ? (
         <>
           <div className="topbar-mode-panel">
             <TopbarStatusCard label="运行方式" state="ready" value="本地模式" detail="任务、证据和产物都在当前本机服务内管理。" />
@@ -2780,7 +2851,7 @@ function getWorkflowTaskBucket(job = null) {
 function getRouteAPrimaryLabel({ hasInput = false, job = null, noCostApprovalSummary = null, outlineReady = false, state = null } = {}) {
   if (!job?.id) {
     if (!hasInput) return "先上传或填写需求";
-    return outlineReady ? "确认大纲并创建路线 A" : "生成 outline.md";
+    return outlineReady ? "确认大纲并创建路线 A" : "生成大纲";
   }
   const routeA = state?.routeA || {};
   if (routeA.codexPptDecisionReady && routeA.informationAssetMapReady === false) {
@@ -2849,6 +2920,7 @@ function DualRouteDashboard({
   const [taskSearch, setTaskSearch] = useState("");
   const [taskListExpanded, setTaskListExpanded] = useState(false);
   const state = buildDualRouteState(job);
+  const showCreatePanel = createOpen;
   const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
   const sourcePages = state.routeA.sourceLabel;
   const editablePages = state.routeB.editableLabel;
@@ -2993,7 +3065,6 @@ function DualRouteDashboard({
             </button>
           ) : null}
         </div>
-        <button className="dual-cleanup-entry" type="button" onClick={() => setAdvancedOpen((current) => !current)}>高级诊断</button>
       </aside>
 
       <section className="dual-dashboard-main">
@@ -3005,8 +3076,9 @@ function DualRouteDashboard({
           </div>
         </div>
         <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
-        {advancedOpen ? (
-          <section className="dual-advanced-panel">
+        <details className="dual-advanced-panel" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+          <summary>高级诊断</summary>
+          <div className="dual-advanced-body">
             <div className="dual-advanced-head">
               <div>
                 <h2>高级诊断</h2>
@@ -3028,9 +3100,9 @@ function DualRouteDashboard({
               onSelectJob={onSelectJob}
               showArchived={showArchived}
             />
-          </section>
-        ) : null}
-        {createOpen ? (
+          </div>
+        </details>
+        {showCreatePanel ? (
           <section className="dual-create-panel">
             <div className="dual-create-head">
               <div>
@@ -3066,6 +3138,9 @@ function DualRouteDashboard({
                 <span>会先完成路线 A，再做 OCR、重建和人工复核，耗时更长。</span>
               </button>
             </div>
+            <div className="dual-create-checks" aria-label="生成流程">
+              {["生成大纲", "识别页面内容", "可确认大纲", "每页高清图片"].map((item) => <span key={item}>{item}</span>)}
+            </div>
             {selectedDeliveryMode === "editable" ? (
               <div className="dual-route-warning">
                 路线 B 会消耗更多时间：系统会先生成图片版 PPT，确认后再进入可编辑重建。
@@ -3079,23 +3154,26 @@ function DualRouteDashboard({
               </div>
             ) : null}
             <div className="dual-create-actions">
-              <span>{canCreateFromPanel ? (outlineReady ? createModeCopy.ready : "第一步：先生成 outline.md，确认页数、标题和每页要点。") : createModeCopy.pending}</span>
+              <span>{canCreateFromPanel ? (outlineReady ? createModeCopy.ready : "第一步：先生成大纲，确认页数、标题和每页要点。") : createModeCopy.pending}</span>
               <button className="btn primary" type="button" onClick={handleCreateWorkflow} disabled={!canCreateFromPanel}>
-                {busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成 outline.md"}
+                {busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成大纲"}
               </button>
             </div>
           </section>
         ) : null}
-        <section className="dual-first-use">
-          <div>
-            <b>第一次使用建议</b>
-            {FIRST_USE_GUIDE.map((item) => <span key={item}>{item}</span>)}
-          </div>
-          <div>
-            <b>生成结果</b>
-            {CODEX_PPT_OUTPUTS.map((item) => <span key={item}>{item}</span>)}
-          </div>
-        </section>
+        <details className="dual-help-panel">
+          <summary>第一次使用建议 / 生成结果</summary>
+          <section className="dual-first-use">
+            <div>
+              <b>第一次使用建议</b>
+              {FIRST_USE_GUIDE.map((item) => <span key={item}>{item}</span>)}
+            </div>
+            <div>
+              <b>生成结果</b>
+              {CODEX_PPT_OUTPUTS.map((item) => <span key={item}>{item}</span>)}
+            </div>
+          </section>
+        </details>
         <DualRouteLane
           accent="visual"
           id="dual-route-visual"
@@ -3336,7 +3414,7 @@ function buildDualRouteState(job = null) {
           : !sampleApproved
             ? "先看 1 页样张，确认风格、版式节奏和文字质量。"
             : "样张已确认，后续会在后台完成。",
-      // 不需要用户操作的 codex-ppt 步骤保持后台处理；这里只展示确认点和交付状态。
+      // 不需要用户操作的步骤保持后台处理；这里只展示确认点和交付状态。
       steps: [
         { label: "确认方案", detail: codexPptDecisionReady ? "大纲、风格和生图后端已确认" : "需要弹出确认界面", state: codexPptDecisionReady ? "done" : job?.id ? "active" : "pending" },
         { label: "确认样张", detail: sampleApproved ? "样张已确认" : sampleReady ? "样张已生成，等待确认" : "等待生成 1 页样张", state: sampleApproved ? "done" : sampleReady ? "active" : codexPptDecisionReady ? "active" : "pending" },
@@ -3642,7 +3720,7 @@ function ProductReadinessPanel({ connection, doctor, job = null, localImage, sta
       <div className="product-readiness-head">
         <div>
           <b>产品就绪度</b>
-          <span>codex-ppt 到可编辑 PPT 管线的实时状态。</span>
+          <span>图片版到可编辑版的实时状态。</span>
         </div>
         <div>
           <strong>{overallLabel}</strong>
@@ -3915,7 +3993,7 @@ function WorkflowCodexDeckStatus({ artifacts = {}, busy = false, canAssembleImag
     <section className="workflow-codex-deck-status">
       <div className="workflow-codex-deck-head">
         <div>
-          <b>codex-ppt 全量图片阶段</b>
+          <b>整套图片生成</b>
           <span>样张确认后，同步图片页任务，记录生成图片，再组装图片型 PPT。</span>
         </div>
         <div className={`workflow-codex-deck-progress ${failed ? "blocked" : imageDeckPath ? "done" : queueReady ? "active" : "pending"}`}>
@@ -4067,7 +4145,7 @@ function WorkflowEditablePreparePreflightPanel({ bundle = null, busy = false, me
     <section className={`workflow-editable-prepare-preflight ${state}`}>
       <div className="workflow-editable-prepare-head">
         <div>
-          <b>image-to-editable-ppt 准备</b>
+          <b>可编辑重建准备</b>
           <span>{bundle?.summary || "检查图片型 PPT 是否已经可以交给 editppt 重建。"}</span>
         </div>
         <strong>{state === "ready" ? "可准备 editppt" : state === "blocked" ? "准备条件未满足" : "等待预检"}</strong>
@@ -4174,7 +4252,7 @@ function WorkflowUnifiedSkillTaskBoard({ codexSlideTasks = [], codexSummary = nu
   });
   const editable = buildUnifiedTaskLane({
     id: "image-to-editable-ppt",
-    title: "image-to-editable-ppt 可编辑页",
+    title: "可编辑页重建",
     summary: editableSummary,
     tasks: editableTasks,
     empty: editablePromptCount ? "页面提示已存在，请同步可编辑页任务。" : "请先准备 editppt 并生成页面提示。",
@@ -4575,8 +4653,8 @@ function WorkflowCodexSlideTaskPanel({ batchPreflight = null, bundle, confirmIma
     <div className="workflow-worker-console codex-slide-worker-console" id="codex-slide-worker-panel">
       <div className="workflow-worker-console-head">
         <div>
-          <b>Codex 图片页任务</b>
-          <span>codex-ppt 全量图片任务，会在样张/全量确认后派发给真实图片页任务。</span>
+          <b>图片页任务</b>
+          <span>整套图片生成任务，会在样张和整套确认后进入后台处理。</span>
         </div>
         <small>{loading ? "加载中" : `${summary.recorded || 0}/${summary.total || 0} 已记录`}</small>
       </div>
@@ -5008,7 +5086,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
         reason: "frontend reset final visual QA failed editable pages"
       });
       setRecoveryResult({ finalVisualQa: result });
-      setRecoveryMessage(result.recovery?.message || `已重置 ${result.retried || 0} 个视觉 QA 失败页。下一步请启动这些 image-to-editable-ppt 页面 worker。`);
+      setRecoveryMessage(result.recovery?.message || `已重置 ${result.retried || 0} 个视觉 QA 失败页。下一步请启动这些页面重建任务。`);
       await loadDelivery(job.id);
     } catch (retryError) {
       setError(getErrorMessage(retryError));
@@ -5026,8 +5104,8 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
     const isPartial = Boolean(sourcePages && finalPages && finalPages < sourcePages);
     const confirmed = window.confirm(
       isPartial
-        ? `将重新合成当前 ${finalPages}/${sourcePages} 页小样本 PPT。\n\n这一步只使用已经成功记录的可编辑页面，不会调用 gpt-image-2 或页面重建模型，也不会把它标记成完整产品交付。是否继续？`
-        : "将基于当前已记录页面重新合成 editable-final.pptx。\n\n这一步不调用外部 API；最终下载仍然受页数、可编辑性、PowerPoint 打开性和人工复核门禁控制。是否继续？"
+        ? `将重新合成当前 ${finalPages}/${sourcePages} 页小样本 PPT。\n\n这一步只使用已经成功记录的可编辑页面，不消耗外部额度，也不会把它标记成完整产品交付。是否继续？`
+        : "将基于当前已记录页面重新合成最终可编辑 PPT。\n\n这一步不消耗外部额度；最终下载仍然受页数、可编辑性、PowerPoint 打开性和人工复核门禁控制。是否继续？"
     );
     if (!confirmed) return;
     setRecoveryBusy("editable-finalize");
@@ -5041,8 +5119,8 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       });
       const pages = result?.artifacts?.editableFinal?.summary?.page_count || result?.finalPages || finalPages || 0;
       setRecoveryMessage(isPartial
-        ? `已重新合成当前 ${pages || finalPages} 页小样本 final。完整产品交付仍需覆盖全部 ${sourcePages} 页并完成复核。`
-        : `已重新合成 editable-final.pptx，共 ${pages || "当前"} 页。请继续查看交付门禁和人工复核状态。`);
+        ? `已重新合成当前 ${pages || finalPages} 页小样本 PPT。完整产品交付仍需覆盖全部 ${sourcePages} 页并完成复核。`
+        : `已重新合成最终 PPT，共 ${pages || "当前"} 页。请继续查看交付门禁和人工复核状态。`);
       await Promise.allSettled([loadDelivery(job.id), loadDeliveryWorkerRuns(job.id)]);
     } catch (finalizeError) {
       setError(getErrorMessage(finalizeError));
@@ -5080,7 +5158,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       }
       const pageSelection = selectedPageIds.join(",");
       const confirmed = window.confirm(
-        `将记录 ${imageCalls} 次 gpt-image-2 图片 API 额度授权。\n\n页面范围：${pageSelection || "未指定"}\n\n这一步只记录授权账本，不会立刻启动 worker；后续启动 image-to-editable-ppt 页面 worker 会真实调用外部模型/图片服务并可能消耗额度。是否继续？`
+        `将记录 ${imageCalls} 次图片生成额度授权。\n\n页面范围：${pageSelection || "未指定"}\n\n这一步只记录授权账本，不会立刻启动后台任务；后续启动页面重建会真实调用外部模型/图片服务并可能消耗额度。是否继续？`
       );
       if (!confirmed) {
         setRecoveryMessage("已取消页面任务额度授权。");
@@ -5096,7 +5174,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
         confirmedBy: "frontend-delivery-portal",
         reason: `交付中心确认 ${imageCalls} 次可编辑页面重建外部图片 API 用量${pageSelection ? `，页面：${pageSelection}` : ""}。`
       });
-      setRecoveryMessage(`已记录 ${imageCalls} 次页面任务外部图片 API 授权${pageSelection ? `（${pageSelection}）` : ""}。下一步打开页面任务区，启动 image-to-editable-ppt 页面 worker。`);
+      setRecoveryMessage(`已记录 ${imageCalls} 次页面任务外部图片 API 授权${pageSelection ? `（${pageSelection}）` : ""}。下一步打开页面任务区，启动页面重建。`);
       await Promise.allSettled([loadDelivery(job.id), loadDeliveryWorkerRuns(job.id), previewEditableWorkerStart()]);
     } catch (authorizationError) {
       setError(getErrorMessage(authorizationError));
@@ -5110,7 +5188,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
     const workerPageSelection = deliverySelectedWorkerPageSelection || workflowWorkerPageSelection(status);
     const workerPageIds = deliverySelectedWorkerPageIds.length ? deliverySelectedWorkerPageIds : workflowWorkerPageIds(status);
     if (!workerPageSelection) {
-      setRecoveryMessage("页面 worker 预检被阻断：后端没有返回明确的待重建页码，请先刷新交付状态或进入页面任务区选择页面。");
+      setRecoveryMessage("页面重建检查被阻断：后端没有返回明确的待重建页码，请先刷新交付状态或进入页面任务区选择页面。");
       return null;
     }
     setWorkerPreflightBusy(true);
@@ -5129,13 +5207,13 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       const external = result.requiredConfirmations?.externalImageSpend || {};
       const llmRecovery = result.requiredConfirmations?.llmProviderRecovered || {};
       if (result.startReady) {
-        setRecoveryMessage("页面 worker 启动前预检已通过。进入页面任务区后，可以启动后台批处理。");
+        setRecoveryMessage("页面任务启动前检查已通过。进入页面任务区后，可以启动后台批处理。");
       } else if (external.required && !external.confirmed) {
-        setRecoveryMessage("页面 worker 预检完成：还需要先记录外部图片 API 额度授权。");
+        setRecoveryMessage("页面重建检查完成：还需要先记录外部图片生成额度授权。");
       } else if (llmRecovery.required && !llmRecovery.confirmed) {
-        setRecoveryMessage("页面 worker 预检完成：需要先确认 LLM provider 额度/鉴权已恢复。");
+        setRecoveryMessage("页面重建检查完成：需要先确认对话模型额度/鉴权已恢复。");
       } else {
-        setRecoveryMessage("页面 worker 预检完成，请查看下方预检详情。");
+        setRecoveryMessage("页面重建检查完成，请查看下方预检详情。");
       }
       return result;
     } catch (preflightError) {
@@ -5162,7 +5240,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       });
       setWorkerPreflightBundle(result);
       setRecoveryMessage(latestDeliveryFailure?.kind === "image-provider-overloaded"
-        ? "已完成失败页重跑预检：上次失败是图片 API 服务过载。服务恢复后可只重跑该页；成功页不会被覆盖。"
+        ? "已完成失败页重跑预检：上次失败是图片生成服务过载。服务恢复后可只重跑该页；成功页不会被覆盖。"
         : result.startBody?.lowComplexityPageSpec
           ? "已完成失败页重跑预检：检测到最近模型超时，本次会使用低复杂度页面规格模式。"
           : "已完成失败页重跑预检。");
@@ -5197,7 +5275,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       const imageCalls = Number(startBody.externalImageCallBudget || preflight.externalImageCalls || preflight.authorization?.imageCalls || 0);
       const imageCallNote = imageCalls ? `\n\n本次预计最多使用 ${imageCalls} 次 gpt-image-2 图片调用。` : "";
       const overloadNote = latestDeliveryFailure?.kind === "image-provider-overloaded"
-        ? "\n\n上次失败原因是图片 API 服务过载；如果服务商仍然过载，本页会再次失败，但不会污染已成功页面。"
+        ? "\n\n上次失败原因是图片生成服务过载；如果服务商仍然过载，本页会再次失败，但不会污染已成功页面。"
         : "";
       const confirmed = window.confirm(`将只重跑 ${latestDeliveryFailurePageSelection}。成功页不会被覆盖；此操作会调用外部模型/图片服务并可能消耗额度。是否继续？${imageCallNote}${overloadNote}${lowComplexityNote}`);
       if (!confirmed) return;
@@ -5267,11 +5345,11 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       const preflightMatchesStatus = workflowPageSelectionsMatch(preflightPageSelection, workerPageSelection);
       const preflight = workerPreflightBundle?.startReady && preflightMatchesStatus ? workerPreflightBundle : await previewEditableWorkerStart();
       if (!preflight?.ready) {
-        setRecoveryMessage(`页面 worker 预检被阻断：${uiZh((preflight?.blockingIssues || []).join(" ") || "未就绪")}`);
+        setRecoveryMessage(`页面重建检查被阻断：${uiZh((preflight?.blockingIssues || []).join(" ") || "未就绪")}`);
         return;
       }
       if (!preflight.startReady) {
-        setRecoveryMessage(`页面 worker 还不能启动：${uiZh((preflight.warnings || []).join(" ") || "缺少额度或服务商确认")}`);
+        setRecoveryMessage(`页面重建还不能启动：${uiZh((preflight.warnings || []).join(" ") || "缺少额度或服务商确认")}`);
         return;
       }
       const startBody = preflight.startBody || {};
@@ -6093,7 +6171,7 @@ function WorkflowCompliancePanel({ artifactBundle = null, bundle, job, onRefresh
       <div className="workflow-compliance-panel pending" id="workflow-compliance-panel">
         <div className="workflow-compliance-head">
           <div>
-            <b>Skill 路径等待检查</b>
+            <b>流程等待检查</b>
             <span>等待工作流诊断结果。</span>
           </div>
         </div>
@@ -6104,7 +6182,7 @@ function WorkflowCompliancePanel({ artifactBundle = null, bundle, job, onRefresh
     <div className={`workflow-compliance-panel ${bundle.level || "pending"}`} id="workflow-compliance-panel">
       <div className="workflow-compliance-head">
         <div>
-          <b>{uiZh(bundle.title || "Skill 路径状态")}</b>
+          <b>{uiZh(bundle.title || "流程状态")}</b>
           <span>{uiZh(bundle.summary || "正在检查 codex-ppt 和 image-to-editable-ppt 对齐情况。")}</span>
         </div>
         <small>{bundle.updatedAt ? new Date(bundle.updatedAt).toLocaleTimeString() : ""}</small>
@@ -6159,7 +6237,7 @@ function WorkflowCompliancePanel({ artifactBundle = null, bundle, job, onRefresh
             <span>{sampleLooksNonProduct ? "这个样张像验证链路或透传证据。请先重新生成产品级样张，再审批。" : "审批样张前请先检查这张图。全量图片生成只能在样张审批后进行。"}</span>
           </div>
           {sampleHref ? <a href={sampleHref} target="_blank" rel="noreferrer">打开样张</a> : null}
-          {sampleHref && sampleIsImage ? <img src={sampleHref} alt="codex-ppt 视觉样张" /> : null}
+          {sampleHref && sampleIsImage ? <img src={sampleHref} alt="视觉样张" /> : null}
         </div>
       ) : null}
       <SampleApprovalGuard
@@ -7945,10 +8023,10 @@ function SettingsPanel({ config, busy, models, styleReferences = [], onChange, o
       <Field label="对话模型"><select value={config.model || ""} onChange={(event) => update("model", event.target.value)}>{models?.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value={config.model || "gpt-4.1-mini"}>{config.model || "gpt-4.1-mini"}</option>}</select></Field>
       <p className="settings-note">对话模型用于大纲规划和可编辑页面重建。当前如果提示额度不足，需要先充值或切换这里的模型服务商。</p>
       <Field label="页面重建模型"><input value={config.pageSpecModel || ""} onChange={(event) => update("pageSpecModel", event.target.value)} placeholder={config.model || "gpt-4.1-mini"} /></Field>
-      <p className="settings-note">页面重建模型专门用于 image-to-editable-ppt 的图片理解和 JSON 规格生成；它必须支持图片输入、JSON 输出和非空响应。</p>
+      <p className="settings-note">页面重建模型用于理解图片并生成可编辑页面结构；它必须支持图片输入、结构化输出和非空响应。</p>
       <Field label="图片模型"><input value={config.imageModel || ""} onChange={(event) => update("imageModel", event.target.value)} placeholder="gpt-image-2" /></Field>
-      <p className="settings-note">图片模型用于 codex-ppt 样张和全量图片页生成。真正调用外部图片 API 前，工作流会再次要求确认。</p>
-      <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>保存配置</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>测试对话 API</button><button className="btn ghost" type="button" onClick={onTestImage} disabled={busy}>测试图片 API</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>检测模型</button></div>
+      <p className="settings-note">图片模型用于样张和全量图片页生成。真正调用外部图片生成服务前，工作流会再次要求确认。</p>
+      <div className="button-row tight"><button className="btn primary" type="button" onClick={onSave} disabled={busy}>保存配置</button><button className="btn ghost" type="button" onClick={onTest} disabled={busy}>测试对话模型</button><button className="btn ghost" type="button" onClick={onTestImage} disabled={busy}>测试图片生成</button><button className="btn ghost" type="button" onClick={onDetectModels} disabled={busy}>检测模型</button></div>
       <div className="settings-divider" />
       <h2>可编辑重建 OCR</h2>
       <div className="api-state ready"><span className="state-dot active" /><div><b>本地开源 OCR</b><p>{formatOcrProviderDetail(null, { provider: config.ocrProvider, fallbackProvider: config.ocrFallbackProvider }) || "paddleocr-local，本地识别；rapidocr-local 兜底"}</p></div></div>
@@ -8382,7 +8460,7 @@ function getEditableWorkerNextAction({ selectedPrompt = null, selectedTask = nul
   if (selectedTask.status === "recorded") return "结果已记录，可以继续下一页或进入最终合成。";
   if (selectedTask.status === "failed") return "检查错误后重置重试。";
   if (selectedTask.status === "claimed" || selectedTask.status === "running" || selectedTask.status === "dispatched") return "等待页面任务输出，然后记录结果。";
-  if (nextStage === "rebuild_page_locally") return "对当前单页运行 image-to-editable-ppt 受限重建。";
+  if (nextStage === "rebuild_page_locally") return "对当前单页运行可编辑重建。";
   return "确认页面任务已启动，然后领取或派发任务。";
 }
 

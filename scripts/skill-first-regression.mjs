@@ -10,6 +10,7 @@ async function main() {
     checkReadme(files),
     checkProductGoalCurrent(files),
     checkFrontendMainFlow(files),
+    checkFrontendButtonContracts(files),
     checkApiSurface(files),
     checkDeliveryGate(files),
     checkFinalEvidence(files),
@@ -195,6 +196,24 @@ function checkFrontendMainFlow(files) {
   });
 }
 
+function checkFrontendButtonContracts(files) {
+  return named("Frontend buttons keep actionable contracts", () => {
+    mustInclude(files.frontend, "setTaskFilter(id)");
+    mustInclude(files.frontend, "setTaskSearch(event.target.value)");
+    mustInclude(files.frontend, "setCreateOpen(true)");
+    mustInclude(files.frontend, "handleArchiveTask(event, item)");
+    mustInclude(files.frontend, "onConfirm={askUserConfirm}");
+    mustInclude(files.frontend, "onArchiveJob={toggleWorkflowArchive}");
+    mustInclude(files.frontend, "onArchivedVisibilityChange={setWorkflowArchiveVisibility}");
+    mustInclude(files.frontend, "onRouteAAction={runRouteAAction}");
+    mustInclude(files.frontend, "onRouteBAction={runRouteBAction}");
+    mustInclude(files.frontend, "onDeliveryModeChange={setPendingDeliveryMode}");
+    mustInclude(files.frontend, "onOpenSampleReview={openSampleReviewPanel}");
+    mustInclude(files.frontend, "onOpenImageDeckReview={openImageDeckReviewPanel}");
+    mustInclude(files.frontend, "onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode })");
+  });
+}
+
 function checkApiSurface(files) {
   return named("API exposes product workflow controls", () => {
     mustInclude(files.apiClient, "workflowDeliveryStatus");
@@ -213,8 +232,8 @@ function checkApiSurface(files) {
     mustNotInclude(files.frontend, "WorkflowEditableFinalizeAction");
     mustInclude(files.frontend, "recomposeEditableFinal");
     mustInclude(files.frontend, "allowPartialSample: isPartial");
-    mustInclude(files.frontend, "不调用外部 API");
-    mustInclude(files.frontend, "重新合成 editable-final.pptx");
+    mustInclude(files.frontend, "不消耗外部额度");
+    mustInclude(files.frontend, "重新合成最终可编辑 PPT");
     mustInclude(files.workflowArtifacts, "draft-final-pptx");
     mustInclude(files.workflowArtifacts, "assertDraftFinalPptxDownloadable");
     mustInclude(files.frontend, "小样本草稿");
@@ -250,7 +269,11 @@ function checkApiSurface(files) {
     mustNotInclude(files.frontend, "重置失败页");
     mustNotInclude(files.frontend, "4. 重新合成 final");
     mustNotInclude(files.frontend, "不适用：图片 API 过载");
-    mustInclude(files.frontend, "上次失败原因是图片 API 服务过载");
+    mustNotInclude(files.frontend, "Skill 路径等待检查");
+    mustNotInclude(files.frontend, "codex-ppt 到可编辑 PPT");
+    mustNotInclude(files.frontend, "image-to-editable-ppt 可编辑页");
+    mustNotInclude(files.frontend, "对当前单页运行 image-to-editable-ppt");
+    mustInclude(files.frontend, "上次失败原因是图片生成服务过载");
     mustInclude(files.frontend, "externalImageCallBudget");
     mustInclude(files.frontend, "confirmExternalImageSpend: true");
     mustInclude(files.frontend, "本批预计最多使用");
@@ -289,7 +312,7 @@ function checkApiSurface(files) {
     mustInclude(files.frontend, "确认方案");
     mustInclude(files.frontend, "确认样张");
     mustInclude(files.frontend, "后台生成");
-    mustInclude(files.frontend, "不需要用户操作的 codex-ppt 步骤保持后台处理");
+    mustInclude(files.frontend, "不需要用户操作的步骤会在后台处理");
     mustNotInclude(files.frontend, "先按 codex-ppt skill 完成 6 步");
     mustNotInclude(files.frontend, "样张已确认，图片版正在后台生成和组装。");
     mustNotInclude(files.frontend, "后续图片页生成、检查和组装在后台完成");
