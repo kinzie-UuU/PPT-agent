@@ -4,6 +4,7 @@ import { getProviderConfig } from "./providers.js";
 import { testEditableRuntime } from "./workflowEditable.js";
 import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 import { scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
+import { isCodexPptFullDeckApprovalCurrent } from "./workflowApprovals.js";
 
 export async function getWorkflowComplianceStatus(jobId) {
   const job = await readWorkflowJob(jobId);
@@ -349,12 +350,13 @@ function buildCodexPptGateSummary(job = {}, artifacts = {}, counts = {}) {
   const structured = new Set((Array.isArray(artifacts.codexPptApprovals) ? artifacts.codexPptApprovals : [])
     .filter((item) => item?.status === "approved" && item.gate)
     .map((item) => item.gate));
+  if (!isCodexPptFullDeckApprovalCurrent(job)) structured.delete("fullDeck");
   const gateRules = [
     { id: "outline", label: "大纲确认", patterns: [/outline/i, /大纲|提纲/] },
     { id: "style", label: "风格确认", patterns: [/style/i, /风格|视觉/] },
     { id: "backend", label: "后端确认", patterns: [/backend|provider|model/i, /后端|模型/] },
     { id: "sample", label: "样张确认", patterns: [/sample/i, /样张|样稿|样页/] },
-    { id: "fullDeck", label: "全量生成授权", patterns: [/full.?deck|generate/i, /整套|全量|继续生成/] }
+    { id: "fullDeck", label: "2 页测试通过后全量授权", patterns: [/full.?deck|generate/i, /整套|全量|继续生成/] }
   ];
   const gates = gateRules.map((rule) => ({
     id: rule.id,
@@ -407,7 +409,7 @@ function codexGateLabel(id = "") {
     style: "风格确认",
     backend: "后端确认",
     sample: "样张确认",
-    fullDeck: "全量授权"
+    fullDeck: "2 页测试后全量授权"
   };
   return labels[id] || "";
 }

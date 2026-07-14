@@ -1,7 +1,7 @@
 import { renderWorkflowSource } from "./sourceRenderer.js";
 import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, generateWorkflowVisualImages, generateWorkflowVisualSample } from "./workflowVisuals.js";
 import { runWorkflowOcr } from "./workflowOcr.js";
-import { buildWorkflowEditableWorkerPrompts, finalizeWorkflowEditableRun, prepareWorkflowEditableRun, regenerateWorkflowEditableHints } from "./workflowEditable.js";
+import { buildWorkflowEditableWorkerPrompts, finalizeWorkflowEditableRun, isImageDeckReviewApproved, prepareWorkflowEditableRun, regenerateWorkflowEditableHints } from "./workflowEditable.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
 import { assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES } from "./workflowApprovals.js";
 import { syncWorkflowCodexPptSlideTasks } from "./workflowCodexPptWorkerQueue.js";
@@ -91,6 +91,20 @@ export async function runWorkflowNextAction(jobId, options = {}) {
     return makeRunResult(jobId, compliance, "ocr/run", { job });
   }
   if (action === "editable/prepare" || action.includes("editable/prepare")) {
+    if (job.artifacts?.imageDeck && !isImageDeckReviewApproved(job.artifacts || {})) {
+      return { ...base, action: "editable/prepare", blockingIssues: ["Route B requires image deck review approval before editable prepare."] };
+    }
+    if (body.confirmRouteB !== true) {
+      return {
+        ok: true,
+        didRun: false,
+        manualRequired: true,
+        action: "editable/prepare",
+        reason: "Route B requires explicit user confirmation before starting editable PPT rebuild.",
+        compliance,
+        job
+      };
+    }
     const job = await runStage(jobId, "editable_prepared", "正在准备 editppt 运行目录", "可编辑重建准备失败", body, () => prepareWorkflowEditableRun(jobId, { force: true, maxConcurrentPages: 6, ...body }));
     return makeRunResult(jobId, compliance, "editable/prepare", { job });
   }
@@ -262,6 +276,9 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
     return { ...base, action: "ocr/run", startReady: true, reason: "可以运行 OCR/文字提示提取。" };
   }
   if (action === "editable/prepare" || action.includes("editable/prepare")) {
+    if (job.artifacts?.imageDeck && !isImageDeckReviewApproved(job.artifacts || {})) {
+      return { ...base, action: "editable/prepare", blockingIssues: ["Route B requires image deck review approval before editable prepare."] };
+    }
     return job.artifacts?.imageDeck
       ? { ...base, action: "editable/prepare", startReady: true, reason: "可以准备 image-to-editable-ppt/editppt。" }
       : { ...base, action: "editable/prepare", blockingIssues: ["准备 editppt 前必须先生成图片型 PPT。"] };

@@ -5,7 +5,7 @@ import crypto from "crypto";
 import zlib from "zlib";
 import { rootDir } from "./store.js";
 import { editImageWithProvider, generateImageWithProvider, getProviderConfig } from "./providers.js";
-import { CODEX_PPT_VISUAL_DECK_GATES } from "./workflowApprovals.js";
+import { CODEX_PPT_VISUAL_DECK_GATES, isCodexPptFullDeckApprovalCurrent } from "./workflowApprovals.js";
 import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, getRenderedPages } from "./workflowVisuals.js";
 import { buildWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun } from "./workflowEditable.js";
 import { syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
@@ -438,6 +438,7 @@ function summarizeApprovals(job = {}) {
   const approved = new Set((Array.isArray(job.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
     .filter((item) => item?.status === "approved" && item.gate)
     .map((item) => item.gate));
+  if (!isCodexPptFullDeckApprovalCurrent(job)) approved.delete("fullDeck");
   const missing = CODEX_PPT_VISUAL_DECK_GATES.filter((gate) => !approved.has(gate));
   return {
     required: CODEX_PPT_VISUAL_DECK_GATES,

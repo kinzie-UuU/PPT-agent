@@ -171,7 +171,7 @@ function isTransientSpecProviderError(error = {}) {
 
 function isRetryableSpecValidationError(error = {}) {
   const text = `${error?.message || ""}\n${error?.stderr || ""}`;
-  return /forbidden fallback wording found in visual inventory or provenance/i.test(text);
+  return /forbidden fallback wording found in visual inventory or provenance|visual_inventory lists visible non-text objects but shapes\/images are empty|background_strategy claims preserved or matched source visuals but the rebuild has too few meaningful shapes\/images|uses a placeholder path instead of a real page asset|background_strategy\.(?:mode|source_consistency_contract|comparison_note) is required|quality_checks\.[\w_]+ must be true/i.test(text);
 }
 
 function isAssetMissingSpecError(error = {}) {

@@ -3,7 +3,7 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile, spawn } from "child_process";
+import { execFile, spawn, spawnSync } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 
@@ -12,9 +12,48 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
 const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt");
 const DEFAULT_EDITPPT_PYTHON = path.join(PROJECT_ROOT, "outputs", "skill-duo-test", "ocr-venv", "Scripts", "python.exe");
-const EDITPPT_PYTHON = process.env.EDITPPT_PYTHON_PATH || process.env.OCR_PYTHON_PATH || (fsSync.existsSync(DEFAULT_EDITPPT_PYTHON) ? DEFAULT_EDITPPT_PYTHON : "python");
+const EDITPPT_PYTHON = chooseEditpptPython();
 const CLI_PATH = path.join(SKILL_ROOT, "cli");
 
+function chooseEditpptPython() {
+  const bundledUserPython = path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", "AppData", "Local"), "Programs", "Python", "Python313", "python.exe");
+  const candidates = [
+    process.env.EDITPPT_IMAGE_PYTHON_PATH,
+    fsSync.existsSync(bundledUserPython) ? bundledUserPython : "",
+    process.env.EDITPPT_PYTHON_PATH,
+    process.env.OCR_PYTHON_PATH,
+    fsSync.existsSync(DEFAULT_EDITPPT_PYTHON) ? DEFAULT_EDITPPT_PYTHON : "",
+    "python"
+  ].filter(Boolean);
+  const requireOpenAi = Boolean(process.env.OPENAI_API_KEY || process.env.PROVIDER_API_KEY);
+  for (const candidate of candidates) {
+    if (canImportEditpptRuntime(candidate, { requireOpenAi })) return candidate;
+  }
+  for (const candidate of candidates) {
+    if (canImportEditpptRuntime(candidate, { requireOpenAi: false })) return candidate;
+  }
+  return candidates[0] || "python";
+}
+
+function canImportEditpptRuntime(candidate, { requireOpenAi = false } = {}) {
+  const code = requireOpenAi ? "import editppt.cli; import openai" : "import editppt.cli";
+  try {
+    const result = spawnSync(candidate, ["-c", code], {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000,
+      env: {
+        ...process.env,
+        PYTHONPATH: [CLI_PATH, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        PYTHONIOENCODING: "utf-8"
+      }
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -532,6 +571,11 @@ function normalizeEditpptApiEnv(env = {}) {
     next.OPENAI_BASE_URL = normalizeOpenAiCompatibleBaseUrl(next.OPENAI_BASE_URL);
   } else if (next.PROVIDER_BASE_URL) {
     next.OPENAI_BASE_URL = normalizeOpenAiCompatibleBaseUrl(next.PROVIDER_BASE_URL);
+  }
+  if (next.OPENAI_API_KEY && next.OPENAI_BASE_URL && !next.PPT_TOOL_ALLOW_CODEX_OAUTH_IMAGE_BACKEND) {
+    // Keep Route B visual assets on the configured API backend; the desktop OAuth
+    // image backend can reject batch image_generation tool calls in this runtime.
+    next.CODEX_AUTH_FILE = path.join(PROJECT_ROOT, ".editppt-api-backend-only", "codex-auth.disabled.json");
   }
   return next;
 }

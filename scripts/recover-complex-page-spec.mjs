@@ -9,11 +9,12 @@ const FORBIDDEN_WORDS = [
   [/\bapproximated\b/gi, "reconstructed"]
 ];
 
-const FOREGROUND_RE = /foreground|product|photo|image|logo|brand|package|packaging|screenshot|illustration|artwork|asset|图|包装|产品|照片|标识|素材/i;
+const FOREGROUND_RE = /foreground|product|photo|image|logo|brand|package|packaging|screenshot|illustration|artwork|asset|\u56fe|\u5305\u88c5|\u4ea7\u54c1|\u7167\u7247|\u6807\u8bc6|\u7d20\u6750/i;
 const STRUCTURAL_RE = /native shape|native-shape|shape|line|table|text|background grid|structural/i;
+const STRUCTURAL_FOREGROUND_RE = /logo|photo|brand|package|packaging|product|asset|\u5305\u88c5|\u4ea7\u54c1|\u6807\u8bc6/i;
 const ASSET_NOTE = "asset-sheet-separated source-faithful separated asset";
 const RECOVERY_BLOCKER_RE = /--no-image|\bno-image\b|text-only-ocr-spec|\bfallback\b|requires visual pass before production|requires product visual review|failed pass|requires-asset-separation|intentionally fails pass|omitted unavailable generated image assets/i;
-const OMITTED_ASSETS_RE = /Omitted unavailable generated image assets:\s*([a-zA-Z0-9_,\s-]+)\./gi;
+const OMITTED_ASSETS_RE = /(?:Omitted unavailable generated image assets|no-image mode for unavailable generated assets):\s*([a-zA-Z0-9_,\s-]+)\.?/gi;
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -305,7 +306,7 @@ function bindForegroundInventory(spec) {
     if (!shouldBindForegroundInventoryItem(item, text)) {
       return item;
     }
-    if (!FOREGROUND_RE.test(text) || (STRUCTURAL_RE.test(text) && !/logo|photo|brand|package|packaging|product|asset|包装|产品|标识/i.test(text))) {
+    if (!FOREGROUND_RE.test(text) || (STRUCTURAL_RE.test(text) && !STRUCTURAL_FOREGROUND_RE.test(text))) {
       return item;
     }
     const box = coerceBox(item.box_px || item.bounds_px || item.box);

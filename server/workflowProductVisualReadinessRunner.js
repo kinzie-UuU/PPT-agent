@@ -8,9 +8,9 @@ import { getLatestV1AcceptanceReport, v1AcceptanceRootDir, writeV1AcceptanceRepo
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { getWorkflowNextActionPreflight } from "./workflowNextAction.js";
 import { authorizeExternalImageSpend } from "./workflowAuthorizations.js";
-import { approveCodexPptGate, preflightCodexPptGate } from "./workflowApprovals.js";
+import { approveCodexPptGate, getCodexPptFullDeckTestEvidence, isCodexPptFullDeckApprovalCurrent, preflightCodexPptGate } from "./workflowApprovals.js";
 import { invalidateWorkflowEditableRebuildEvidence } from "./workflowEditable.js";
-import { appendEvent, artifactRecord, assembleWorkflowImageDeck, buildCodexPptStyleLock, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages, parsePageSelection } from "./workflowVisuals.js";
+import { appendEvent, artifactRecord, buildCodexPptStyleLock, buildVisualPromptsPayload, generateWorkflowVisualImages, generateWorkflowVisualSample, getRenderedPages, parsePageSelection } from "./workflowVisuals.js";
 
 const execFileAsync = promisify(execFile);
 const latestProductVisualReadinessPath = path.join(v1AcceptanceRootDir, "latest-product-visual-readiness.json");
@@ -304,16 +304,24 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
   const renderedPageCount = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : pageCount;
   const requestedPages = cleanString(options.pages || options.pageNumbers || "");
   const requestedMaxPages = clampInteger(options.maxPages || renderedPageCount || pageCount, 1, 50, pageCount);
-  const selectedPages = requestedPages
+  const requestedSelectedPages = requestedPages
     ? parsePageSelection(requestedPages, renderedPageCount || pageCount).slice(0, requestedMaxPages)
     : parsePageSelection("", renderedPageCount || pageCount).slice(0, requestedMaxPages);
+  const isTestRun = requestedSelectedPages.length > 0 && requestedSelectedPages.length <= 2;
+  const fullDeckTestEvidence = getCodexPptFullDeckTestEvidence(job);
+  const preservedTestPages = isTestRun
+    ? []
+    : (fullDeckTestEvidence?.pages || []).map((page) => Number(page.pageNumber || 0)).filter(Boolean);
+  const selectedPages = preservedTestPages.length
+    ? requestedSelectedPages.filter((pageNumber) => !preservedTestPages.includes(Number(pageNumber)))
+    : requestedSelectedPages;
   const calls = selectedPages.length;
   const provider = latest?.result?.provider || {};
   const approved = getApprovedGateSet(job);
   const sample = job.artifacts?.visualSample || null;
   const sampleProduct = isSourceReferencedVisualSample(sample);
   const sampleApproved = approved.has("sample");
-  const fullDeckApproved = approved.has("fullDeck");
+  const fullDeckApproved = isCodexPptFullDeckApprovalCurrent(job);
   const styleLock = buildCodexPptStyleLock(job, {
     styleBrief: PRODUCT_VISUAL_STYLE_BRIEF
   });
@@ -324,7 +332,7 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     ...(sample?.path && !sampleProduct ? ["当前样张仍是 dry-run/passthrough、缺少 sha256，或没有源页面图片参考证据，不能作为产品级样张。"] : []),
     ...(!styleLock.locked ? ["风格锁尚未建立：全量生成必须携带已确认样张作为统一风格参考。"] : []),
     ...(!sampleApproved ? ["样张关卡尚未确认。"] : []),
-    ...(!fullDeckApproved ? ["全量生成关卡尚未授权。"] : []),
+    ...(!isTestRun && !fullDeckApproved ? ["2 页测试尚未逐页复核通过，不能启动全量生成。"] : []),
     ...(!renderedPageCount ? ["缺少可生成的源页面。"] : []),
     ...(requestedPages && !selectedPages.length ? [`指定页码无效或超出范围：${requestedPages}。有效范围是 1-${renderedPageCount || pageCount}。`] : [])
   ];
@@ -336,15 +344,16 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     { id: "product-sample", ok: sampleProduct, label: "真实样张", detail: sample?.path ? path.relative(rootDir, sample.path) : "缺失" },
     { id: "style-lock", ok: styleLock.locked, label: "风格锁", detail: styleLock.locked ? path.relative(rootDir, styleLock.approvedSample.path) : "未建立" },
     { id: "sample-approval", ok: sampleApproved, label: "样张确认", detail: sampleApproved ? "已确认" : "待确认" },
-    { id: "full-deck-approval", ok: fullDeckApproved, label: "全量授权", detail: fullDeckApproved ? "已授权" : "待授权" },
+    { id: "two-page-test", ok: isTestRun || fullDeckApproved, label: "2 页测试", detail: isTestRun ? "本次为测试运行" : fullDeckApproved ? "已逐页复核通过" : "待运行并复核" },
+    { id: "full-deck-approval", ok: isTestRun || fullDeckApproved, label: "全量授权", detail: isTestRun ? "测试运行无需全量授权" : fullDeckApproved ? "已授权" : "待授权" },
     { id: "source-pages", ok: Boolean(renderedPageCount), label: "目标页数", detail: `${renderedPageCount || calls} 页` },
     { id: "page-selection", ok: Boolean(selectedPages.length), label: "生成页码", detail: selectedPages.length ? selectedPages.join(",") : requestedPages || `1-${requestedMaxPages}` },
     { id: "external-spend-confirmation", ok: true, label: "额度确认门槛", detail: `${calls} 次图片调用` }
   ];
   const readyIfConfirmed = blockingIssues.length === 0;
   const executionSnapshot = buildExecutionSnapshot({
-    phase: "full-deck",
-    label: "全量 codex-ppt 图片型 PPT",
+    phase: isTestRun ? "two-page-test" : "full-deck",
+    label: isTestRun ? "2 页 codex-ppt 风格测试" : "全量 codex-ppt 图片型 PPT",
     latest,
     job,
     provider,
@@ -358,6 +367,9 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     ...base,
     externalImageCalls: calls,
     pages: selectedPages,
+    requestedSelectedPages,
+    mode: isTestRun ? "test" : "full",
+    preservedTestPages,
     requestedPages,
     ready: readyIfConfirmed,
     readyIfConfirmed,
@@ -388,11 +400,15 @@ export async function getProductVisualFullDeckPreflight(options = {}) {
     checks,
     blockingIssues,
     executionSnapshot,
-    warnings: readyIfConfirmed ? ["全量生成会调用外部图片 API；必须由用户再次明确确认。"] : [],
+    warnings: readyIfConfirmed
+      ? [isTestRun
+        ? "2 页测试会调用外部图片 API；生成后必须逐页标记通过，才能确认全量生成。"
+        : `全量生成会保留已通过的 ${preservedTestPages.length} 页测试图，并调用外部图片 API 生成剩余页面；必须由用户再次明确确认。`]
+      : [],
     summary: readyIfConfirmed
-      ? `已可在明确确认外部图片 API 额度后生成 ${calls} 页产品级 codex-ppt 视觉图片。`
-      : "全量产品级视觉生成条件未满足，请先处理阻断项。",
-    instruction: "本接口只做全量生成预检，不生成图片，不写入授权。"
+      ? `已可在明确确认外部图片 API 额度后生成 ${calls} 页产品级 codex-ppt ${isTestRun ? "测试" : "全量"}视觉图片。`
+      : `${isTestRun ? "2 页测试" : "全量产品级视觉生成"}条件未满足，请先处理阻断项。`,
+    instruction: `本接口只做${isTestRun ? "2 页测试" : "全量生成"}预检，不生成图片，不写入授权。`
   };
 }
 
@@ -914,7 +930,7 @@ export async function runProductVisualFullDeck(options = {}) {
     throw error;
   }
   if (!isConfirmed(options.confirmExternalImageSpend) || !isConfirmed(options.confirmProductVisualFullDeck)) {
-    const error = new Error(`生成全量 codex-ppt 图片型 PPT 前必须明确确认 ${preflight.externalImageCalls || 0} 次外部图片 API 调用。`);
+    const error = new Error(`生成${preflight.mode === "test" ? " 2 页测试图" : "全量 codex-ppt 图片页"}前必须明确确认 ${preflight.externalImageCalls || 0} 次外部图片 API 调用。`);
     error.code = "PRODUCT_VISUAL_FULL_DECK_CONFIRMATION_REQUIRED";
     error.status = 409;
     error.requiredConfirmation = "externalImageSpend";
@@ -925,31 +941,31 @@ export async function runProductVisualFullDeck(options = {}) {
 
   const jobId = preflight.jobId;
   const imageCalls = clampInteger(preflight.externalImageCalls, 1, 50, 15);
+  const isTestRun = preflight.mode === "test";
   const authorization = await authorizeExternalImageSpend(jobId, {
-    scope: "full-deck",
+    scope: isTestRun ? "two-page-test" : "full-deck",
     imageCalls,
     pages: preflight.pages || [],
     pageSelection: Array.isArray(preflight.pages) && preflight.pages.length ? preflight.pages.join(",") : cleanString(options.pages || `1-${imageCalls}`),
     targetPages: Array.isArray(preflight.pages) && preflight.pages.length ? preflight.pages.length : imageCalls,
-    mode: cleanString(options.pages ? "custom" : imageCalls <= 2 ? "test" : "full"),
+    mode: isTestRun ? "test" : "full",
     confirmedBy: cleanString(options.confirmedBy || "frontend-operator"),
-    reason: cleanString(options.reason || "产品级 v1 全量视觉生成授权")
+    reason: cleanString(options.reason || (isTestRun ? "产品级 v1 2 页视觉测试授权" : "产品级 v1 全量视觉生成授权"))
   });
   const visualJob = await generateWorkflowVisualImages(jobId, {
     maxPages: imageCalls,
-    pages: cleanString(options.pages || `1-${imageCalls}`),
+    pages: Array.isArray(preflight.pages) && preflight.pages.length
+      ? preflight.pages.join(",")
+      : cleanString(options.pages || `1-${imageCalls}`),
     confirmExternalImageSpend: true,
     requestedBy: "product-visual-full-deck-run",
-    visualProfile: "product-v1-real-full-deck",
-    note: "product-v1-real-full-deck",
+    visualProfile: isTestRun ? "product-v1-two-page-test" : "product-v1-real-full-deck",
+    note: isTestRun ? "product-v1-two-page-test" : "product-v1-real-full-deck",
     styleBrief: cleanString(options.styleBrief || PRODUCT_VISUAL_STYLE_BRIEF)
-  });
-  const imageDeckJob = await assembleWorkflowImageDeck(jobId, {
-    outName: "product-visual-image-deck.pptx"
   });
   const finalJob = await invalidateWorkflowEditableRebuildEvidence(jobId, {
     reason: "product visual images changed; rerun image-to-editable-ppt before final delivery"
-  }).catch(() => imageDeckJob || visualJob);
+  }).catch(() => visualJob);
   const v1ReportSync = await syncProductVisualDeckToV1AcceptanceReport({
     job: finalJob,
     preflight,
@@ -969,15 +985,18 @@ export async function runProductVisualFullDeck(options = {}) {
     jobId,
     authorization: authorization.authorization,
     provider: preflight.provider,
-    visualImages: finalJob.artifacts?.visualImages || imageDeckJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || [],
-    visualQuality: finalJob.artifacts?.visualQuality || imageDeckJob.artifacts?.visualQuality || visualJob.artifacts?.visualQuality || null,
-    imageDeck: finalJob.artifacts?.imageDeck || imageDeckJob.artifacts?.imageDeck || null,
-    imageDeckLink: makeWorkflowArtifactLink(jobId, "image-deck", "", { download: true }),
+    visualImages: finalJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || [],
+    visualQuality: finalJob.artifacts?.visualQuality || visualJob.artifacts?.visualQuality || null,
+    imageDeck: null,
+    imageDeckLink: null,
+    requiresImageDeckReview: true,
     visualQualityLink: makeWorkflowArtifactLink(jobId, "visual-quality"),
     visualImageLinks: buildVisualImageLinks(jobId, finalJob.artifacts?.visualImages || visualJob.artifacts?.visualImages || []),
     v1ReportSync,
     runbook: preflight.runbook,
-    summary: "产品级 codex-ppt 全量视觉图片和图片型 PPT 已生成；旧可编辑重建证据已失效，请重新运行 image-to-editable-ppt。",
+    summary: isTestRun
+      ? "2 页风格测试图已生成。请逐页标记通过并确认测试结果；通过后才会开放剩余页面生成。"
+      : "剩余全量视觉图片已生成。请逐页复核全部图片页，通过后再组装图片型 PPT。",
     job: {
       id: finalJob.id,
       status: finalJob.status || "",
@@ -1676,6 +1695,9 @@ function localizeSampleApprovalIssue(value = "") {
 function localizeFullDeckApprovalIssue(value = "") {
   const text = cleanString(value);
   if (!text) return "";
+  if (/CODEX_PPT_TWO_PAGE_TEST_REQUIRED|exactly two current style-locked test pages/i.test(text)) {
+    return "请先用已确认样张生成 2 页风格测试图，并在图片逐页复核中把两页都标记为“通过”。";
+  }
   if (/sample/i.test(text) || /CODEX_PPT_SAMPLE_REQUIRED/.test(text)) {
     return "请先生成并确认 1 页真实 codex-ppt 视觉样张，再确认全量生成关卡。";
   }
@@ -1683,7 +1705,7 @@ function localizeFullDeckApprovalIssue(value = "") {
     return "请先完成大纲、风格、后端和样张确认关卡，再确认全量生成。";
   }
   if (/full.?deck/i.test(text)) {
-    return "全量生成关卡尚未确认。";
+    return "2 页测试尚未确认通过，全量生成仍被锁定。";
   }
   return localizeSampleApprovalIssue(text) || text;
 }

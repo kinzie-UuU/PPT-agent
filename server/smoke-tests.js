@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { getDesignSystem, getTemplatePack, getTemplatePackPrompt } from "./designSystem.js";
 import { buildMaterialBrief } from "./materialBrief.js";
 import { routeDeck } from "./deckRouter.js";
@@ -13,8 +14,10 @@ import { buildAssetManifest, validateAssetManifest } from "./assetManifest.js";
 import { ensureVisualProjectForJob, generateVisualProjectSlides, writeEditableSceneGraphArtifacts } from "./visualProject.js";
 import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
 import { cutoutImage } from "./matting.js";
-import { findLegacyStyleEvidence } from "./workflowApprovals.js";
+import { findLegacyStyleEvidence, isCodexPptFullDeckApprovalCurrent } from "./workflowApprovals.js";
 import { cleanPublicError } from "./workflowWorkerBatchRunner.js";
+import { assertEditableDispatchAllowed, isImageDeckReviewApproved } from "./workflowEditable.js";
+import { isFinalPptxProductReady } from "./workflowArtifacts.js";
 import { deriveWorkflowDeliveryStatus } from "../shared/workflowDeliveryStatus.js";
 
 const EASTERN = "\u4e1c\u65b9\u81ea\u7136\u98ce";
@@ -30,6 +33,40 @@ assert.equal(getTemplatePack(EASTERN).slug, "skill-first-no-legacy-template");
 assert.equal(getTemplatePackPrompt(TECH), "");
 assert.equal(findLegacyStyleEvidence({ styleBrief: "轻盈渐变风" }), "轻盈渐变风");
 assert.equal(findLegacyStyleEvidence({ styleBrief: "Premium clean business presentation" }), "");
+const currentTwoPageApprovalJob = {
+  artifacts: {
+    visualSample: { sha256: "sample-v1" },
+    visualImages: [
+      { pageId: "page_001", pageNumber: 1, path: "page_001.png", sha256: "page-1-v1" },
+      { pageId: "page_002", pageNumber: 2, path: "page_002.png", sha256: "page-2-v1" }
+    ],
+    codexPptApprovals: [{
+      gate: "fullDeck",
+      status: "approved",
+      testDeck: {
+        version: 1,
+        sampleSha256: "sample-v1",
+        pages: [
+          { pageId: "page_001", pageNumber: 1, sha256: "page-1-v1" },
+          { pageId: "page_002", pageNumber: 2, sha256: "page-2-v1" }
+        ]
+      }
+    }]
+  }
+};
+assert.equal(isCodexPptFullDeckApprovalCurrent(currentTwoPageApprovalJob), true);
+assert.equal(isCodexPptFullDeckApprovalCurrent({
+  artifacts: { ...currentTwoPageApprovalJob.artifacts, visualSample: { sha256: "sample-v2" } }
+}), false);
+assert.equal(isCodexPptFullDeckApprovalCurrent({
+  artifacts: {
+    ...currentTwoPageApprovalJob.artifacts,
+    visualImages: [
+      currentTwoPageApprovalJob.artifacts.visualImages[0],
+      { ...currentTwoPageApprovalJob.artifacts.visualImages[1], sha256: "page-2-v2" }
+    ]
+  }
+}), false);
 
 const derivedWorkerStatus = deriveWorkflowDeliveryStatus({
   sourceMeta: { pageCount: 4 },
@@ -51,7 +88,55 @@ assert.deepEqual(derivedWorkerStatus.nextStep.pages, ["page_002", "page_004"]);
 assert.equal(derivedWorkerStatus.nextStep.pageSelection, "page_002,page_004");
 assert.equal(derivedWorkerStatus.nextStep.externalImageCalls, 16);
 assert.equal(derivedWorkerStatus.nextStep.authorization.required, true);
+
+const approvedImageDeckArtifacts = {
+  visualImages: [
+    { pageId: "page_001", path: "visual/page_001.png", sha256: "sha1" },
+    { pageId: "page_002", path: "visual/page_002.png", sha256: "sha2" }
+  ],
+  imageDeckReview: {
+    status: "approved",
+    summary: { totalPages: 2, passCount: 2, allPagesReviewed: true, allMarksCurrent: true, readyForApproval: true },
+    marks: {
+      page_001: { status: "pass", visualImagePath: "visual/page_001.png", visualImageSha256: "sha1" },
+      page_002: { status: "pass", visualImagePath: "visual/page_002.png", visualImageSha256: "sha2" }
+    }
+  }
+};
+assert.equal(isImageDeckReviewApproved(approvedImageDeckArtifacts), true);
+assert.equal(isImageDeckReviewApproved({
+  ...approvedImageDeckArtifacts,
+  imageDeckReview: {
+    ...approvedImageDeckArtifacts.imageDeckReview,
+    summary: { ...approvedImageDeckArtifacts.imageDeckReview.summary, readyForApproval: false }
+  }
+}), false);
+assert.equal(isImageDeckReviewApproved({
+  ...approvedImageDeckArtifacts,
+  imageDeckReview: {
+    ...approvedImageDeckArtifacts.imageDeckReview,
+    marks: {
+      ...approvedImageDeckArtifacts.imageDeckReview.marks,
+      page_002: { status: "pass", visualImagePath: "visual/page_002.png", visualImageSha256: "old" }
+    }
+  }
+}), false);
 assert.equal(derivedWorkerStatus.nextStep.authorization.persisted, false);
+
+assert.equal(isFinalPptxProductReady({ productReady: true }), true);
+assert.equal(isFinalPptxProductReady({ downloadable: true }), false);
+assert.equal(isFinalPptxProductReady({ productReady: false, downloadable: true }), false);
+
+assert.doesNotThrow(() => assertEditableDispatchAllowed({ stage: "dispatch_pages", pages: ["page_001"] }, "page_001"));
+assert.doesNotThrow(() => assertEditableDispatchAllowed({ stage: "rebuild_page_locally", pageId: "page_001" }, "page_001", { localMode: true }));
+assert.throws(
+  () => assertEditableDispatchAllowed({ stage: "record_pages", pages: ["page_001"] }, "page_001"),
+  /expected next stage dispatch_pages/
+);
+assert.throws(
+  () => assertEditableDispatchAllowed({ stage: "dispatch_pages", pages: ["page_002"] }, "page_001"),
+  /not in the current editppt dispatch set/
+);
 
 const brief = buildMaterialBrief([
   {
@@ -864,7 +949,8 @@ assert.ok(productVisualReadinessRunnerSource.includes("getProductVisualFullDeckP
 assert.ok(productVisualReadinessRunnerSource.includes("runProductVisualSample"));
 assert.ok(productVisualReadinessRunnerSource.includes("runProductVisualFullDeck"));
 assert.ok(productVisualReadinessRunnerSource.includes("generateWorkflowVisualImages"));
-assert.ok(productVisualReadinessRunnerSource.includes("assembleWorkflowImageDeck"));
+assert.ok(productVisualReadinessRunnerSource.includes("requiresImageDeckReview: true"));
+assert.ok(!productVisualReadinessRunnerSource.includes("await assembleWorkflowImageDeck"));
 assert.ok(productVisualReadinessRunnerSource.includes("syncProductVisualDeckToV1AcceptanceReport"));
 assert.ok(productVisualReadinessRunnerSource.includes("writeV1AcceptanceReport"));
 assert.ok(productVisualReadinessRunnerSource.includes("latestUpdated: writeResult.latestUpdated"));
@@ -884,7 +970,7 @@ assert.ok(productVisualReadinessRunnerSource.includes("sampleLink: makeWorkflowA
 assert.ok(productVisualReadinessRunnerSource.includes("buildSourcePageLinkForSample"));
 assert.ok(productVisualReadinessRunnerSource.includes("sourcePageLink"));
 assert.ok(productVisualReadinessRunnerSource.includes('"rendered-page"'));
-assert.ok(productVisualReadinessRunnerSource.includes("imageDeckLink: makeWorkflowArtifactLink"));
+assert.ok(productVisualReadinessRunnerSource.includes("imageDeckLink: null"));
 assert.ok(productVisualReadinessRunnerSource.includes("visualQualityLink: makeWorkflowArtifactLink"));
 assert.ok(productVisualReadinessRunnerSource.includes("visualQuality: finalJob.artifacts?.visualQuality"));
 assert.ok(productVisualReadinessRunnerSource.includes("visualImageLinks: buildVisualImageLinks"));
@@ -1036,6 +1122,8 @@ assert.ok(frontendSource.includes("setTaskFilter(id)"));
 assert.ok(frontendSource.includes("setTaskSearch(event.target.value)"));
 assert.ok(frontendSource.includes("setCreateOpen(true)"));
 assert.ok(frontendSource.includes("handleArchiveTask(event, item)"));
+assert.ok(frontendSource.includes("const routeBStarted = Boolean("));
+assert.ok(frontendSource.includes('if (routeBStarted && state.routeB.status !== "ready") return "running";'));
 assert.ok(frontendSource.includes("onConfirm={askUserConfirm}"));
 assert.ok(frontendSource.includes("onArchiveJob={toggleWorkflowArchive}"));
 assert.ok(frontendSource.includes("onArchivedVisibilityChange={setWorkflowArchiveVisibility}"));
@@ -1065,6 +1153,20 @@ assert.ok(frontendSource.includes("reviewItems"));
 assert.ok(frontendSource.includes("这一步只确认大纲、视觉方向和图片生成方式"));
 assert.ok(frontendSource.includes("生成后先看原始页和样张对比"));
 assert.ok(frontendSource.includes("整套生成后仍会逐页复核"));
+assert.ok(frontendSource.includes("确认开始路线 B"));
+assert.ok(frontendSource.includes("confirmRouteBStartIfNeeded"));
+assert.ok(frontendSource.includes("needsRouteBConfirmation"));
+assert.ok(frontendSource.includes("workflowNextActionPreflight(workflowJob.id, body)"));
+assert.ok(frontendSource.includes("confirmRouteB: true"));
+assert.ok(frontendSource.includes("job?.artifacts?.editableWorkerTasks?.tasks"));
+assert.ok(frontendSource.includes("job?.artifacts?.editableWorkerTasks"));
+assert.ok(frontendSource.includes("可编辑版确认"));
+assert.ok(frontendSource.includes("后台准备 editppt、文字识别和页面任务"));
+assert.ok(frontendSource.includes("不需要用户操作的步骤会在后台处理；需要确认时才会弹窗。"));
+assert.ok(frontendSource.includes("正式可编辑 PPT 需要全部页面复核通过后才能下载。"));
+assert.ok(frontendSource.indexOf("if (finalGate.productReady)") < frontendSource.indexOf("if (finalGate.downloadable)"));
+assert.ok(!frontendSource.includes("finalGate.productReady || finalGate.downloadable"));
+assert.ok(!frontendSource.includes("deliveryGate?.downloadable === true || deliveryGate?.productReady === true"));
 const routeAActionSource = frontendSource.slice(frontendSource.indexOf("async function runRouteAAction"), frontendSource.indexOf("async function runRouteBAction"));
 const routeBActionSource = frontendSource.slice(frontendSource.indexOf("async function runRouteBAction"), frontendSource.indexOf("async function planOutline", frontendSource.indexOf("async function runRouteBAction")));
 assert.ok(routeAActionSource.includes("runRouteAAction"), "runRouteAAction should exist");
@@ -1123,6 +1225,11 @@ assert.ok(workflowEditableSource.includes("getWorkflowEditablePreparePreflight")
 assert.ok(workflowEditableSource.includes("getEditableTextHintEvidence"));
 assert.ok(workflowEditableSource.includes("OCR/editppt text hints are not ready"));
 assert.ok(indexSource.includes("/api/workflow-jobs/:id/editable/prepare/preflight"));
+assert.ok(workflowEditableSource.includes("assertEditableDispatchAllowed"));
+assert.ok(workflowEditableSource.includes("EDITABLE_DISPATCH_STAGE_MISMATCH"));
+assert.ok(workflowEditableSource.includes("EDITABLE_DISPATCH_PAGE_NOT_SELECTED"));
+assert.ok(workflowEditableSource.includes("rebuild_page_locally"));
+
 assert.ok(apiClientSource.includes("workflowEditablePreparePreflight"));
 assert.ok(frontendSource.includes("WorkflowEditablePreparePreflightPanel"));
 assert.ok(frontendSource.includes("workflow-editable-prepare-preflight"));
@@ -1183,6 +1290,17 @@ assert.ok(frontendSource.includes("这一步只记录授权账本，不会立刻
 assert.ok(frontendSource.includes("后续启动页面重建会真实调用外部模型/图片服务"));
 assert.ok(frontendSource.includes("已取消页面任务额度授权"));
 const workflowNextActionSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowNextAction.js"), "utf8");
+const pageRebuildAssemblerSource = fs.readFileSync(path.join(process.cwd(), "scripts", "page-rebuild-assembler.mjs"), "utf8");
+const modelPageSpecWorkerSource = fs.readFileSync(path.join(process.cwd(), "scripts", "model-page-spec-worker.mjs"), "utf8");
+assert.ok(!modelPageSpecWorkerSource.includes("Math.min(bundle.maxTokens || 1800, 1800)"));
+assert.ok(modelPageSpecWorkerSource.includes("parseBoundedNumber(bundle.maxTokens || 9000"));
+assert.ok(modelPageSpecWorkerSource.includes("Model response was truncated before complete page-rebuild-spec JSON."));
+assert.ok(modelPageSpecWorkerSource.includes("ensureAvailableForegroundAssetsRepresented(spec, bundle)"));
+assert.ok(modelPageSpecWorkerSource.includes("Reused ${assets.length} available source-faithful foreground asset(s) at original page coordinates."));
+assert.ok(modelPageSpecWorkerSource.includes("source_box_px: coerceBox(asset.source_box_px)"));
+const truncationGuardIndex = modelPageSpecWorkerSource.indexOf("isTruncatedFinishReason(finishReason)");
+assert.ok(truncationGuardIndex > 0);
+assert.ok(modelPageSpecWorkerSource.indexOf("parseJsonContent(content)", truncationGuardIndex) > truncationGuardIndex);
 assert.ok(workflowNextActionSource.includes("tryBuildFastEditablePageWorkerPreflight"));
 assert.ok(workflowNextActionSource.includes("listWorkflowEditableWorkerTasks"));
 assert.ok(workflowNextActionSource.includes("lightweight: true"));
@@ -1190,13 +1308,57 @@ assert.ok(workflowNextActionSource.includes("editable/page-workers"));
 assert.ok(workflowNextActionSource.includes("启动页面 worker 前，需要先记录 gpt-image-2 图片额度授权。"));
 assert.ok(workflowNextActionSource.includes("不会自动静默消耗外部 API"));
 assert.ok(workflowNextActionSource.includes("requiresExternalImageConfirmation: true"));
+assert.ok(workflowNextActionSource.includes("Route B requires explicit user confirmation before starting editable PPT rebuild."));
+assert.ok(workflowNextActionSource.includes("isImageDeckReviewApproved"));
+assert.ok(workflowNextActionSource.includes("Route B requires image deck review approval before editable prepare."));
+assert.ok((workflowNextActionSource.match(/Route B requires image deck review approval before editable prepare\./g) || []).length >= 2);
+assert.ok(workflowEditableSource.includes("assertImageDeckReviewGate(job, options)"));
+assert.ok(workflowEditableSource.includes("Route B requires explicit user confirmation before editable prepare."));
+assert.ok(workflowEditableSource.includes("isImageDeckReviewApproved"));
+assert.ok(workflowEditableSource.includes("safeToRunAutomatically: false"));
+assert.ok(!workflowEditableSource.includes("allowMissingVisualQualityForTest || options.allowNonProductVisual || options.allowNonProductBackend"));
+assert.ok(!workflowEditableSource.includes("/regression|smoke|test/i.test(marker)"));
+assert.ok(pageRebuildAssemblerSource.includes("(?<=[\\u3400-\\u9fff])\\s*\\|\\s*(?=[\\u3400-\\u9fff])"));
+assert.ok(!pageRebuildAssemblerSource.includes(".replace(/\\s*\\|\\s*/g, \"|\")"));
+assert.ok(pageRebuildAssemblerSource.includes("inferRoundRectCornerRadius(shape.box_px)"));
+assert.ok(pageRebuildAssemblerSource.includes("PPT_TOOL_ALLOW_SOURCE_FIDELITY_RASTER_RECOVERY"));
+assert.ok(pageRebuildAssemblerSource.includes("calculateSourceRasterCoverage(images)"));
+assert.ok(pageRebuildAssemblerSource.includes("full-slide raster fallback is forbidden"));
+assert.ok(modelPageSpecWorkerSource.includes("inferRoundRectCornerRadius(shape.box_px)"));
 assert.ok(workflowNextActionSource.includes("generateWorkflowVisualSample(jobId, authorizedBody)"));
 assert.ok(workflowNextActionSource.includes("generateWorkflowVisualImages(jobId, authorizedBody)"));
 assert.ok(!frontendSource.includes("待处理页面"));
 const workflowArtifactsSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowArtifacts.js"), "utf8");
 assert.ok(workflowArtifactsSource.includes("draft-final-pptx"));
+assert.ok(workflowArtifactsSource.includes("Draft check PPTX"));
+assert.ok(workflowArtifactsSource.includes("manual review is not complete"));
 assert.ok(workflowArtifactsSource.includes("assertDraftFinalPptxDownloadable"));
-assert.ok(workflowArtifactsSource.includes("Draft final PPTX is only available for partial sample results."));
+assert.ok(workflowArtifactsSource.includes("Draft final PPTX is only available before final delivery approval."));
+assert.ok(workflowArtifactsSource.includes("isFinalPptxProductReady(finalGate"));
+assert.ok(workflowArtifactsSource.includes("isFinalPptxProductReady(gate"));
+assert.ok(workflowArtifactsSource.includes("Final PPTX is blocked until productReady=true."));
+assert.ok(workflowArtifactsSource.includes("productReady: gate.productReady === true"));
+assert.ok(workflowArtifactsSource.includes("downloadable: productReady"));
+assert.ok(workflowEditableSource.includes("Final delivery pending manual review and product gate"));
+assert.ok(workflowEditableSource.includes('job.status = "review_pending"'));
+assert.ok(frontendSource.includes("finalGateProductReady"));
+assert.ok(frontendSource.includes("deliverableReady = Boolean(finalReady && reviewReady && finalGateProductReady)"));
+const workflowV1ReadinessSource = fs.readFileSync(path.join(process.cwd(), "server", "workflowV1Readiness.js"), "utf8");
+assert.ok(workflowV1ReadinessSource.includes("const finalDownloadable = Boolean(finalGate.productReady)"));
+assert.ok(!workflowV1ReadinessSource.includes("finalGate.downloadable || finalGate.productReady"));
+const serverIndexSource = fs.readFileSync(path.join(process.cwd(), "server", "index.js"), "utf8");
+assert.ok(serverIndexSource.includes("Route B requires explicit user confirmation before fresh editable run recovery."));
+assert.ok(serverIndexSource.includes("createFreshEditableRunRollbackSnapshot"));
+assert.ok(serverIndexSource.includes("restoreFreshEditableRunRollbackSnapshot"));
+assert.ok(serverIndexSource.includes("freshRecoveryError.freshRollbackRestored = true"));
+assert.ok(serverIndexSource.includes("if (error.freshRollbackRestored)"));
+assert.ok(serverIndexSource.indexOf("if (error.freshRollbackRestored)") < serverIndexSource.indexOf("const job = await updateWorkflowStage(req.params.id, {", serverIndexSource.indexOf("if (error.freshRollbackRestored)")));
+assert.ok(serverIndexSource.indexOf("createFreshEditableRunRollbackSnapshot(currentJob)") < serverIndexSource.indexOf("invalidateWorkflowEditableRebuildEvidence(req.params.id"));
+assert.ok(serverIndexSource.indexOf("confirmRouteB") < serverIndexSource.indexOf("createFreshEditableRunRollbackSnapshot(currentJob)"));
+assert.ok(frontendSource.includes("function isFrontendImageDeckReviewApproved"));
+assert.ok(frontendSource.includes("const imageDeckReviewReady = isFrontendImageDeckReviewApproved(artifacts)"));
+assert.ok(frontendSource.includes("const confirmedBody = await confirmRouteBStartIfNeeded({"));
+assert.ok(frontendSource.includes("api.refreshWorkflowEditableRun(job.id, confirmedBody)"));
 assert.ok(frontendSource.includes("getFinalDownloadState"));
 assert.ok(frontendSource.includes("确认方案"));
 assert.ok(frontendSource.includes("确认样张"));
@@ -1403,5 +1565,72 @@ assert.ok(frontendSource.includes("StyleReferenceItem"));
 assert.ok(frontendSource.includes("PreviewCanvas"));
 assert.ok(frontendSource.includes("editable-draft.pptx"));
 assert.ok(frontendSource.includes("isJobBlockedForFinal"));
+
+const smokeTmpRoot = path.join(process.cwd(), "tmp");
+fs.mkdirSync(smokeTmpRoot, { recursive: true });
+const missingForegroundPageDir = fs.mkdtempSync(path.join(smokeTmpRoot, "missing-foreground-"));
+fs.mkdirSync(path.join(missingForegroundPageDir, "assets"), { recursive: true });
+fs.writeFileSync(path.join(missingForegroundPageDir, "page_request.json"), JSON.stringify({
+  page_id: "page_001",
+  run_id: "smoke_missing_foreground",
+  source_size_px: { width: 1920, height: 1080 },
+  slide: { width_px: 1920, height_px: 1080 },
+  content_box: { x: 0, y: 0, w: 1920, h: 1080 }
+}, null, 2));
+fs.writeFileSync(path.join(missingForegroundPageDir, "page-rebuild-spec.json"), JSON.stringify({
+  schema_version: 1,
+  page_id: "page_001",
+  slide: { width_px: 1920, height_px: 1080 },
+  content_box: { x: 0, y: 0, w: 1920, h: 1080 },
+  text_inventory: [],
+  visual_inventory: [{
+    id: "brand_logo",
+    type: "image",
+    kind: "logo",
+    decision: "image-asset",
+    path: "assets/missing-logo.png",
+    description: "source-faithful logo that must be reused"
+  }],
+  background_strategy: {
+    mode: "native-background",
+    source_consistency_contract: "source visual elements must remain represented",
+    comparison_note: "preserve source visual elements"
+  },
+  quality_checks: {
+    font_size_calibrated: true,
+    visual_inventory_matched: true,
+    background_strategy_checked: true,
+    shape_corner_geometry_checked: true
+  },
+  required_text: [],
+  text_boxes: [],
+  shapes: [],
+  images: [{
+    id: "brand_logo",
+    path: "assets/missing-logo.png",
+    box_px: [100, 100, 320, 160]
+  }],
+  asset_provenance: [{
+    id: "brand_logo",
+    path: "assets/missing-logo.png",
+    source_type: "asset-sheet-separated",
+    source: "source.png"
+  }]
+}, null, 2));
+let missingForegroundFailed = false;
+try {
+  execFileSync(process.execPath, [path.join(process.cwd(), "scripts", "page-rebuild-assembler.mjs"), "--page-dir", missingForegroundPageDir], {
+    cwd: process.cwd(),
+    stdio: "pipe",
+    env: { ...process.env, PPT_WORKFLOW_JOB_ID: "smoke_missing_foreground" }
+  });
+} catch (error) {
+  missingForegroundFailed = true;
+  const text = `${error.stdout || ""}\n${error.stderr || ""}\n${error.message || ""}`;
+  assert.match(text, /image file does not exist|Foreground visual inventory requires real image assets/i);
+}
+assert.equal(missingForegroundFailed, true);
+const missingForegroundValidation = JSON.parse(fs.readFileSync(path.join(missingForegroundPageDir, "validation.json"), "utf8"));
+assert.equal(missingForegroundValidation.passed, false);
 
 console.log("smoke tests passed");

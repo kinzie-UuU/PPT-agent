@@ -36,6 +36,7 @@ const activeModelResponse = {
   latest: {},
   finalWritten: false
 };
+const SOURCE_CRITICAL_VISUAL_RE = /\b(product|packaging|package|mooncake|tea|cup|food|drink|gift|box)\b/i;
 
 installTerminationFinalResponseHandlers();
 
@@ -109,14 +110,6 @@ async function main() {
         ].filter(Boolean).join(" ");
         delete spec.error;
         clearResolvedNoImageFallbackMarker(pageDir);
-      } else if (!promptBundle.includeImage) {
-        spec.passed = true;
-        spec.notes = [
-          spec.notes,
-          "No-image fallback ignored model-requested visual asset jobs; this page requires visual QA before production delivery."
-        ].filter(Boolean).join(" ");
-        spec.needed_visual_asset_jobs = [];
-        delete spec.error;
       } else {
         if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
           await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
@@ -134,7 +127,8 @@ async function main() {
       : [];
     if (missingImageAssetJobs.length) {
       await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(missingImageAssetJobs));
-      omitUnavailableImageAssets(spec, missingImageAssetJobs);
+      const ids = missingImageAssetJobs.map((job) => job.id).filter(Boolean).join(", ");
+      throw new Error(`required assets are missing; needed_visual_asset_jobs written for: ${ids}`);
     }
     validateSpecDraft(spec, pageRequest);
     await writeJson(outputSpecPath, spec);
@@ -202,6 +196,8 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "Do not include markdown fences.",
     "You must preserve editable text and simple native shapes.",
     "Visual fidelity is mandatory: every visible non-text object larger than about 2% of the slide area must appear in visual_inventory and must be rebuilt as native shapes or images.",
+    "If visual_inventory contains any non-text object, the same object must also appear in shapes[], images[] with a real existing asset path, or needed_visual_asset_jobs[]. Do not leave shapes[] and images[] empty after listing visible objects.",
+    "Never invent placeholder image paths such as path/to/...; if no matching asset exists, return passed:false with needed_visual_asset_jobs so the pipeline can generate the asset and retry.",
     "Do not claim the background is preserved unless the required background/decoration objects are represented by shapes, images, or needed_visual_asset_jobs.",
     "Brand logos, complex icons, screenshots, decorative maps, patterned panels, cards, shadows, and image-like decorations must be represented as images with real separated/generated assets, or requested through needed_visual_asset_jobs.",
     "Simple borders, divider lines, arcs, circles, ellipses, bullets, rectangles, grids, and translucent blocks must be represented as native structural shapes with source pixel coordinates.",
@@ -257,7 +253,9 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
           "omitting decoration because it is not text",
           "claiming the background is preserved while shapes/images are missing",
           "using source.png as an image",
-          "creating a mostly blank editable text-only page"
+          "creating a mostly blank editable text-only page",
+          "using placeholder paths like path/to/separated/image.png instead of real available assets",
+          "listing visual_inventory while leaving shapes[] and images[] empty"
         ]
       }, null, 2),
     "",
@@ -354,7 +352,7 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
 async function callVisionModel(bundle) {
   if (!bundle.apiKey) throw new Error("Missing API key for model page worker. Configure OPENAI_API_KEY or PROVIDER_API_KEY.");
   const compactTimeoutMs = parseBoundedNumber(bundle.timeoutMs || 300000, 90000, 600000, 300000);
-  const compactMaxTokens = Math.min(bundle.maxTokens || 1800, 1800);
+  const compactMaxTokens = parseBoundedNumber(bundle.maxTokens || 9000, 1800, 12000, 9000);
   const attempts = bundle.lowComplexity
     ? [
       { responseFormat: true, compact: true, reason: "low-complexity-compact-vision-json", timeoutMs: compactTimeoutMs, maxTokens: compactMaxTokens, maxRetries: 0 },
@@ -362,8 +360,8 @@ async function callVisionModel(bundle) {
     ]
     : [
       { responseFormat: true, reason: "json_object" },
-      { responseFormat: true, compact: true, reason: "compact-vision-json-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) },
-      { responseFormat: false, reason: "plain-json-retry-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: Math.min(bundle.maxTokens || 1800, 1800) }
+      { responseFormat: true, compact: true, reason: "compact-vision-json-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: compactMaxTokens },
+      { responseFormat: false, reason: "plain-json-retry-after-empty-or-invalid-content", timeoutMs: Math.min(bundle.timeoutMs || 120000, 120000), maxTokens: compactMaxTokens }
     ];
   const attemptRecords = [];
   let selected = null;
@@ -443,14 +441,6 @@ async function callVisionModel(bundle) {
       ].filter(Boolean).join(" ");
       delete spec.error;
       clearResolvedNoImageFallbackMarker(bundle.pageDir);
-    } else if (!bundle.includeImage) {
-      spec.passed = true;
-      spec.notes = [
-        spec.notes,
-        "No-image fallback ignored model-requested visual asset jobs; this page requires visual QA before production delivery."
-      ].filter(Boolean).join(" ");
-      spec.needed_visual_asset_jobs = [];
-      delete spec.error;
     } else {
     if (Array.isArray(spec.needed_visual_asset_jobs) && spec.needed_visual_asset_jobs.length) {
       await writeJson(path.join(bundle.pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(spec.needed_visual_asset_jobs));
@@ -820,12 +810,17 @@ async function requestModelSpecAttempt(bundle, attempt = {}) {
   }
   const data = await result.response.json();
   const content = extractModelContent(data);
+  const finishReason = data.choices?.[0]?.finish_reason || "";
   let spec = null;
   let parseError = "";
-  try {
-    spec = parseJsonContent(content);
-  } catch (error) {
-    parseError = error.message || String(error);
+  if (isTruncatedFinishReason(finishReason)) {
+    parseError = "Model response was truncated before complete page-rebuild-spec JSON.";
+  } else {
+    try {
+      spec = parseJsonContent(content);
+    } catch (error) {
+      parseError = error.message || String(error);
+    }
   }
   const baseUrl = stripEndpoint(result.url, "/chat/completions");
   return {
@@ -843,9 +838,13 @@ async function requestModelSpecAttempt(bundle, attempt = {}) {
       parseError,
       baseUrl,
       usage: data.usage || null,
-      finishReason: data.choices?.[0]?.finish_reason || ""
+      finishReason
     }
   };
+}
+
+function isTruncatedFinishReason(value = "") {
+  return /^(length|max_tokens|content_filter_length)$/i.test(String(value || "").trim());
 }
 
 async function writeModelResponseRecord(bundle, { selected = null, attemptRecords = [], data = {}, content = "", spec = null, parseError = "", final = false } = {}) {
@@ -991,6 +990,7 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
   mergeBriefOcrText(spec, bundle, pageRequest);
   normalizeImageAssetReferences(spec, bundle);
   ensureAvailableBrandAssetsRepresented(spec, bundle);
+  ensureAvailableForegroundAssetsRepresented(spec, bundle);
   normalizeVisualInventoryProvenance(spec);
   normalizeShapeGeometry(spec, pageRequest);
   sanitizeSpecDraft(spec, bundle, pageRequest);
@@ -1353,6 +1353,7 @@ function collectMissingForegroundInventoryAssetJobs(spec) {
         id,
         description,
         target_asset_path: path.join("assets", `${id}.png`).replace(/\\/g, "/"),
+        source_box_px: item.box_px,
         transparent_background: true,
         asset_provenance: "asset-sheet-separated image edit for foreground asset reuse"
       };
@@ -1434,6 +1435,82 @@ function ensureAvailableBrandAssetsRepresented(spec, bundle = {}) {
     }
     imagePaths.add(assetPath);
   }
+}
+
+function ensureAvailableForegroundAssetsRepresented(spec, bundle = {}) {
+  const assets = selectAvailableForegroundAssets(bundle);
+  if (!assets.length) return;
+  if (!Array.isArray(spec.images)) spec.images = [];
+  if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
+  if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
+  const imagePaths = new Set(spec.images.map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const provenancePaths = new Set(spec.asset_provenance.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  const visualPaths = new Set(spec.visual_inventory.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  for (const asset of assets) {
+    const assetPath = normalizeAssetPath(asset.path || "");
+    const box = coerceBox(asset.source_box_px);
+    if (!assetPath || !box?.length || imagePaths.has(assetPath)) continue;
+    const description = cleanLooseText(
+      asset.provenance_note || asset.prompt_excerpt || "Source-faithful foreground visual asset separated from the slide image."
+    ).slice(0, 240) || "Source-faithful foreground visual asset separated from the slide image.";
+    spec.images.push({
+      id: asset.id,
+      type: "image",
+      description,
+      path: assetPath,
+      box_px: box,
+      z_index: 80
+    });
+    if (!visualPaths.has(assetPath)) {
+      spec.visual_inventory.push({
+        id: asset.id,
+        type: "image",
+        description,
+        path: assetPath,
+        box_px: box,
+        decision: "image-asset"
+      });
+      visualPaths.add(assetPath);
+    }
+    if (!provenancePaths.has(assetPath)) {
+      spec.asset_provenance.push({
+        path: assetPath,
+        source: asset.source || assetPath,
+        source_type: asset.source_type || "asset-sheet-separated",
+        provenance_note: asset.provenance_note || "asset-sheet-separated foreground asset selected from available page assets."
+      });
+      provenancePaths.add(assetPath);
+    }
+    imagePaths.add(assetPath);
+  }
+  if (assets.length) {
+    spec.notes = [
+      spec.notes,
+      `Reused ${assets.length} available source-faithful foreground asset(s) at original page coordinates.`
+    ].filter(Boolean).join(" ");
+  }
+}
+
+function selectAvailableForegroundAssets(bundle = {}) {
+  const assets = Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [];
+  const seen = new Set();
+  return assets
+    .filter((asset) => {
+      const assetPath = normalizeAssetPath(asset?.path || "");
+      const id = cleanAssetId(asset?.id || path.basename(assetPath, path.extname(assetPath)));
+      const box = coerceBox(asset?.source_box_px);
+      if (!assetPath || !id || !box?.length || /^brand_logo_asset_/i.test(id)) return false;
+      if (!/^assets\//i.test(assetPath)) return false;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .map((asset) => ({
+      ...asset,
+      id: cleanAssetId(asset.id || path.basename(asset.path || "", path.extname(asset.path || ""))),
+      path: normalizeAssetPath(asset.path || ""),
+      source_box_px: coerceBox(asset.source_box_px)
+    }));
 }
 
 function clusterNearbyBrandTextBoxes(boxes = []) {
@@ -1523,8 +1600,9 @@ function normalizeImageAssetReferences(spec, bundle = {}) {
 
 function requiresForegroundAsset(item = {}) {
   const text = JSON.stringify(item);
-  if (!FOREGROUND_FAMILY_RE.test(text) && !FOREGROUND_CONTRACT_RE.test(text)) return false;
-  if (NATIVE_STRUCTURAL_RE.test(text) && !FOREGROUND_FAMILY_RE.test(text)) return false;
+  const isSourceCriticalVisual = SOURCE_CRITICAL_VISUAL_RE.test(text);
+  if (!FOREGROUND_FAMILY_RE.test(text) && !FOREGROUND_CONTRACT_RE.test(text) && !isSourceCriticalVisual) return false;
+  if (NATIVE_STRUCTURAL_RE.test(text) && !FOREGROUND_FAMILY_RE.test(text) && !isSourceCriticalVisual) return false;
   if (/shape|native-shape|native shape|native structural/i.test(`${item.type || ""} ${item.kind || ""} ${item.decision || ""}`) && !/logo|photo|screenshot|brand|device/i.test(text)) return false;
   return true;
 }
@@ -1813,6 +1891,7 @@ function normalizeShapeGeometry(spec, pageRequest) {
         const radius = Number(shape.radius_px);
         shape.source_corner_radius_px = Number.isFinite(radius) ? radius : inferRoundRectCornerRadius(shape.box_px);
       }
+      clampRoundRectCornerRadius(shape);
       expanded.push(shape);
       continue;
     }
@@ -1827,10 +1906,29 @@ function normalizeShapeGeometry(spec, pageRequest) {
   }
   spec.shapes = expanded.map((shape) => {
     normalizePaint(shape);
-    if (shape.type === "line" || validBox(shape.box_px, width, height)) return shape;
+    if (shape.type === "line" || validBox(shape.box_px, width, height)) {
+      clampRoundRectCornerRadius(shape);
+      return shape;
+    }
     const inferred = inferBoxFromShape(shape, width, height);
-    return inferred ? { ...shape, box_px: inferred } : shape;
+    const nextShape = inferred ? { ...shape, box_px: inferred } : shape;
+    clampRoundRectCornerRadius(nextShape);
+    return nextShape;
   });
+}
+
+function clampRoundRectCornerRadius(shape = {}) {
+  if (!shape || shape.type !== "roundRect") return;
+  const box = coerceBox(shape.box_px);
+  if (!box) return;
+  const maxRadius = Math.max(0, Math.min(Number(box[2] || 0), Number(box[3] || 0)) / 2);
+  if (!Number.isFinite(maxRadius) || maxRadius <= 0) return;
+  const radius = Number(shape.source_corner_radius_px ?? shape.radius_px);
+  const clamped = Number.isFinite(radius)
+    ? Math.min(Math.max(0, radius), maxRadius)
+    : Math.min(Math.max(0, inferRoundRectCornerRadius(shape.box_px)), maxRadius);
+  shape.source_corner_radius_px = clamped;
+  if (Number.isFinite(Number(shape.radius_px))) shape.radius_px = Math.min(Math.max(0, Number(shape.radius_px)), maxRadius);
 }
 
 function boxFromCircleShape(shape = {}, width, height) {
@@ -2063,6 +2161,7 @@ function validateSpecDraft(spec, pageRequest) {
     const imagePath = normalizeAssetPath(image.path);
     if (!imagePath) errors.push(`image ${image.id || ""} is missing path.`);
     if (imagePath === "source.png") errors.push(`image ${image.id || ""} references source.png, which is forbidden.`);
+    if (/^(path\/to|placeholder|example)\b/i.test(imagePath)) errors.push(`image ${image.id || ""} uses a placeholder path instead of a real page asset.`);
     if (!validBox(image.box_px, width, height)) errors.push(`image ${image.id || ""} has invalid box_px.`);
   }
   const freeText = [
@@ -2072,15 +2171,7 @@ function validateSpecDraft(spec, pageRequest) {
   if (FORBIDDEN_FALLBACK_TERMS.test(freeText)) errors.push("forbidden fallback wording found in visual inventory or provenance.");
   const missingForegroundAssetJobs = collectMissingForegroundInventoryAssetJobs(spec);
   if (missingForegroundAssetJobs.length) {
-    omitUnavailableImageAssets(spec, missingForegroundAssetJobs);
-    spec.visual_inventory = (Array.isArray(spec.visual_inventory) ? spec.visual_inventory : []).filter((item) => !requiresForegroundAsset(item));
-    spec.background_strategy = {
-      ...(spec.background_strategy || {}),
-      comparison_note: [
-        spec.background_strategy?.comparison_note,
-        `no-image mode for unavailable generated assets: ${missingForegroundAssetJobs.map((job) => job.id).join(", ")}.`
-      ].filter(Boolean).join(" ")
-    };
+    errors.push(`required assets are missing; needed_visual_asset_jobs required for: ${missingForegroundAssetJobs.map((job) => job.id).join(", ")}`);
   }
   errors.push(...collectVisualCoverageIssues(spec));
   if (errors.length) throw new Error(errors.join(" | "));

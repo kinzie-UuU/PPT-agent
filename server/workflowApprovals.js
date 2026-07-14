@@ -10,6 +10,7 @@ export const CODEX_PPT_GATES = new Map([
 ]);
 
 export const CODEX_PPT_VISUAL_SAMPLE_GATES = ["outline", "style", "backend"];
+export const CODEX_PPT_VISUAL_TEST_GATES = ["outline", "style", "backend", "sample"];
 export const CODEX_PPT_VISUAL_DECK_GATES = ["outline", "style", "backend", "sample", "fullDeck"];
 const LEGACY_CODEX_PPT_STYLE_RE = /轻盈渐变风|东方自然风|黑白画册风|蓝白科技风|暗黑科技风|旧模板|旧版模板|模板包|template[-_\s]?pack/i;
 
@@ -31,6 +32,9 @@ export async function approveCodexPptGate(jobId, options = {}) {
   if (gate === "backend") {
     record.backend = buildBackendSnapshot(options.backend);
   }
+  if (gate === "fullDeck" && !isNonProductApprovalAllowed(options)) {
+    record.testDeck = buildFullDeckTestEvidence(job);
+  }
   approvals.push(record);
   job.artifacts = {
     ...(job.artifacts || {}),
@@ -49,7 +53,9 @@ export async function approveCodexPptGate(jobId, options = {}) {
 export async function preflightCodexPptGate(jobId, options = {}) {
   const gate = normalizeGate(options.gate);
   const job = await readWorkflowJob(jobId);
-  const passed = getApprovals(job).some((item) => item?.status === "approved" && item.gate === gate);
+  const passed = gate === "fullDeck"
+    ? isCodexPptFullDeckApprovalCurrent(job, options)
+    : getApprovals(job).some((item) => item?.status === "approved" && item.gate === gate);
   if (passed) {
     return {
       ok: true,
@@ -114,6 +120,9 @@ export async function assertCodexPptApprovals(jobId, requiredGates = []) {
   const approved = new Set(getApprovals(job)
     .filter((item) => item?.status === "approved" && item.gate)
     .map((item) => item.gate));
+  if (required.includes("fullDeck") && !isCodexPptFullDeckApprovalCurrent(job)) {
+    approved.delete("fullDeck");
+  }
   const missing = required.filter((gate) => !approved.has(gate));
   if (missing.length) {
     const error = new Error(`Missing codex-ppt approval gate(s): ${missing.map((gate) => CODEX_PPT_GATES.get(gate)).join(", ")}`);
@@ -220,7 +229,108 @@ function assertApprovalPreconditions(job = {}, gate = "", options = {}) {
       );
     }
     assertProductVisualSample(job, gate, options);
+    if (!isNonProductApprovalAllowed(options)) buildFullDeckTestEvidence(job);
   }
+}
+
+export function isCodexPptFullDeckApprovalCurrent(job = {}, options = {}) {
+  const record = getApprovals(job)
+    .filter((item) => item?.status === "approved" && item.gate === "fullDeck")
+    .at(-1);
+  if (!record) return false;
+  if (isNonProductApprovalAllowed(options)) return true;
+  const evidence = record.testDeck || {};
+  const sample = job.artifacts?.visualSample || {};
+  const currentImages = new Map(getVisualImages(job).map((image) => [visualPageId(image), image]));
+  return Boolean(
+    evidence.version === 1
+    && evidence.sampleSha256
+    && evidence.sampleSha256 === sample.sha256
+    && Array.isArray(evidence.pages)
+    && evidence.pages.length === 2
+    && evidence.pages.every((page) => {
+      const current = currentImages.get(page.pageId);
+      return Boolean(current?.sha256 && page.sha256 && current.sha256 === page.sha256);
+    })
+  );
+}
+
+export function getCodexPptFullDeckTestEvidence(job = {}) {
+  const record = getApprovals(job)
+    .filter((item) => item?.status === "approved" && item.gate === "fullDeck")
+    .at(-1);
+  return isCodexPptFullDeckApprovalCurrent(job) ? record?.testDeck || null : null;
+}
+
+function buildFullDeckTestEvidence(job = {}) {
+  const images = getVisualImages(job);
+  const review = job.artifacts?.imageDeckReview || {};
+  const summary = review.summary || {};
+  const marks = review.marks || {};
+  const sample = job.artifacts?.visualSample || {};
+  const pages = images.map((image) => ({
+    pageId: visualPageId(image),
+    pageNumber: Number(image.pageNumber || 0),
+    sha256: cleanString(image.sha256 || ""),
+    path: cleanString(image.relativePath || image.path || ""),
+    imageInputMode: cleanString(image.imageInputMode || "")
+  }));
+  const everyPagePassed = pages.length === 2 && pages.every((page) => {
+    const mark = marks[page.pageId] || {};
+    return Boolean(
+      page.pageId
+      && page.sha256
+      && mark.status === "pass"
+      && mark.visualImageSha256 === page.sha256
+    );
+  });
+  const usesStyleReference = pages.length === 2
+    && pages.every((page) => page.imageInputMode === "source-page-edit-plus-style-reference");
+  if (
+    !sample.sha256
+    || review.status !== "approved"
+    || summary.totalPages !== 2
+    || summary.passCount !== 2
+    || summary.acceptCount !== 0
+    || summary.allPagesReviewed !== true
+    || summary.allMarksCurrent !== true
+    || summary.readyForApproval !== true
+    || !everyPagePassed
+    || !usesStyleReference
+  ) {
+    throwApprovalPrecondition(
+      "CODEX_PPT_TWO_PAGE_TEST_REQUIRED",
+      "Full-deck authorization requires exactly two current style-locked test pages, both marked pass in image deck review.",
+      {
+        gate: "fullDeck",
+        requiredArtifact: "imageDeckReview",
+        testDeck: {
+          pageCount: pages.length,
+          reviewStatus: review.status || "",
+          passCount: Number(summary.passCount || 0),
+          styleReferencePages: pages.filter((page) => page.imageInputMode === "source-page-edit-plus-style-reference").length
+        }
+      }
+    );
+  }
+  return {
+    version: 1,
+    sampleSha256: sample.sha256,
+    pages,
+    reviewApprovedAt: review.approvedAt || "",
+    recordedAt: new Date().toISOString()
+  };
+}
+
+function getVisualImages(job = {}) {
+  return (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
+    .filter((image) => image?.path)
+    .sort((a, b) => Number(a.pageNumber || 0) - Number(b.pageNumber || 0));
+}
+
+function visualPageId(image = {}) {
+  const pageNumber = Number(image.pageNumber || 0);
+  return cleanString(image.pageId || (pageNumber ? `page_${String(pageNumber).padStart(3, "0")}` : ""));
 }
 
 function assertProductVisualSample(job = {}, gate = "", options = {}) {

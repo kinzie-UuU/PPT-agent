@@ -80,6 +80,7 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
   const visualQuality = artifacts.visualQuality || {};
   const qualitySummary = normalizeVisualQualitySummary(visualQuality);
   const visualReviewCurrent = isVisualQualityReviewCurrent(artifacts);
+  const imageDeckReviewReady = isImageDeckReviewApproved(artifacts);
   const textHintEvidence = getEditableTextHintEvidence(artifacts);
   const imageDeckPath = artifacts.imageDeck?.path || "";
   const checks = [
@@ -88,6 +89,12 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
       label: "图片型 PPT",
       ok: Boolean(imageDeckPath && fsSync.existsSync(imageDeckPath)),
       detail: imageDeckPath || "等待 codex-ppt 生成图片型 PPT"
+    },
+    {
+      id: "image-deck-review",
+      label: "图片版人工复核",
+      ok: imageDeckReviewReady,
+      detail: imageDeckReviewReady ? "approved" : "必须先通过整套图片版人工复核"
     },
     {
       id: "visual-pages",
@@ -153,7 +160,7 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
     preview: true,
     didRun: false,
     paidImageGeneration: false,
-    safeToRunAutomatically: true,
+    safeToRunAutomatically: false,
     jobId: job.id,
     nextAction: "editable/prepare",
     ready,
@@ -176,6 +183,7 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
 export async function prepareWorkflowEditableRun(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
   const runtime = getEditableRuntimeConfig(options);
+  assertImageDeckReviewGate(job, options);
   assertVisualQualityGate(job, options);
   let inputs = getEditablePrepareInputs(job, options);
   if (!inputs.length) throw new Error("No visual images available for editable prepare. Run visual/generate first.");
@@ -420,7 +428,7 @@ export async function buildWorkflowEditableWorkerPrompts(jobId, options = {}) {
   if (next.stage !== "dispatch_pages" && !localMode) {
     throw new Error(`Editable run is not ready to dispatch or rebuild pages. Current next stage: ${next.stage || "unknown"}`);
   }
-  const selectedPages = normalizePages(options.pages || options.pageIds || next.dispatchable_pages || next.suggested_pages || next.pages || next.page_id || next.page || []);
+  const selectedPages = resolveEditablePageSelection(options, next);
   if (!selectedPages.length) throw new Error("No dispatchable or locally rebuildable pages returned by editppt run next.");
   const prompts = [];
   for (const pageId of selectedPages) {
@@ -531,6 +539,8 @@ export async function dispatchWorkflowEditablePage(jobId, options = {}) {
   job = await ensureTextHintsCheckpoint(job, runtime, options);
   const promptFile = path.resolve(options.promptFile || path.join(runDir, "pages", pageId, "worker-prompt.md"));
   if (!fsSync.existsSync(promptFile)) throw new Error(`Worker prompt not found: ${promptFile}`);
+  const beforeNext = await getEditableNextForRun(runDir, runtime);
+  assertEditableDispatchAllowed(beforeNext, pageId, { localMode });
   const args = ["run", "dispatch", runDir, "--page", pageId, "--agent-id", agentId, "--prompt-file", promptFile];
   if (options.agentNickname) args.push("--agent-nickname", cleanString(options.agentNickname));
   if (localMode) args.push("--local");
@@ -558,6 +568,57 @@ export async function dispatchWorkflowEditablePage(jobId, options = {}) {
   };
   job.events = appendEvent(job.events, "editable.dispatched", localMode ? `Claimed ${pageId} for local rebuild` : `Dispatched ${pageId} to worker`, { pageId, agentId, promptFile, nextStage: next.stage, executionMode: localMode ? "local" : "worker" });
   return saveWorkflowJob(job);
+}
+
+export function assertEditableDispatchAllowed(next = {}, pageId = "", options = {}) {
+  const stage = String(next?.stage || "");
+  const expectedStage = options.localMode ? "rebuild_page_locally" : "dispatch_pages";
+  if (stage !== expectedStage) {
+    const error = new Error(`editppt is not ready to dispatch this page; expected next stage ${expectedStage}, current next stage is ${stage || "unknown"}.`);
+    error.code = "EDITABLE_DISPATCH_STAGE_MISMATCH";
+    error.next = next;
+    throw error;
+  }
+  const selectedPages = normalizeDispatchPageIds(next);
+  if (selectedPages.length && !selectedPages.includes(pageId)) {
+    const error = new Error(`Page ${pageId} is not in the current editppt dispatch set.`);
+    error.code = "EDITABLE_DISPATCH_PAGE_NOT_SELECTED";
+    error.next = next;
+    error.selectedPages = selectedPages;
+    throw error;
+  }
+}
+
+function normalizeDispatchPageIds(next = {}) {
+  const candidates = [
+    next.page,
+    next.pageId,
+    next.pages,
+    next.pageIds,
+    next.selectedPages,
+    next.selected_pages,
+    next.dispatchPages,
+    next.dispatch_pages,
+    next.tasks,
+    next.jobs
+  ];
+  return [...new Set(candidates.flatMap(extractPageIdsFromNextValue).map(normalizePageId).filter(Boolean))];
+}
+
+function extractPageIdsFromNextValue(value) {
+  if (!value) return [];
+  if (typeof value === "string" || typeof value === "number") return [value];
+  if (Array.isArray(value)) return value.flatMap(extractPageIdsFromNextValue);
+  if (typeof value === "object") {
+    return [
+      value.pageId,
+      value.page_id,
+      value.page,
+      value.id,
+      value.name
+    ].filter(Boolean);
+  }
+  return [];
 }
 
 async function ensureTextHintsCheckpoint(job, runtime, options = {}) {
@@ -704,7 +765,7 @@ export async function rebuildWorkflowEditableLocalPage(jobId, options = {}) {
   if (next.stage !== "rebuild_page_locally") {
     throw new Error(`Editable run is not ready for single-page local rebuild. Current next stage: ${next.stage || "unknown"}`);
   }
-  const selectedPages = normalizePages(options.pages || options.pageIds || options.pageId || next.suggested_pages || next.dispatchable_pages || []);
+  const selectedPages = resolveEditablePageSelection(options, next);
   if (selectedPages.length !== 1) throw new Error("Single-page local rebuild requires exactly one page.");
   const pageId = selectedPages[0];
   const pageDir = path.join(runDir, "pages", pageId);
@@ -870,11 +931,11 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     ...(job.artifacts || {}),
     editableFinal: finalRecord
   };
-  job.currentStage = "complete";
-  job.status = "complete";
+  job.currentStage = "finalizing";
+  job.status = "review_pending";
   job.stageStatus = "complete";
-  job.stages.finalizing = markStage(job.stages.finalizing, "complete", "Final editable PPTX assembled", { finalPath, runDir });
-  job.stages.complete = markStage(job.stages.complete, "complete", "Workflow complete", { finalPath, editability, powerPointOpenability });
+  job.stages.finalizing = markStage(job.stages.finalizing, "complete", "Editable PPTX draft assembled; final delivery still requires review gate", { finalPath, runDir });
+  job.stages.complete = markStage(job.stages.complete, "pending", "Final delivery pending manual review and product gate", { finalPath, editability, powerPointOpenability });
   job.events = appendEvent(job.events, "editable.finalized", "Final editable PPTX assembled", {
     finalPath,
     runDir,
@@ -1439,9 +1500,49 @@ function assertVisualQualityGate(job = {}, options = {}) {
   }
 }
 
+function assertImageDeckReviewGate(job = {}, options = {}) {
+  if (isNonProductEditableGateBypassAllowed(options)) return;
+  if (options.confirmRouteB !== true) {
+    throw new Error("Route B requires explicit user confirmation before editable prepare.");
+  }
+  if (isImageDeckReviewApproved(job.artifacts || {})) return;
+  throw new Error("Image deck review must be approved before editable prepare.");
+}
+
+export function isImageDeckReviewApproved(artifacts = {}) {
+  const review = artifacts.imageDeckReview || {};
+  const summary = review.summary || {};
+  if (review.status !== "approved") return false;
+  if (summary.readyForApproval !== true) return false;
+  if (summary.allPagesReviewed !== true || summary.allMarksCurrent !== true) return false;
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const expectedPages = visualImages
+    .map((image, index) => image.pageId || (Number.isFinite(Number(image.pageNumber)) ? `page_${String(Number(image.pageNumber)).padStart(3, "0")}` : `page_${String(index + 1).padStart(3, "0")}`))
+    .filter(Boolean);
+  const uniquePages = Array.from(new Set(expectedPages));
+  if (!uniquePages.length) return false;
+  const marks = review.marks || {};
+  const markEntries = uniquePages.map((pageId) => marks[pageId]);
+  if (markEntries.some((mark) => !mark || String(mark.status || "").toLowerCase() !== "pass")) return false;
+  const visualByPage = new Map(visualImages.map((image, index) => [
+    image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`,
+    image
+  ]));
+  const marksMatchCurrentImages = uniquePages.every((pageId) => {
+    const mark = marks[pageId] || {};
+    const image = visualByPage.get(pageId) || {};
+    if (!image.path || mark.visualImagePath !== image.path) return false;
+    if (image.sha256 && mark.visualImageSha256 !== image.sha256) return false;
+    return true;
+  });
+  if (!marksMatchCurrentImages) return false;
+  const total = Number(summary.totalPages ?? summary.pageCount ?? review.pageCount ?? 0) || 0;
+  const passed = Number(summary.passCount ?? summary.passedCount ?? summary.approvedPages ?? 0) || 0;
+  return Boolean(total === uniquePages.length && passed === uniquePages.length);
+}
+
 function isNonProductEditableGateBypassAllowed(options = {}) {
-  const marker = `${options.requestedBy || ""} ${options.note || ""} ${options.mode || ""}`;
-  return Boolean(options.allowMissingVisualQualityForTest || options.allowNonProductVisual || options.allowNonProductBackend) || /regression|smoke|test/i.test(marker);
+  return process.env.PPT_TOOL_ALLOW_NONPRODUCT_EDITABLE_BYPASS === "1";
 }
 
 function isVisualQualityReviewCurrent(artifacts = {}) {
@@ -1553,6 +1654,13 @@ function normalizePages(value) {
     pages.push(normalizePageId(text));
   }
   return [...new Set(pages.filter(Boolean))];
+}
+
+function resolveEditablePageSelection(options = {}, next = {}) {
+  const requested = options.pages ?? options.pageIds ?? options.pageId;
+  const requestedPages = normalizePages(requested);
+  if (requestedPages.length) return requestedPages;
+  return normalizePages(next.dispatchable_pages || next.suggested_pages || next.pages || next.page_id || next.page || []);
 }
 
 function normalizePageId(value = "") {

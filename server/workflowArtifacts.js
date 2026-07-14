@@ -195,17 +195,22 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
   };
 }
 
+export function isFinalPptxProductReady(finalGate = {}) {
+  return finalGate?.productReady === true;
+}
+
 async function assertFinalPptxDownloadable(id) {
   const delivery = await getWorkflowDeliveryStatus(id);
   const gate = delivery.finalGate || {};
-  if (gate.downloadable === false) {
-    const error = new Error(gate.summary || "Final PPTX is blocked by the delivery gate.");
+  if (!isFinalPptxProductReady(gate)) {
+    const error = new Error(gate.summary || "Final PPTX is blocked until productReady=true.");
     error.status = 409;
     error.code = "WORKFLOW_FINAL_PPTX_BLOCKED";
     error.finalGate = {
       level: gate.level || "blocked",
       label: gate.label || "not-deliverable.pptx",
       title: gate.title || "Delivery blocked",
+      productReady: gate.productReady === true,
       reasons: gate.reasons || [],
       warnings: gate.warnings || []
     };
@@ -219,8 +224,8 @@ async function assertDraftFinalPptxDownloadable(id) {
   const checks = gate.checks || {};
   const sourcePages = Number(checks.sourcePages || delivery.coverage?.sourcePages || 0);
   const finalPages = Number(checks.finalPages || delivery.coverage?.finalPages || 0);
-  if (!finalPages || !sourcePages || finalPages >= sourcePages) {
-    const error = new Error("Draft final PPTX is only available for partial sample results.");
+  if (!finalPages || !sourcePages || gate.productReady === true) {
+    const error = new Error("Draft final PPTX is only available before final delivery approval.");
     error.status = 404;
     error.code = "WORKFLOW_DRAFT_FINAL_NOT_AVAILABLE";
     throw error;
@@ -273,13 +278,15 @@ function makeDraftFinalLink(job, artifacts = {}, finalGate = null) {
   const checks = finalGate?.checks || {};
   const sourcePages = Number(checks.sourcePages || 0);
   const finalPages = Number(checks.finalPages || artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
-  if (!artifacts.editableFinal?.path || !sourcePages || !finalPages || finalPages >= sourcePages) return null;
-  const link = makeLink(job, "draft-final-pptx", `小样本草稿 PPTX（${finalPages}/${sourcePages}）`, artifacts.editableFinal.path, { download: true });
+  if (!artifacts.editableFinal?.path || !sourcePages || !finalPages || finalGate?.productReady === true) return null;
+  const partial = finalPages < sourcePages;
+  const label = partial ? `Draft check PPTX (${finalPages}/${sourcePages})` : "Draft check PPTX";
+  const link = makeLink(job, "draft-final-pptx", label, artifacts.editableFinal.path, { download: true });
   return link ? {
     ...link,
     draft: true,
     downloadable: true,
-    warning: `当前只覆盖 ${finalPages}/${sourcePages} 页，不能作为完整产品交付。`
+    warning: partial ? `Only ${finalPages}/${sourcePages} pages are generated; this is not final delivery.` : "All pages are generated, but manual review is not complete; this is a draft check file."
   } : null;
 }
 
@@ -297,12 +304,13 @@ function decorateArtifactLinks(links = [], finalGate = null) {
     if (!link || link.key !== "final-pptx") {
       return link?.size ? { ...link, exists: true } : link;
     }
-    const blocked = finalGate?.downloadable === false;
+    const productReady = isFinalPptxProductReady(finalGate);
+    const blocked = !productReady;
     return {
       ...link,
-      label: "最终 PPTX",
+      label: "Final PPTX",
       exists: true,
-      downloadable: !blocked,
+      downloadable: productReady,
       blocked,
       blockedReason: blocked ? firstText(finalGate.reasons) || firstText(finalGate.warnings) : "",
       nextAction: blocked ? inferBlockedFinalNextAction(finalGate) : ""

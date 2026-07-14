@@ -33,7 +33,7 @@ export async function getWorkflowV1Readiness(jobId) {
   const linkKeys = new Set((artifactLinks.links || []).map((link) => link.key));
   const requiredDownloadLinks = ["final-pptx", "validation", "image-deck", "log-bundle"];
   const missingDownloadLinks = requiredDownloadLinks.filter((key) => !linkKeys.has(key));
-  const finalDownloadable = Boolean(finalGate.downloadable || finalGate.productReady);
+  const finalDownloadable = Boolean(finalGate.productReady);
   const downloadsReady = !missingDownloadLinks.length && finalDownloadable;
   const sourceName = job.input?.sourceOriginalName || artifacts.source?.originalName || "";
   const sourcePages = numberOrZero(coverage.sourcePages) || renderedPages.length;
@@ -200,7 +200,7 @@ export async function getWorkflowV1Readiness(jobId) {
     makeCheck({
       id: "final-editable-pptx",
       label: "最终可编辑 PPTX",
-      status: finalGate.productReady ? "pass" : finalGate.downloadable ? "warning" : artifacts.editableFinal?.path ? "warning" : "pending",
+      status: finalGate.productReady ? "pass" : artifacts.editableFinal?.path ? "warning" : "pending",
       detail: finalGate.label || (artifacts.editableFinal?.path ? shortPath(artifacts.editableFinal.path) : "等待最终可编辑 PPTX"),
       evidence: { productReady: Boolean(finalGate.productReady), downloadable: Boolean(finalGate.downloadable), finalPages }
     }),
@@ -465,7 +465,7 @@ function buildCurrentEditableEvidence({ artifacts = {}, finalGate = {}, qualityE
   return {
     finalReviewOnly,
     finalEvidenceUsable,
-    suppressHistoricalProviderFailure: Boolean(finalReviewOnly || finalGate.productReady || finalGate.downloadable || finalEvidenceUsable)
+    suppressHistoricalProviderFailure: Boolean(finalReviewOnly || finalGate.productReady || finalEvidenceUsable)
   };
 }
 

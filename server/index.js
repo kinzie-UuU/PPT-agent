@@ -27,9 +27,9 @@ import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
 import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobs, previewWorkflowJobCleanup, readWorkflowJob, restoreWorkflowJob, saveWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
 import { getProviderConfig, listLlmModels, testImageProvider, testLlmProvider, testOcrProvider } from "./providers.js";
 import { renderWorkflowSource } from "./sourceRenderer.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, writeVisualQualityReport } from "./workflowVisuals.js";
+import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, parsePageSelection, writeVisualQualityReport } from "./workflowVisuals.js";
 import { correctWorkflowOcrTextHint, runWorkflowOcr } from "./workflowOcr.js";
-import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, repairWorkflowEditablePageOpenability, testEditableRuntime } from "./workflowEditable.js";
+import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, repairWorkflowEditablePageOpenability, testEditableRuntime, isImageDeckReviewApproved } from "./workflowEditable.js";
 import { claimWorkflowEditableWorkerTask, completeWorkflowEditableWorkerTask, heartbeatWorkflowEditableWorkerTask, listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask, syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { buildWorkflowWorkerBriefs, getWorkflowWorkerBriefs } from "./workflowWorkerBriefs.js";
 import { getWorkflowDeliveryStatus } from "./workflowDelivery.js";
@@ -38,7 +38,7 @@ import { buildWorkflowLogBundle } from "./workflowLogBundle.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
 import { approveWorkflowManualReview, approveWorkflowVisualQualityReview, recordWorkflowPageVisualReview, resetWorkflowManualReview } from "./workflowManualReview.js";
 import { approveWorkflowImageDeckReview, assertWorkflowImageDeckReviewReady, recordWorkflowImageDeckPageReview } from "./workflowImageDeckReview.js";
-import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
+import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, CODEX_PPT_VISUAL_TEST_GATES, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
 import { buildSkillFirstOutlineDraft, recordWorkflowCodexPptOutline } from "./workflowOutline.js";
 import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } from "./workflowCodexPptDecisions.js";
 import { assertWorkflowInformationAssetMapReady, buildWorkflowInformationAssetMap } from "./workflowInformationAssets.js";
@@ -1800,7 +1800,12 @@ app.post("/api/workflow-jobs/:id/visual/generate", async (req, res, next) => {
     const currentJob = await readWorkflowJob(req.params.id);
     const pageCount = Array.isArray(currentJob.artifacts?.renderedPages) ? currentJob.artifacts.renderedPages.length : 0;
     const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, { scope: "full-deck", imageCalls: pageCount }));
-    await assertCodexPptApprovals(req.params.id, CODEX_PPT_VISUAL_DECK_GATES);
+    const requestedPages = parsePageSelection(body.pages || body.pageNumbers || "", pageCount);
+    const isTwoPageTest = requestedPages.length > 0 && requestedPages.length <= 2;
+    await assertCodexPptApprovals(
+      req.params.id,
+      isTwoPageTest ? CODEX_PPT_VISUAL_TEST_GATES : CODEX_PPT_VISUAL_DECK_GATES
+    );
     assertWorkflowInformationAssetMapReady(currentJob);
     assertWorkflowOcrTextHintsReady(currentJob);
     assertWorkflowVisualGenerationAllowed(body);
@@ -2075,40 +2080,94 @@ app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery/preflight", async (
   }
 });
 
+async function createFreshEditableRunRollbackSnapshot(job = {}) {
+  const runDir = job.artifacts?.editableRun?.path || "";
+  const runRoot = runDir ? path.dirname(runDir) : "";
+  const backupRoot = path.join(job.dirs?.editableRun || job.rootDir, `.fresh-run-rollback-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const snapshot = JSON.parse(JSON.stringify(job));
+  if (runRoot && fsSync.existsSync(runRoot)) {
+    await fs.rm(backupRoot, { recursive: true, force: true });
+    await fs.cp(runRoot, backupRoot, { recursive: true });
+  }
+  return { jobId: job.id, snapshot, runRoot, backupRoot, hadRunRoot: Boolean(runRoot && fsSync.existsSync(backupRoot)) };
+}
+
+async function cleanupFreshEditableRunRollbackSnapshot(rollback = {}) {
+  if (rollback.backupRoot) await fs.rm(rollback.backupRoot, { recursive: true, force: true });
+}
+
+async function restoreFreshEditableRunRollbackSnapshot(rollback = {}) {
+  if (!rollback.snapshot?.id) return;
+  if (rollback.hadRunRoot && rollback.runRoot && rollback.backupRoot && fsSync.existsSync(rollback.backupRoot)) {
+    await fs.rm(rollback.runRoot, { recursive: true, force: true });
+    await fs.cp(rollback.backupRoot, rollback.runRoot, { recursive: true });
+  }
+  await saveWorkflowJob(rollback.snapshot);
+  await cleanupFreshEditableRunRollbackSnapshot(rollback);
+}
+
 app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery", async (req, res, next) => {
   try {
     const maxConcurrentPages = req.body?.maxConcurrentPages || 6;
     const reason = cleanClientText(req.body?.reason || "fresh editable run recovery for accepted stale page evidence");
-    await updateWorkflowStage(req.params.id, {
-      stage: "editable_prepared",
-      status: "running",
-      message: "Rebuilding fresh editppt run",
-      details: {
-        requestedBy: "api",
+    const currentJob = await readWorkflowJob(req.params.id);
+    if (req.body?.confirmRouteB !== true) {
+      const error = new Error("Route B requires explicit user confirmation before fresh editable run recovery.");
+      error.status = 409;
+      throw error;
+    }
+    if (!isImageDeckReviewApproved(currentJob.artifacts || {})) {
+      const error = new Error("Image deck review must be approved before fresh editable run recovery.");
+      error.status = 409;
+      throw error;
+    }
+    const rollback = await createFreshEditableRunRollbackSnapshot(currentJob);
+    let invalidatedJob = null;
+    let preparedJob = null;
+    let promptedJob = null;
+    let briefs = null;
+    let tasks = null;
+    let job = null;
+    try {
+      await updateWorkflowStage(req.params.id, {
+        stage: "editable_prepared",
+        status: "running",
+        message: "Rebuilding fresh editppt run",
+        details: {
+          requestedBy: "api",
+          force: true,
+          localOnly: true,
+          reason
+        }
+      });
+      invalidatedJob = await invalidateWorkflowEditableRebuildEvidence(req.params.id, { reason });
+      const { pages: _pages, pageIds: _pageIds, pageId: _pageId, page: _page, ...prepareBody } = req.body || {};
+      preparedJob = await prepareWorkflowEditableRun(req.params.id, {
+        ...prepareBody,
         force: true,
-        localOnly: true,
+        maxConcurrentPages,
         reason
-      }
-    });
-    const invalidatedJob = await invalidateWorkflowEditableRebuildEvidence(req.params.id, { reason });
-    const preparedJob = await prepareWorkflowEditableRun(req.params.id, {
-      ...(req.body || {}),
-      force: true,
-      maxConcurrentPages,
-      reason
-    });
-    const promptedJob = await buildWorkflowEditableWorkerPrompts(req.params.id, {
-      pages: req.body?.pages,
-      reason: `${reason}; rebuild editable prompts after fresh run recovery`
-    });
-    const briefs = await buildWorkflowWorkerBriefs(req.params.id, {
-      pages: req.body?.pages,
-      reason: `${reason}; rebuild worker briefs after fresh run recovery`
-    });
-    const tasks = await syncWorkflowEditableWorkerTasks(req.params.id, {
-      reason: `${reason}; sync worker tasks after fresh run recovery`
-    });
-    const job = await readWorkflowJob(req.params.id);
+      });
+      promptedJob = await buildWorkflowEditableWorkerPrompts(req.params.id, {
+        pages: req.body?.pages,
+        reason: `${reason}; rebuild editable prompts after fresh run recovery`
+      });
+      briefs = await buildWorkflowWorkerBriefs(req.params.id, {
+        pages: req.body?.pages,
+        reason: `${reason}; rebuild worker briefs after fresh run recovery`
+      });
+      tasks = await syncWorkflowEditableWorkerTasks(req.params.id, {
+        reason: `${reason}; sync worker tasks after fresh run recovery`
+      });
+      job = await readWorkflowJob(req.params.id);
+      await cleanupFreshEditableRunRollbackSnapshot(rollback);
+    } catch (freshRecoveryError) {
+      await restoreFreshEditableRunRollbackSnapshot(rollback).catch((restoreError) => {
+        console.error("FRESH_EDITABLE_RUN_ROLLBACK_FAILED", restoreError);
+      });
+      freshRecoveryError.freshRollbackRestored = true;
+      throw freshRecoveryError;
+    }
     res.json({
       ok: true,
       jobId: req.params.id,
@@ -2141,6 +2200,25 @@ app.post("/api/workflow-jobs/:id/editable/fresh-run-recovery", async (req, res, 
     });
   } catch (error) {
     try {
+      if (error.status) {
+        const current = await readWorkflowJob(req.params.id).catch(() => null);
+        res.status(error.status).json({
+          ok: false,
+          error: error.message || "Fresh editable run recovery failed",
+          ...(current ? { job: toClientWorkflowJob(current, { includeEvents: true }) } : {})
+        });
+        return;
+      }
+      if (error.freshRollbackRestored) {
+        const restoredJob = await readWorkflowJob(req.params.id);
+        res.status(400).json({
+          ok: false,
+          restored: true,
+          error: error.message || "Fresh editable run recovery failed",
+          job: toClientWorkflowJob(restoredJob, { includeEvents: true })
+        });
+        return;
+      }
       const job = await updateWorkflowStage(req.params.id, {
         stage: "editable_prepared",
         status: "failed",

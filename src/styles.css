@@ -9971,6 +9971,23 @@ textarea { min-height: 118px; resize: vertical; line-height: 1.6; }
   .workflow-delivery-facts {
     grid-template-columns: 1fr;
   }
+  .workspace-shell:has(.dual-dashboard) .workspace-grid {
+    padding: 12px;
+  }
+  .dual-task-titlebar h1 {
+    overflow-wrap: anywhere;
+    font-size: 22px;
+  }
+  .dual-dashboard .route-lane-head {
+    display: grid;
+  }
+}
+
+@media (max-width: 1180px) {
+  .dual-dashboard {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
 }
 
 .hybrid-workspace,

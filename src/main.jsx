@@ -66,7 +66,7 @@ const CODEX_PPT_APPROVAL_GATES = [
   { id: "style", label: "视觉风格" },
   { id: "backend", label: "生图后端" },
   { id: "sample", label: "样张" },
-  { id: "fullDeck", label: "全量生成" }
+  { id: "fullDeck", label: "2 页测试后全量生成" }
 ];
 
 function uniqueIds(ids = []) {
@@ -96,6 +96,26 @@ function getApprovedCodexPptGateSet(job = {}) {
   return new Set((Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
     .filter((item) => item?.status === "approved" && item.gate)
     .map((item) => item.gate));
+}
+
+function getCurrentFullDeckTestEvidence(job = {}) {
+  const artifacts = job?.artifacts || {};
+  const approval = (Array.isArray(artifacts.codexPptApprovals) ? artifacts.codexPptApprovals : [])
+    .filter((item) => item?.status === "approved" && item.gate === "fullDeck")
+    .at(-1);
+  const evidence = approval?.testDeck || {};
+  const sampleSha256 = artifacts.visualSample?.sha256 || "";
+  const images = new Map((Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .map((image) => [image.pageId || `page_${String(Number(image.pageNumber || 0)).padStart(3, "0")}`, image]));
+  const current = Boolean(
+    evidence.version === 1
+    && sampleSha256
+    && evidence.sampleSha256 === sampleSha256
+    && Array.isArray(evidence.pages)
+    && evidence.pages.length === 2
+    && evidence.pages.every((page) => page.pageId && page.sha256 && images.get(page.pageId)?.sha256 === page.sha256)
+  );
+  return current ? evidence : null;
 }
 
 function getNoCostCodexApprovalSummary(job = {}) {
@@ -395,6 +415,23 @@ function App() {
       setApiConfig((current) => ({ ...current, ...data, apiKey: "" }));
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (workflowJob?.id || !workflowJobs.length) return;
+    const selected = selectDefaultWorkflowJob(workflowJobs, primaryWorkflow);
+    if (!selected?.id) return;
+    let cancelled = false;
+    api.workflowJob(selected.id)
+      .then((job) => {
+        if (!cancelled && job?.id) setWorkflowJob(job);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkflowJob(selected);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [primaryWorkflow?.id, workflowJob?.id, workflowJobs]);
 
   useEffect(() => {
     let active = true;
@@ -879,13 +916,49 @@ function App() {
     }
   }
 
+  function needsRouteBConfirmation(action = "") {
+    return /editable\/prepare|editable\/hints|editable\/prompts/i.test(String(action || ""));
+  }
+
+  async function confirmRouteBStartIfNeeded(body = {}) {
+    if (!workflowJob?.id || body.confirmRouteB) return body;
+    const preflight = await api.workflowNextActionPreflight(workflowJob.id, body).catch(() => null);
+    if (!needsRouteBConfirmation(preflight?.action)) return body;
+    const routeState = buildDualRouteState(workflowJob);
+    if (!routeState.routeA.imageDeckReady || !routeState.routeA.imageDeckReviewReady) {
+      setStatus("请先完成路线 A 图片版 PPT，并通过整套图片复核后再进入路线 B。");
+      return null;
+    }
+    const confirmed = await askUserConfirm({
+      title: "开始路线 B",
+      body: "路线 B 会基于已确认的图片版 PPT，继续做 OCR、页面理解、对象级重建和人工复核。它会更慢，并可能调用模型或图片服务额度。",
+      primaryLabel: "确认开始路线 B",
+      variant: "route-a",
+      kicker: "可编辑版确认",
+      reviewItems: [
+        "先使用路线 A 的图片版结果",
+        "后台准备 editppt、文字识别和页面任务",
+        "完成后再逐页人工复核可编辑页"
+      ],
+      note: "不需要用户操作的步骤会在后台处理；需要确认时才会弹窗。"
+    });
+    if (!confirmed) return null;
+    return {
+      ...body,
+      confirmRouteB: true,
+      confirmExternalImageSpend: true
+    };
+  }
+
   async function runWorkflowNextAction(label = "正在执行下一步 PPT 重制任务...", body = {}) {
     if (!workflowJob?.id) return null;
+    const confirmedBody = await confirmRouteBStartIfNeeded(body);
+    if (!confirmedBody) return null;
     setWorkflowBusy(true);
     setError("");
     setStatus(label);
     try {
-      const result = await api.workflowNextAction(workflowJob.id, { ...body, requestedBy: "frontend-guided-next" });
+      const result = await api.workflowNextAction(workflowJob.id, { ...confirmedBody, requestedBy: "frontend-guided-next" });
       if (result.job) {
         setWorkflowJob(result.job);
         await loadWorkflowJobs({ activeId: result.job.id });
@@ -1008,8 +1081,13 @@ function App() {
         return;
       }
 
-      if (routeState.routeA.imageDeckReady && routeState.routeA.informationAssetMapReady && routeState.routeA.imageDeckReviewReady) {
-        setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
+      if (routeState.routeA.imageDeckReady) {
+        if (routeState.routeA.imageDeckReviewReady) {
+          setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
+        } else {
+          setImageDeckReviewOpen(true);
+          setStatus("当前任务已有图片版 PPT，请先逐页复核现有结果；不会自动重新生图。");
+        }
         return;
       }
 
@@ -1069,22 +1147,47 @@ function App() {
         return;
       }
 
-      if (!routeState.routeA.fullDeckApproved) {
-        const pages = routeState.routeA.imageTotal || routeState.routeA.sourceCount || "整套";
+      if (!routeState.routeA.twoPageTestGenerated) {
         const confirmed = await askUserConfirm({
-          title: "确认生成整套图片",
-          body: "将开始批量生成 " + pages + " 页图片版 PPT。这一步会调用外部图片 API，耗时更长，确认后后台生成整套图片页。",
-          primaryLabel: "确认生成"
+          title: "先生成 2 页测试图",
+          body: `先用当前样张作为风格参考生成 ${routeState.routeA.twoPageTestTarget} 页测试图。这一步预计调用 ${routeState.routeA.twoPageTestTarget} 次外部图片 API，通过复核后才会开放剩余页面。`,
+          primaryLabel: "开始 2 页测试"
         });
         if (!confirmed) return;
-        setStatus("正在记录整套生成授权...");
-        const next = await approveCodexGate("fullDeck", "frontend-route-a-full-deck-approval");
-        await refreshActiveWorkflow(next, "已确认整套生成授权。下一步将批量生成图片页。");
+        setStatus("正在生成 2 页风格测试图...");
+        const next = await api.workflowAction(workflowJob.id, "visual/generate", {
+          pages: routeState.routeA.twoPageTestPages.join(","),
+          maxPages: routeState.routeA.twoPageTestTarget,
+          confirmExternalImageSpend: true,
+          requestedBy: "frontend-route-a-two-page-test"
+        });
+        await refreshActiveWorkflow(next, "2 页测试图已生成，请逐页对比并标记通过。");
+        setImageDeckReviewOpen(true);
         return;
       }
 
-      if (!routeState.routeA.slideResultsRecorded) {
-        const pages = routeState.routeA.imageTotal || routeState.routeA.sourceCount || 0;
+      if (!routeState.routeA.twoPageTestReviewReady && !routeState.routeA.fullDeckApproved) {
+        setImageDeckReviewOpen(true);
+        setStatus("请先逐页复核 2 页测试图，并把两页都标记为“通过”。");
+        return;
+      }
+
+      if (routeState.routeA.requiresFullDeck && !routeState.routeA.fullDeckApproved) {
+        const pages = Math.max(0, Number(routeState.routeA.imageTotal || routeState.routeA.sourceCount || 0) - routeState.routeA.twoPageTestTarget);
+        const confirmed = await askUserConfirm({
+          title: "确认 2 页测试通过",
+          body: `两页测试图已逐页通过。确认后将开放剩余 ${pages} 页生成，并保留这两页测试结果，不会重复消耗额度。`,
+          primaryLabel: "通过并开放全量"
+        });
+        if (!confirmed) return;
+        setStatus("正在记录 2 页测试证据和全量授权...");
+        const next = await approveCodexGate("fullDeck", "frontend-route-a-two-page-test-approved");
+        await refreshActiveWorkflow(next, "2 页测试已确认通过。下一步只生成剩余页面。");
+        return;
+      }
+
+      if (routeState.routeA.requiresFullDeck && !routeState.routeA.slideResultsRecorded) {
+        const pages = routeState.routeA.remainingFullDeckPages.length;
         const confirmed = await askUserConfirm({
           title: "后台生成整套图片",
           body: "开始后台生成整套图片页。" + (pages ? "预计生成 " + pages + " 页。" : "") + " 生成过程中可以先做别的，完成后会开放图片版 PPT 下载。",
@@ -1093,6 +1196,8 @@ function App() {
         if (!confirmed) return;
         setStatus("正在批量生成图片页...");
         const next = await api.workflowAction(workflowJob.id, "visual/generate", {
+          pages: routeState.routeA.remainingFullDeckPages.join(","),
+          maxPages: pages,
           confirmExternalImageSpend: true,
           requestedBy: "frontend-route-a-full-deck"
         });
@@ -1138,8 +1243,16 @@ function App() {
     }
     const confirmed = await askUserConfirm({
       title: "开始路线 B",
-      body: "路线 B 会把图片版 PPT 转成可编辑 PPT，通常耗时更长，并可能调用 OCR / 模型服务。",
-      primaryLabel: "开始路线 B"
+      body: "路线 B 会基于已确认的图片版 PPT，继续做 OCR、页面理解、对象级重建和人工复核。它耗时更长，并可能调用模型或图片服务额度。",
+      primaryLabel: "确认开始路线 B",
+      variant: "route-a",
+      kicker: "可编辑版确认",
+      reviewItems: [
+        "先使用路线 A 的图片版结果",
+        "后台准备 editppt、文字识别和页面任务",
+        "完成后再逐页人工复核可编辑页"
+      ],
+      note: "不需要用户操作的步骤会在后台处理；需要确认时才会弹窗。"
     });
     if (!confirmed) return;
     setWorkflowBusy(true);
@@ -1165,7 +1278,6 @@ function App() {
       setWorkflowBusy(false);
     }
   }
-
   function openSampleReviewPanel() {
     if (!workflowJob?.id) return;
     setSampleReviewOpen(true);
@@ -2832,6 +2944,12 @@ function DualCleanupPanel({ activeJobId = "", jobs = [], onArchiveJob, onRefresh
 function getWorkflowTaskBucket(job = null) {
   if (!job?.id) return "running";
   const state = buildDualRouteState(job);
+  const routeBStarted = Boolean(
+    job.artifacts?.editableRun
+    || job.artifacts?.editableWorkerTasks
+    || job.editableWorkerTasks
+    || job.artifacts?.editableFinal
+  );
   const hasFailure = Boolean(
     job.stageStatus === "failed"
     || /fail|error/i.test(String(job.status || ""))
@@ -2839,6 +2957,7 @@ function getWorkflowTaskBucket(job = null) {
     || (Array.isArray(job.errors) && job.errors.length && !state.routeA.imageDeckReady)
   );
   if (hasFailure) return "failed";
+  if (routeBStarted && state.routeB.status !== "ready") return "running";
   const notes = String(job.input?.notes || job.notes || "");
   const routeAOnly = /route=A/i.test(notes) && !/route=B/i.test(notes);
   const complete = Boolean(
@@ -2854,6 +2973,7 @@ function getRouteAPrimaryLabel({ hasInput = false, job = null, noCostApprovalSum
     return outlineReady ? "确认大纲并创建路线 A" : "生成大纲";
   }
   const routeA = state?.routeA || {};
+  if (routeA.imageDeckReady) return routeA.imageDeckReviewReady ? "图片版已完成" : "复核现有图片版";
   if (routeA.codexPptDecisionReady && routeA.informationAssetMapReady === false) {
     return "分析页面信息资产";
   }
@@ -2861,7 +2981,9 @@ function getRouteAPrimaryLabel({ hasInput = false, job = null, noCostApprovalSum
   if (!routeA.codexPptDecisionReady) return "查看确认项";
   if (!routeA.sampleReady) return "生成 1 页样张";
   if (!routeA.sampleApproved) return "确认样张通过";
-  if (!routeA.fullDeckApproved) return "确认生成整套图片";
+  if (!routeA.twoPageTestGenerated) return "生成 2 页测试图";
+  if (!routeA.twoPageTestReviewReady) return "复核 2 页测试图";
+  if (routeA.requiresFullDeck && !routeA.fullDeckApproved) return "确认测试并开放全量";
   if (!routeA.slideResultsRecorded) return "后台生成整套图片";
   if (!routeA.imageDeckReviewReady) return "复核整套图片";
   if (!routeA.imageDeckReady) return "组装图片版 PPT";
@@ -2941,11 +3063,13 @@ function DualRouteDashboard({
       ? onRouteBAction || onOpenEditable
       : onRouteAAction;
   const primaryLabel = state.routeB.finalReady && !state.routeB.reviewReady
-    ? "继续人工复核"
+    ? cp(0x67e5, 0x770b, 0x4ea4, 0x4ed8, 0x68c0, 0x67e5)
     : state.routeA.status === "ready"
       ? "继续转可编辑 PPT"
       : "先完成图片版 PPT";
-  const canRunPrimary = Boolean(primaryAction) && !busy && (job?.id || hasInput);
+  const canRunPrimary = state.routeB.finalReady && !state.routeB.reviewReady
+    ? Boolean(primaryAction && job?.id)
+    : Boolean(primaryAction) && !busy && (job?.id || hasInput);
   const canRunRouteA = Boolean(routeAPrimaryAction) && !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
@@ -3273,6 +3397,30 @@ function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metric
   );
 }
 
+function isFrontendImageDeckReviewApproved(artifacts = {}) {
+  const review = artifacts.imageDeckReview || {};
+  const summary = review.summary || {};
+  if (review.status !== "approved") return false;
+  if (summary.readyForApproval !== true || summary.allPagesReviewed !== true || summary.allMarksCurrent !== true) return false;
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const expectedPages = visualImages.map((image, index) => image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`).filter(Boolean);
+  const uniquePages = Array.from(new Set(expectedPages));
+  if (!uniquePages.length) return false;
+  const marks = review.marks || {};
+  const visualByPage = new Map(visualImages.map((image, index) => [image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`, image]));
+  const allPagesPassed = uniquePages.every((pageId) => {
+    const mark = marks[pageId] || {};
+    const image = visualByPage.get(pageId) || {};
+    if (String(mark.status || "").toLowerCase() !== "pass") return false;
+    if (!image.path || mark.visualImagePath !== image.path) return false;
+    if (image.sha256 && mark.visualImageSha256 !== image.sha256) return false;
+    return true;
+  });
+  const total = Number(summary.totalPages ?? summary.pageCount ?? review.pageCount ?? 0) || 0;
+  const passed = Number(summary.passCount ?? summary.passedCount ?? summary.approvedPages ?? 0) || 0;
+  return Boolean(allPagesPassed && total === uniquePages.length && passed === uniquePages.length);
+}
+
 function buildDualRouteState(job = null) {
   const artifacts = job?.artifacts || {};
   const sourcePages = artifactCountNumber(artifacts.renderedPages || artifacts.sourcePages || artifacts.source);
@@ -3307,7 +3455,8 @@ function buildDualRouteState(job = null) {
     && visualSample.passthrough !== true
   );
   const sampleApproved = Boolean(sampleReady && approvedGates.has("sample"));
-  const fullDeckApproved = Boolean(approvedGates.has("fullDeck"));
+  const fullDeckTestEvidence = getCurrentFullDeckTestEvidence(job);
+  const fullDeckApproved = Boolean(fullDeckTestEvidence);
   const codexPptDecisionReady = Boolean(
     approvedGates.has("outline")
     && approvedGates.has("style")
@@ -3333,22 +3482,40 @@ function buildDualRouteState(job = null) {
   const slideDispatchReady = Boolean(slideJobsReady && slideJobTotal > 0 && slideDispatched >= slideJobTotal && slideFailed === 0);
   const slideResultsRecorded = Boolean(slideJobsReady && slideJobTotal > 0 && slideRecorded >= slideJobTotal && slideFailed === 0);
   const reviewPageIds = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
-    .map((image) => image.pageId || `page_${String(image.pageNumber || "").padStart(3, "0")}`)
+    .map((image, index) => image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`)
     .filter(Boolean);
   const imageDeckReview = artifacts.imageDeckReview || {};
-  const imageDeckReviewReady = Boolean(
-    imageDeckReview.status === "approved"
-    && imageDeckReview.summary?.readyForApproval === true
-    && reviewPageIds.length > 0
+  const imageDeckReviewReady = isFrontendImageDeckReviewApproved(artifacts);
+  const twoPageTestTarget = Math.min(2, imageTotal || sourcePages || 0);
+  const twoPageTestPages = Array.from({ length: twoPageTestTarget }, (_, index) => index + 1);
+  const twoPageTestGenerated = Boolean(
+    fullDeckApproved
+    || (twoPageTestTarget > 0 && imagePageCount === twoPageTestTarget)
   );
+  const twoPageTestReviewReady = Boolean(
+    fullDeckApproved
+    || (twoPageTestGenerated && imageDeckReviewReady)
+  );
+  const approvedTestPages = new Set((fullDeckTestEvidence?.pages || []).map((page) => Number(page.pageNumber || 0)).filter(Boolean));
+  const preservedTestPages = approvedTestPages.size ? approvedTestPages : new Set(twoPageTestPages);
+  const remainingFullDeckPages = Array.from({ length: imageTotal || sourcePages || 0 }, (_, index) => index + 1)
+    .filter((pageNumber) => !preservedTestPages.has(pageNumber));
+  const requiresFullDeck = remainingFullDeckPages.length > 0;
   const qaAssemblyReady = Boolean(imageDeckReady && (artifacts.codexPptSpeech?.path || artifacts.codexPptSpeech?.relativePath || artifacts.imageDeck?.path));
-  const editableTasks = Array.isArray(job?.editableWorkerTasks?.tasks) ? job.editableWorkerTasks.tasks : [];
+  const editableTasks = Array.isArray(job?.editableWorkerTasks?.tasks)
+    ? job.editableWorkerTasks.tasks
+    : Array.isArray(job?.artifacts?.editableWorkerTasks?.tasks)
+      ? job.artifacts.editableWorkerTasks.tasks
+      : Array.isArray(job?.artifacts?.editableWorkerTasks)
+        ? job.artifacts.editableWorkerTasks
+        : [];
   const recordedEditablePages = editableTasks.filter((task) => task.status === "recorded").length
     || Number(artifacts.pageEvidence?.summary?.readyPages || artifacts.editableFinal?.summary?.recordedPages || 0);
   const finalPages = Number(artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
   const finalReady = Boolean(artifacts.editableFinal?.path && (!expectedPages || finalPages >= expectedPages));
   const reviewReady = artifacts.manualReview?.status === "approved";
-  const deliverableReady = Boolean(finalReady && reviewReady);
+  const finalGateProductReady = Boolean(artifacts.finalGate?.productReady || artifacts.deliveryGate?.productReady || artifacts.editableFinal?.finalGate?.productReady || artifacts.editableFinal?.productReady);
+  const deliverableReady = Boolean(finalReady && reviewReady && finalGateProductReady);
   const routeAReady = Boolean(qaAssemblyReady && slideResultsRecorded && sampleApproved && codexPptDecisionReady && informationAssetMapReady && imageDeckReviewReady);
   const routeBStarted = Boolean(recordedEditablePages || finalPages || artifacts.editableRun);
   const routeBReady = deliverableReady;
@@ -3358,18 +3525,34 @@ function buildDualRouteState(job = null) {
   const nextUserConfirmation = !codexPptDecisionReady
     ? "需要你确认大纲、视觉风格和生图后端。"
     : !sampleApproved
-      ? "需要你确认 1 页样张，确认后再生成整套图片版。"
-      : "";
+      ? "需要你确认 1 页样张。"
+      : !twoPageTestGenerated
+        ? "下一步先生成 2 页测试图。"
+        : !twoPageTestReviewReady
+          ? "需要你逐页复核 2 页测试图。"
+          : requiresFullDeck && !fullDeckApproved
+            ? "需要你确认 2 页测试通过，才能开放剩余页面。"
+            : "";
   const backgroundComplete = Boolean(slideResultsRecorded && qaAssemblyReady);
   const backgroundActive = Boolean(sampleApproved && !backgroundComplete);
   const routeANextAction = !job?.id
     ? "先上传材料并创建图片版 PPT 任务。"
+    : imageDeckReady
+      ? imageDeckReviewReady
+        ? "图片版 PPT 已完成，可下载或继续转成可编辑 PPT。"
+        : "当前已有图片版 PPT，请先逐页复核现有结果；不会自动重新生图。"
     : !codexPptDecisionReady
       ? "先弹出确认界面：确认大纲、视觉风格和生图后端。"
       : !sampleApproved
-        ? "先弹出样张确认界面；确认后后台生成整套图片版。"
-        : !qaAssemblyReady
-          ? "样张已确认，图片版正在后台生成。"
+        ? "先弹出样张确认界面。"
+        : !twoPageTestGenerated
+          ? "先生成 2 页测试图，确认字体、色彩和版式一致。"
+          : !twoPageTestReviewReady
+            ? "逐页复核 2 页测试图，两页都通过后才能继续。"
+            : requiresFullDeck && !fullDeckApproved
+              ? "确认 2 页测试通过，开放剩余页面生成。"
+              : !qaAssemblyReady
+                ? "测试已通过，正在生成或复核剩余图片页。"
           : finalReady && !reviewReady
             ? "图片版和可编辑版都已生成；可先下载检查，最终交付仍需人工复核。"
             : !routeBReady
@@ -3397,8 +3580,23 @@ function buildDualRouteState(job = null) {
       reviewPageIds,
       qaAssemblyReady,
       fullDeckApproved,
+      fullDeckTestEvidence,
+      twoPageTestTarget,
+      twoPageTestPages,
+      twoPageTestGenerated,
+      twoPageTestReviewReady,
+      remainingFullDeckPages,
+      requiresFullDeck,
       nextUserConfirmation,
-      userConfirmLabel: !codexPptDecisionReady ? "待确认方案" : !sampleApproved ? "待确认样张" : "已确认",
+      userConfirmLabel: !codexPptDecisionReady
+        ? "待确认方案"
+        : !sampleApproved
+          ? "待确认样张"
+          : !twoPageTestReviewReady
+            ? "待复核 2 页测试"
+            : requiresFullDeck && !fullDeckApproved
+              ? "待确认测试通过"
+              : "已确认",
       backgroundLabel: backgroundComplete ? "已完成" : backgroundActive ? "后台处理中" : "等待确认",
       sampleReady,
       sampleApproved,
@@ -3873,7 +4071,7 @@ function workflowDeliveryFact({ delivery = {}, finalPath = "", readinessBundle =
   const finalGate = readinessBundle?.delivery?.finalGate || readinessBundle?.finalGate || null;
   const gateLevel = finalGate?.level || delivery?.level || "";
   const downloadable = finalGate
-    ? Boolean(finalGate.productReady || finalGate.downloadable)
+    ? Boolean(finalGate.productReady)
     : Boolean(finalPath && delivery?.level === "ready");
   if (downloadable) return { value: "可下载", state: "ready" };
   if (gateLevel === "blocked") return { value: "被阻断", state: "blocked" };
@@ -3984,7 +4182,7 @@ function WorkflowCodexDeckStatus({ artifacts = {}, busy = false, canAssembleImag
   const progress = imageDeckPath ? 100 : total ? Math.round((recorded / total) * 100) : 0;
   const stageItems = [
     { key: "sample", label: "样张", value: sampleReady ? "已确认" : artifacts.visualSample?.path ? "待复核" : "待处理", state: sampleReady ? "done" : artifacts.visualSample?.path ? "active" : "pending" },
-    { key: "fullDeck", label: "全量", value: fullDeckApproved ? "已授权" : "待确认", state: fullDeckApproved ? "done" : sampleReady ? "active" : "pending" },
+    { key: "fullDeck", label: "2 页测试", value: fullDeckApproved ? "已通过并授权全量" : "待生成并复核", state: fullDeckApproved ? "done" : sampleReady ? "active" : "pending" },
     { key: "queue", label: "图片页队列", value: queueReady ? `${recorded}/${total}` : "未同步", state: failed ? "blocked" : recorded && recorded >= total ? "done" : queueReady ? "active" : fullDeckApproved ? "active" : "pending" },
     { key: "deck", label: "图片型 PPT", value: imageDeckPath || (visualImages ? `${visualImages} 张图片` : "待处理"), state: imageDeckPath ? "done" : canAssembleImageDeck ? "active" : "pending" }
   ];
@@ -3994,7 +4192,7 @@ function WorkflowCodexDeckStatus({ artifacts = {}, busy = false, canAssembleImag
       <div className="workflow-codex-deck-head">
         <div>
           <b>整套图片生成</b>
-          <span>样张确认后，同步图片页任务，记录生成图片，再组装图片型 PPT。</span>
+          <span>样张确认后先跑 2 页测试；逐页通过后再生成剩余图片，最后组装图片型 PPT。</span>
         </div>
         <div className={`workflow-codex-deck-progress ${failed ? "blocked" : imageDeckPath ? "done" : queueReady ? "active" : "pending"}`}>
           <strong>{imageDeckPath ? "图片型 PPT 已就绪" : queueReady ? `${recorded}/${total} 已记录` : "等待队列"}</strong>
@@ -5032,13 +5230,14 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
     setRecoveryMessage("");
     setError("");
     try {
-      const result = await api.refreshWorkflowEditableRun(job.id, {
+      const confirmedBody = await confirmRouteBStartIfNeeded({
         force: true,
         maxConcurrentPages: 6,
         reason: "frontend fresh editable run recovery for accepted stale page evidence"
       });
+      const result = await api.refreshWorkflowEditableRun(job.id, confirmedBody);
       const tasks = result.tasks || {};
-      setRecoveryMessage(`已重建可编辑运行目录、页面提示和任务队列。当前 ${tasks.summary?.ready || 0}/${tasks.summary?.total || 0} 页可重跑；启动页面任务前仍需确认外部图片 API 额度。`);
+      setRecoveryMessage(`Fresh editable run rebuilt. Ready pages: ${tasks.summary?.ready || 0}/${tasks.summary?.total || 0}. Confirm image API quota before starting page workers.`);
       setRecoveryResult((current) => current ? {
         ...current,
         freshEditableRun: {
@@ -5812,8 +6011,8 @@ function getFinalDownloadState(finalGate = null) {
   }
   if (finalGate.downloadable) {
     return {
-      state: "downloadable",
-      message: "当前测试范围已通过阻断门禁，可以下载；完整产品验收仍需覆盖全部源页。"
+      state: "review",
+      message: "当前只可作为草稿检查；正式可编辑 PPT 需要全部页面复核通过后才能下载。"
     };
   }
   const reasons = [...(finalGate.reasons || []), ...(finalGate.warnings || [])].map(String);
@@ -8307,7 +8506,7 @@ function buildProductWorkflowMap({ complianceBundle = null, deliveryGate = null,
   const hasImageDeck = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
   const hasEditableRun = Boolean(artifacts.editableRun?.path || artifacts.editableRun?.relativePath);
   const hasEditableFinal = Boolean(artifacts.editableFinal?.path);
-  const isDeliverable = deliveryGate?.downloadable === true || deliveryGate?.productReady === true;
+  const isDeliverable = deliveryGate?.productReady === true;
 
   return [
     {

@@ -363,6 +363,9 @@ function validateManifestDraft({ pageDir, manifest }) {
 function materializeSourceFidelityBackground({ pageDir, spec = {}, pageRequest = {}, specPath = "", width = 0, height = 0 } = {}) {
   const fallbackMarker = readJsonIfExists(path.join(pageDir, "page-spec-fallback.json"));
   if (!isTrustedSourceFidelityMarker(fallbackMarker, pageDir, { pageRequest, specPath })) return spec;
+  if (process.env.PPT_TOOL_ALLOW_SOURCE_FIDELITY_RASTER_RECOVERY !== "1") {
+    throw new Error("Source-fidelity tiled raster recovery is disabled for product Route B; rebuild with separated assets/native objects instead.");
+  }
   const sourcePath = path.join(pageDir, "source.png");
   if (!fsSync.existsSync(sourcePath)) return spec;
   const assetsDir = path.join(pageDir, "assets");
@@ -603,32 +606,16 @@ function omitMissingGeneratedImageAssets({ pageDir, images = [], provenance = []
       warnings
     };
   }
-  const imagesNext = (Array.isArray(images) ? images : []).filter((image) => !missingGenerated.has(normalizeAssetPath(image.path || "")));
-  const provenanceNext = (Array.isArray(provenance) ? provenance : []).filter((item) => !missingGenerated.has(normalizeAssetPath(item.path || "")));
-  const visualInventoryNext = (Array.isArray(visualInventory) ? visualInventory : []).filter((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
-    const pathValue = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
-    if (pathValue && missingGenerated.has(pathValue)) return false;
-    const text = JSON.stringify(item);
-    return !Array.from(missingGenerated).some((missingPath) => text.includes(missingPath));
-  });
-  return { images: imagesNext, provenance: provenanceNext, visualInventory: visualInventoryNext, warnings };
+  return {
+    images: Array.isArray(images) ? images : [],
+    provenance: Array.isArray(provenance) ? provenance : [],
+    visualInventory: Array.isArray(visualInventory) ? visualInventory : [],
+    warnings
+  };
 }
 
 function filterUnbackedForegroundInventory(items = [], images = []) {
-  const imageIds = new Set((Array.isArray(images) ? images : []).map((image) => cleanId(image.id || "")).filter(Boolean));
-  const imagePaths = new Set((Array.isArray(images) ? images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
-  return (Array.isArray(items) ? items : []).filter((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
-    const id = cleanId(item.id || "");
-    const pathValue = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
-    const text = JSON.stringify(item);
-    const mentionsBackedPath = Array.from(imagePaths).some((imagePath) => imagePath && text.includes(imagePath));
-    const backed = Boolean((id && imageIds.has(id)) || (pathValue && imagePaths.has(pathValue)) || mentionsBackedPath);
-    if (requiresForegroundAsset(item)) return backed;
-    if (/^image$/i.test(String(item.type || "")) && !pathValue) return false;
-    return true;
-  });
+  return Array.isArray(items) ? items : [];
 }
 
 function collectVisualCoverageIssues(manifest = {}) {
@@ -648,6 +635,10 @@ function collectVisualCoverageIssues(manifest = {}) {
   const preservationClaim = /preserv|match|consistent|intact|source composition|background|visual elements/i.test(backgroundText);
   const renderableVisuals = shapes.length + images.length;
   const meaningfulShapes = shapes.filter(isMeaningfulVisualShape).length;
+  const sourceRasterCoverage = calculateSourceRasterCoverage(images);
+  if (sourceRasterCoverage >= 0.85) {
+    issues.push(`source-fidelity raster images cover ${(sourceRasterCoverage * 100).toFixed(1)}% of the slide; full-slide raster fallback is forbidden.`);
+  }
 
   if (visualInventory.length > 0 && renderableVisuals === 0) {
     issues.push("visual_inventory lists visible non-text objects but manifest shapes/images are empty.");
@@ -659,6 +650,28 @@ function collectVisualCoverageIssues(manifest = {}) {
     issues.push("background_strategy claims preserved or matched source visuals but manifest has too few meaningful shapes/images.");
   }
   return issues;
+}
+
+function calculateSourceRasterCoverage(images = []) {
+  const slide = { width: 1920, height: 1080 };
+  const sourceImages = images.filter((image) => {
+    const text = [
+      image.id,
+      image.path,
+      image.alt,
+      image.source,
+      image.source_type,
+      image.provenance_note
+    ].filter(Boolean).join(" ");
+    return /source_fidelity|source faithful|source-faithful|source\.png|rasterization/i.test(text);
+  });
+  if (!sourceImages.length) return 0;
+  const area = sourceImages.reduce((sum, image) => {
+    const box = Array.isArray(image.box_px) ? image.box_px.map(Number) : [];
+    if (box.length !== 4 || !box.every(Number.isFinite)) return sum;
+    return sum + Math.max(0, box[2]) * Math.max(0, box[3]);
+  }, 0);
+  return Math.min(1, area / (slide.width * slide.height));
 }
 
 function isMeaningfulVisualShape(shape = {}) {
@@ -815,7 +828,7 @@ function normalizeShapes(items, width, height) {
   if (!Array.isArray(items)) return [];
   return items.flatMap((item) => expandGridDecorationShape(item, width, height)).map((item, index) => {
     const normalized = coerceAxisAlignedLineShape(normalizeShapePaint(stripNonLinePoints(item)), width, height);
-    return {
+    const shape = {
       ...normalized,
       id: cleanId(normalized.id || `shape_${index + 1}`),
       type: cleanString(normalized.type || "rect"),
@@ -824,7 +837,32 @@ function normalizeShapes(items, width, height) {
         : { box_px: normalizeBox(normalized.box_px, width, height) }),
       z_index: clampNumber(normalized.z_index, 0, 10000, 10 + index)
     };
+    clampRoundRectCornerRadius(shape);
+    return shape;
   });
+}
+
+function clampRoundRectCornerRadius(shape = {}) {
+  if (!shape || shape.type !== "roundRect") return;
+  const box = Array.isArray(shape.box_px) ? shape.box_px.map(Number) : [];
+  if (box.length !== 4 || !box.every(Number.isFinite)) return;
+  const maxRadius = Math.max(0, Math.min(box[2], box[3]) / 2);
+  if (!Number.isFinite(maxRadius) || maxRadius <= 0) return;
+  const radius = Number(shape.source_corner_radius_px ?? shape.radius_px);
+  shape.source_corner_radius_px = Number.isFinite(radius)
+    ? Math.min(Math.max(0, radius), maxRadius)
+    : inferRoundRectCornerRadius(shape.box_px);
+  shape.source_corner_radius_px = Math.min(Math.max(0, shape.source_corner_radius_px), maxRadius);
+  if (Number.isFinite(Number(shape.radius_px))) shape.radius_px = Math.min(Math.max(0, Number(shape.radius_px)), maxRadius);
+}
+
+function inferRoundRectCornerRadius(boxPx = []) {
+  const box = Array.isArray(boxPx) ? boxPx.map(Number) : [];
+  const width = Math.abs(Number(box[2] || 0));
+  const height = Math.abs(Number(box[3] || 0));
+  const shortest = Math.min(width || 0, height || 0);
+  if (!Number.isFinite(shortest) || shortest <= 0) return 8;
+  return Math.max(4, Math.min(24, Math.round(shortest * 0.18)));
 }
 
 function avoidThinHorizontalLineTextOverlap(shapes = [], textBoxes = [], height = 0) {
@@ -1689,6 +1727,7 @@ function cleanString(value) {
 function normalizeTextContent(value) {
   return cleanString(value)
     .replace(/\[\d+\]/g, "")
+    .replace(/(?<=[\u3400-\u9fff])\s*\|\s*(?=[\u3400-\u9fff])/g, "|")
     .replace(/([，、。；：！？])\s+/g, "$1")
     .replace(/\s+([，、。；：！？])/g, "$1")
     .replace(/(\d)\s+(元|万|亿)/g, "$1$2");

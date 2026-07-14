@@ -47,6 +47,7 @@ async function readProjectFiles() {
     workflowCodexPptSlideBatchRunner: await readText("server/workflowCodexPptSlideBatchRunner.js"),
     workflowVisuals: await readText("server/workflowVisuals.js"),
     workflowProductVisualReadinessRunner: await readText("server/workflowProductVisualReadinessRunner.js"),
+    workflowApprovals: await readText("server/workflowApprovals.js"),
     workflowV1Readiness: await readText("server/workflowV1Readiness.js"),
     workflowWorkerBatchRunner: await readText("server/workflowWorkerBatchRunner.js"),
     workflowFinalEvidence: await readText("server/workflowFinalEvidence.js"),
@@ -54,6 +55,8 @@ async function readProjectFiles() {
     workflowArtifacts: await readText("server/workflowArtifacts.js"),
     workflowCostEstimate: await readText("server/workflowCostEstimate.js"),
     providers: await readText("server/providers.js"),
+    pageRebuildAssembler: await readText("scripts/page-rebuild-assembler.mjs"),
+    modelPageSpecWorker: await readText("scripts/model-page-spec-worker.mjs"),
     auditMojibake: await readText("scripts/audit-mojibake.mjs")
   };
 }
@@ -170,7 +173,8 @@ function checkFrontendMainFlow(files) {
     mustNotInclude(files.frontend, "buildWorkflowReviewRows");
     mustInclude(files.frontend, "approveWorkflowManualReview");
     mustInclude(files.frontend, "getFinalDownloadState");
-    mustInclude(files.frontend, "当前测试范围已通过阻断门禁");
+    mustInclude(files.frontend, "当前只可作为草稿检查；正式可编辑 PPT 需要全部页面复核通过后才能下载。");
+    mustNotInclude(files.frontend, "当前测试范围已通过阻断门禁");
     mustInclude(files.frontend, "可编辑 PPT 已可交付");
     mustInclude(files.frontend, "原始页");
     mustInclude(files.frontend, "图片版");
@@ -202,11 +206,29 @@ function checkFrontendButtonContracts(files) {
     mustInclude(files.frontend, "setTaskSearch(event.target.value)");
     mustInclude(files.frontend, "setCreateOpen(true)");
     mustInclude(files.frontend, "handleArchiveTask(event, item)");
+    mustInclude(files.frontend, "const routeBStarted = Boolean(");
+    mustInclude(files.frontend, 'if (routeBStarted && state.routeB.status !== "ready") return "running";');
     mustInclude(files.frontend, "onConfirm={askUserConfirm}");
     mustInclude(files.frontend, "onArchiveJob={toggleWorkflowArchive}");
     mustInclude(files.frontend, "onArchivedVisibilityChange={setWorkflowArchiveVisibility}");
     mustInclude(files.frontend, "onRouteAAction={runRouteAAction}");
     mustInclude(files.frontend, "onRouteBAction={runRouteBAction}");
+    mustInclude(files.frontend, "确认开始路线 B");
+    mustInclude(files.frontend, "confirmRouteBStartIfNeeded");
+    mustInclude(files.frontend, "needsRouteBConfirmation");
+    mustInclude(files.frontend, "workflowNextActionPreflight(workflowJob.id, body)");
+    mustInclude(files.frontend, "confirmRouteB: true");
+    mustInclude(files.frontend, "job?.artifacts?.editableWorkerTasks?.tasks");
+    mustInclude(files.frontend, "job?.artifacts?.editableWorkerTasks");
+    mustInclude(files.frontend, "可编辑版确认");
+    mustInclude(files.frontend, "后台准备 editppt、文字识别和页面任务");
+    mustInclude(files.frontend, "不需要用户操作的步骤会在后台处理；需要确认时才会弹窗。");
+    mustInclude(files.frontend, "正式可编辑 PPT 需要全部页面复核通过后才能下载。");
+    if (!(files.frontend.indexOf("if (finalGate.productReady)") < files.frontend.indexOf("if (finalGate.downloadable)"))) {
+      throw new Error("Final download state must evaluate productReady before draft downloadable");
+    }
+    mustNotInclude(files.frontend, "finalGate.productReady || finalGate.downloadable");
+    mustNotInclude(files.frontend, "deliveryGate?.downloadable === true || deliveryGate?.productReady === true");
     mustInclude(files.frontend, "onDeliveryModeChange={setPendingDeliveryMode}");
     mustInclude(files.frontend, "onOpenSampleReview={openSampleReviewPanel}");
     mustInclude(files.frontend, "onOpenImageDeckReview={openImageDeckReviewPanel}");
@@ -236,6 +258,27 @@ function checkApiSurface(files) {
     mustInclude(files.frontend, "重新合成最终可编辑 PPT");
     mustInclude(files.workflowArtifacts, "draft-final-pptx");
     mustInclude(files.workflowArtifacts, "assertDraftFinalPptxDownloadable");
+    mustInclude(files.workflowArtifacts, "isFinalPptxProductReady(finalGate");
+    mustInclude(files.workflowArtifacts, "isFinalPptxProductReady(gate");
+    mustInclude(files.workflowArtifacts, "Final PPTX is blocked until productReady=true.");
+    mustInclude(files.workflowArtifacts, "productReady: gate.productReady === true");
+    mustInclude(files.workflowArtifacts, "downloadable: productReady");
+    mustInclude(files.workflowNextAction, "Route B requires explicit user confirmation before starting editable PPT rebuild.");
+    mustInclude(files.workflowNextAction, "isImageDeckReviewApproved");
+    mustInclude(files.workflowNextAction, "Route B requires image deck review approval before editable prepare.");
+    if ((files.workflowNextAction.match(/Route B requires image deck review approval before editable prepare\./g) || []).length < 2) {
+      throw new Error("Route B image deck review gate must protect both execution and preflight paths");
+    }
+    mustInclude(files.workflowEditable, "assertImageDeckReviewGate(job, options)");
+    mustInclude(files.workflowEditable, "Route B requires explicit user confirmation before editable prepare.");
+    mustInclude(files.workflowEditable, "isImageDeckReviewApproved");
+    mustInclude(files.workflowEditable, "safeToRunAutomatically: false");
+    mustNotInclude(files.workflowEditable, "allowMissingVisualQualityForTest || options.allowNonProductVisual || options.allowNonProductBackend");
+    mustNotInclude(files.workflowEditable, "/regression|smoke|test/i.test(marker)");
+    mustInclude(files.pageRebuildAssembler, "(?<=[\\u3400-\\u9fff])\\s*\\|\\s*(?=[\\u3400-\\u9fff])");
+    mustNotInclude(files.pageRebuildAssembler, ".replace(/\\s*\\|\\s*/g, \"|\")");
+    mustInclude(files.pageRebuildAssembler, "inferRoundRectCornerRadius(shape.box_px)");
+    mustInclude(files.modelPageSpecWorker, "inferRoundRectCornerRadius(shape.box_px)");
     mustInclude(files.frontend, "小样本草稿");
     mustNotInclude(files.styles, ".workflow-editable-finalize-action");
     mustInclude(files.frontend, "deliveryWorkerBatchSize");
@@ -307,6 +350,15 @@ function checkApiSurface(files) {
     mustInclude(files.frontend, "风格一致性");
     mustInclude(files.workflowProductVisualReadinessRunner, "styleLock");
     mustInclude(files.workflowProductVisualReadinessRunner, "风格锁");
+    mustInclude(files.workflowProductVisualReadinessRunner, "2 页测试尚未逐页复核通过");
+    mustInclude(files.workflowProductVisualReadinessRunner, "preservedTestPages");
+    mustInclude(files.workflowProductVisualReadinessRunner, "requiresImageDeckReview: true");
+    mustNotInclude(files.workflowProductVisualReadinessRunner, "await assembleWorkflowImageDeck");
+    mustInclude(files.workflowApprovals, "CODEX_PPT_TWO_PAGE_TEST_REQUIRED");
+    mustInclude(files.workflowApprovals, "source-page-edit-plus-style-reference");
+    mustInclude(files.workflowApprovals, "isCodexPptFullDeckApprovalCurrent");
+    mustInclude(files.frontend, "开始 2 页测试");
+    mustInclude(files.frontend, "通过并开放全量");
     mustInclude(files.providers, "referenceImagePaths");
     mustInclude(files.providers, "source-page-edit-plus-style-reference");
     mustInclude(files.frontend, "确认方案");
@@ -356,6 +408,10 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowWorkerBatchRunner, "图片输入、JSON 输出和非空响应");
     mustInclude(files.workflowEditable, "getEditablePrepareInputs(job, options)");
     mustInclude(files.workflowEditable, "options.pages || options.pageIds || options.pageId");
+    mustInclude(files.workflowEditable, "assertEditableDispatchAllowed");
+    mustInclude(files.workflowEditable, "EDITABLE_DISPATCH_STAGE_MISMATCH");
+    mustInclude(files.workflowEditable, "EDITABLE_DISPATCH_PAGE_NOT_SELECTED");
+    mustInclude(files.workflowEditable, "rebuild_page_locally");
     mustInclude(files.providers, "plain-json-fallback");
     mustInclude(files.providers, "parsed.ok === true");
     mustInclude(files.workflowNextAction, "partial-final-review-or-continue");
