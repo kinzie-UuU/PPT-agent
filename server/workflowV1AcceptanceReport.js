@@ -931,13 +931,13 @@ function inspectEditablePageEvidence(runDir = "") {
 }
 
 function inspectEditableVisualFreshness(report = {}) {
-  const visualTimes = [
-    report.visual?.imageDeckCreatedAt,
-    report.visual?.visualManifestCreatedAt,
-    report.visual?.visualQualityCreatedAt,
+  const currentImageTimes = [
     report.visual?.latestImageCreatedAt,
     ...(Array.isArray(report.visual?.images) ? report.visual.images.map((image) => image?.createdAt) : [])
   ].map(toTime).filter((time) => time > 0);
+  const visualTimes = currentImageTimes.length
+    ? currentImageTimes
+    : [report.visual?.imageDeckCreatedAt].map(toTime).filter((time) => time > 0);
   const latestVisualAt = visualTimes.length ? Math.max(...visualTimes) : 0;
   const editableTimes = [
     report.editable?.runCreatedAt,

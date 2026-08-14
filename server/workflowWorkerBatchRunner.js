@@ -7,9 +7,10 @@ import { rootDir } from "./store.js";
 import { getProviderConfig, testPageSpecProvider } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
-import { finalizeWorkflowEditableRun } from "./workflowEditable.js";
+import { describeImageDeckReviewGate, finalizeWorkflowEditableRun, isImageDeckReviewApproved } from "./workflowEditable.js";
 import { listWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
-import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
+import { consumeExternalImageSpendAuthorization, getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
+import { withWorkflowJobLock } from "./workflowJobLock.js";
 
 const RUNNER_STATUSES = new Set(["running", "complete", "failed", "cancelled", "unknown"]);
 const MODEL_WORKER_DEFAULT_MAX_PAGES = 2;
@@ -22,10 +23,20 @@ const MODEL_WORKER_DEFAULT_IMAGE_CALLS_PER_PAGE = 8;
 const ACTIVE_RUNNER_CHILDREN = new Map();
 
 export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
+  return withWorkflowJobLock(`editable-batch:${jobId}`, () => startWorkflowEditableWorkerBatchUnlocked(jobId, options));
+}
+
+async function startWorkflowEditableWorkerBatchUnlocked(jobId, options = {}) {
   const mode = normalizeMode(options.mode || "model");
   const preflight = await getWorkflowEditableWorkerBatchPreflight(jobId, { ...options, mode });
   enforceEditableWorkerBatchPreflight(preflight, mode);
   const job = await readWorkflowJob(jobId);
+  if (!isImageDeckReviewApproved(job.artifacts || {})) {
+    const error = new Error("请先完成整套图片内容与视觉复核，再启动可编辑页面重建。");
+    error.status = 409;
+    error.code = "IMAGE_DECK_REVIEW_REQUIRED";
+    throw error;
+  }
   const activeRunner = findActiveRunner(job);
   if (activeRunner) {
     throw new Error(`Editable worker batch ${activeRunner.id} is already running. Wait for it to finish or inspect its log before starting another batch.`);
@@ -88,6 +99,16 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
       : 0
   };
   const runId = makeRunnerId();
+  if (preflight.requiredConfirmations?.externalImageSpend?.source === "authorization-ledger") {
+    await consumeExternalImageSpendAuthorization(jobId, {
+      scope: "editable-workers",
+      imageCalls: preflight.requiredConfirmations.externalImageSpend.imageCalls,
+      pages: preflight.selectedPageIds || [],
+      pageSelection: (preflight.selectedPageIds || []).join(","),
+      runId,
+      consumedBy: options.requestedBy || "editable-worker-batch"
+    });
+  }
   const logsDir = path.join(job.dirs.logs, "worker-runs");
   await fs.mkdir(logsDir, { recursive: true });
   const logPath = path.join(logsDir, `${runId}.log`);
@@ -136,6 +157,7 @@ export async function startWorkflowEditableWorkerBatch(jobId, options = {}) {
     stdio: ["ignore", logFd, logFd],
     env: {
       ...process.env,
+      NODE_USE_ENV_PROXY: process.execArgv.includes("--use-env-proxy") || process.env.NODE_USE_ENV_PROXY === "1" ? "1" : "",
       PPT_TOOL_BASE_URL: options.baseUrl || process.env.PPT_TOOL_BASE_URL || `http://127.0.0.1:${process.env.PORT || 4180}`,
       PPT_TOOL_USE_SOURCE_FIDELITY_BACKGROUND: runnerOptions.useSourceFidelityBackground ? "1" : "",
       PPT_EXTERNAL_IMAGE_CALL_BUDGET: Number.isFinite(Number(runnerOptions.externalImageCallsPerPage)) ? String(runnerOptions.externalImageCallsPerPage) : process.env.PPT_EXTERNAL_IMAGE_CALL_BUDGET || "",
@@ -231,14 +253,23 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
     ? taskBundle.tasks
     : Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const activeRunner = findActiveRunner(job);
+  const selectedFailedTasks = tasks
+    .filter((task) => task.status === "failed")
+    .filter((task) => !selectedPages.size || selectedPages.has(normalizePageId(task.pageId)));
   const runnableTasks = tasks
-    .filter((task) => task.status === "ready" || task.status === "failed")
+    .filter((task) => task.status === "ready")
     .filter((task) => !selectedPages.size || selectedPages.has(normalizePageId(task.pageId)))
     .slice(0, maxPages);
   const selectedPageIds = runnableTasks.map((task) => normalizePageId(task.pageId)).filter(Boolean);
   const selectedPageNumbers = selectedPageIds
     .map((pageId) => Number(pageId.replace(/^page_0*/, "")))
     .filter((page) => Number.isInteger(page) && page > 0);
+  const staleVisualPageIds = new Set((Array.isArray(artifacts.editableRun?.staleVisualPageIds)
+    ? artifacts.editableRun.staleVisualPageIds
+    : [])
+    .map(normalizePageId)
+    .filter(Boolean));
+  const staleSelectedPageIds = selectedPageIds.filter((pageId) => staleVisualPageIds.has(pageId));
   const externalImageCallsPerPage = clampInteger(
     firstDefined(options.externalImageCallsPerPage, options.imageCallsPerPage, process.env.PPT_EDITABLE_IMAGE_CALLS_PER_PAGE),
     0,
@@ -300,11 +331,18 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   const blockingIssues = [];
   const warnings = [];
 
+  if (!isImageDeckReviewApproved(artifacts)) blockingIssues.push(`${describeImageDeckReviewGate(artifacts, false)}。完成后再启动可编辑页面重建。`);
   if (!artifacts.editableRun?.path) blockingIssues.push("editppt prepare has not produced an editable run yet.");
+  if (staleSelectedPageIds.length) {
+    blockingIssues.push(`第 ${staleSelectedPageIds.map((pageId) => Number(pageId.replace(/^page_0*/, ""))).join("、")} 页图片已更新，请先刷新可编辑运行和该页输入，再启动重建。`);
+  }
   if (activeRunner) blockingIssues.push(`Editable worker batch ${activeRunner.id} is already running.`);
   if (!prompts.length) blockingIssues.push("No editable page worker prompts are available.");
   if (!tasks.length) blockingIssues.push("No editable worker tasks are synced.");
-  if (tasks.length && !runnableTasks.length) blockingIssues.push("No ready or failed editable worker task matches this batch.");
+  if (selectedPages.size && selectedFailedTasks.length) {
+    blockingIssues.push(`第 ${selectedFailedTasks.map((task) => Number(normalizePageId(task.pageId).replace(/^page_0*/, ""))).join("、")} 页仍是失败状态。请先查看失败原因并重置这些页面，再启动重跑。`);
+  }
+  if (tasks.length && !runnableTasks.length) blockingIssues.push("No ready editable worker task matches this batch. Reset failed pages after reviewing their failure reason before retrying.");
   if (mode === "model" && !providers.llm.configured) {
     blockingIssues.push("对话模型服务商未配置，image-to-editable-ppt 模型页面任务无法生成可编辑页面规格。");
   }
@@ -342,13 +380,11 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   }
   const lowComplexityPageSpec = mode === "model"
     && options.disableLowComplexityPageSpec !== true
-    && (
-      recentProviderFailure.kind === "provider-timeout"
-      || options.lowComplexityPageSpec
-      || options.useLowComplexityPageSpec
-    );
+    && Boolean(options.lowComplexityPageSpec || options.useLowComplexityPageSpec);
   if (lowComplexityPageSpec) {
-    warnings.push("最近一次页面规格模型请求超时，或本次已显式启用低复杂度页面规格模式；将优先生成更小的 compact JSON，降低再次 524 的概率。");
+    warnings.push("本次已显式启用低复杂度页面规格模式；将优先生成更小的 compact JSON，降低再次 524 的概率。");
+  } else if (mode === "model" && recentProviderFailure.kind === "provider-timeout") {
+    warnings.push("检测到历史页面规格请求超时；当前批次仍保持完整页面规格，避免复杂页面因自动降级而丢失视觉资产。");
   }
 
   const requiredConfirmations = {
@@ -392,6 +428,8 @@ export async function getWorkflowEditableWorkerBatchPreflight(jobId, options = {
   const batchCost = buildWorkerBatchCostSummary(cost, {
     selectedCount: runnableTasks.length,
     selectedPageIds,
+    recoveryRequiredPageIds: selectedFailedTasks.map((task) => normalizePageId(task.pageId)).filter(Boolean),
+    staleSelectedPageIds,
     selectedPages,
     totalTasks: tasks.length,
     externalImageCalls: requiredExternalImageCalls,
@@ -840,9 +878,13 @@ function firstProviderSnapshot(tasks = []) {
   return null;
 }
 
-function inspectRecentProviderFailure(job = {}, providers = {}) {
+export function inspectRecentProviderFailure(job = {}, providers = {}) {
   const runs = Array.isArray(job.artifacts?.editableWorkerBatchRuns) ? job.artifacts.editableWorkerBatchRuns : [];
   const orderedRuns = [...runs].sort((a, b) => timestampOfRun(b) - timestampOfRun(a));
+  const recordedPageIds = new Set((Array.isArray(job.artifacts?.editableWorkerTasks) ? job.artifacts.editableWorkerTasks : [])
+    .filter((task) => task?.status === "recorded")
+    .map((task) => normalizePageId(task.pageId))
+    .filter(Boolean));
   const currentProvider = {
     llm: publicProvider(providers.llm),
     image: publicProvider(providers.image)
@@ -851,7 +893,9 @@ function inspectRecentProviderFailure(job = {}, providers = {}) {
     const text = collectRunFailureText(run);
     const kind = classifyRecentProviderFailureText(text);
     if (!kind) continue;
-    const pages = collectRunFailurePages(run);
+    const failedPages = collectRunFailurePages(run);
+    const pages = failedPages.filter((pageId) => !recordedPageIds.has(pageId));
+    if (failedPages.length && !pages.length) continue;
     const pageText = pages.length ? `（${pages.join(",")}）` : "";
     const quota = kind === "provider-quota-exhausted";
     const empty = kind === "provider-empty-response";
@@ -895,13 +939,13 @@ function classifyRecentProviderFailureText(value = "") {
   if (isImageProviderOverloadText(text)) return "image-provider-overloaded";
   if (/额度已用尽|余额|insufficient[_\s-]?quota|quota|credit|billing/i.test(text)) return "provider-quota-exhausted";
   if (/HTTP\s*401|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(text)) return "provider-auth-failed";
-  if (/operation was aborted|aborted|timeout|timed out|ETIMEDOUT|AbortError|HTTP\s*524|\b524\b|gateway timeout|cloudflare/i.test(text)) return "provider-timeout";
+  if (/operation was aborted|\baborted\b|\btimed out\b|\brequest timeout\b|\btimeout(?: error| exceeded| after)\b|ETIMEDOUT|AbortError|HTTP\s*524|\b524\b|gateway timeout|cloudflare/i.test(text)) return "provider-timeout";
   if (/Model response did not contain parseable JSON|content was empty|completion_tokens["':\s]+0|finishReason["':\s]+stop/i.test(text)) return "provider-empty-response";
   return "";
 }
 
 function isImageProviderOverloadText(text = "") {
-  return /servers are currently overloaded|server(?:s)? overloaded|overloaded\. please try again later|try again later|image batch .*exited with code 1|visual-asset-helper\.mjs exited with code 1/i.test(String(text || ""));
+  return /servers are currently overloaded|server(?:s)? overloaded|overloaded\. please try again later|try again later|image batch .*exited with code 1/i.test(String(text || ""));
 }
 
 function collectRunFailureText(run = {}) {
@@ -969,6 +1013,13 @@ function readRunLogTail(run = {}) {
 function enforceEditableWorkerBatchPreflight(preflight = {}, mode = "model") {
   const issues = Array.isArray(preflight.blockingIssues) ? preflight.blockingIssues : [];
   const warnings = Array.isArray(preflight.warnings) ? preflight.warnings : [];
+  const reviewIssue = issues.find((issue) => /image deck review|整套图片(?:风格|内容与视觉)复核/i.test(String(issue || "")));
+  if (reviewIssue) {
+    const error = new Error(reviewIssue);
+    error.status = 409;
+    error.code = "IMAGE_DECK_REVIEW_REQUIRED";
+    throw error;
+  }
   const externalConfirmation = preflight.requiredConfirmations?.externalImageSpend;
   if (mode === "model" && externalConfirmation?.required && !externalConfirmation.confirmed) {
     throw new Error("A persisted page-scoped external image spend authorization is required before running image-to-editable-ppt model page workers. Editable worker batch preflight failed: authorization ledger entry is missing.");
@@ -1424,7 +1475,9 @@ function buildRunnerFailureAnalysis(run = {}) {
   const text = collectRunFailureText(run);
   const runnerKind = classifyRunnerFailureText(text);
   const providerKind = classifyRecentProviderFailureText(text);
-  const kind = runnerKind === "page-validation-failed" ? runnerKind : providerKind || runnerKind;
+  const kind = ["page-validation-failed", "visual-fidelity-failed"].includes(runnerKind)
+    ? runnerKind
+    : providerKind || runnerKind;
   const pages = collectRunFailurePages(run);
   const pageText = pages.length ? pages.join("、") : "未知页面";
   const base = {
@@ -1525,6 +1578,35 @@ function buildRunnerFailureAnalysis(run = {}) {
       })
     };
   }
+  if (kind === "visual-fidelity-failed") {
+    return {
+      ...base,
+      title: "视觉相似度未达标",
+      reason: `${pageText} 的可编辑预览没有达到产品视觉相似度门槛。`,
+      recommendedAction: "保留已生成资产，重新规划并只重跑受影响页面；不要覆盖已成功页面。",
+      recoveryPlan: buildRunnerRecoveryPlan(run, {
+        kind,
+        pages,
+        reason: `${pageText} 的可编辑预览没有达到产品视觉相似度门槛。`,
+        recommendedAction: "保留已生成资产，重新规划并只重跑受影响页面；不要覆盖已成功页面。",
+        lowComplexityRecommended: false
+      })
+    };
+  }
+  if (kind === "asset-provenance-missing") {
+    return {
+      ...base,
+      title: "已有图片资产缺少来源记录",
+      reason: `${pageText} 已有可复用图片，但缺少可核验的生成后端或文件哈希记录。`,
+      recommendedAction: "系统将先从历史重跑记录中按文件哈希恢复来源账本；只有无法核验的资产才重新生成。",
+      recoveryPlan: buildRunnerRecoveryPlan(run, {
+        kind,
+        pages,
+        reason: `${pageText} 已有可复用图片，但缺少可核验的生成后端或文件哈希记录。`,
+        recommendedAction: "按文件哈希恢复资产来源账本后，只重跑受影响页面。"
+      })
+    };
+  }
   return {
     ...base,
     title: "页面重建命令失败",
@@ -1576,6 +1658,8 @@ function buildRunnerRecoveryPlan(run = {}, analysis = {}) {
 
 function classifyRunnerFailureText(value = "") {
   const text = String(value || "");
+  if (/product visual fidelity QA|visual similarity .*below the .*threshold|structure-loss/i.test(text)) return "visual-fidelity-failed";
+  if (/has no producing-backend provenance|refusing to guess provenance/i.test(text)) return "asset-provenance-missing";
   if (/validation failed|background_strategy|visual_inventory|invalid box_px|missing text|invalid points_px|source_corner_radius_px|roundRect .*must include|page validate|校验/i.test(text)) return "page-validation-failed";
   if (/Worker command exited|command failed|exited with code|Page artifacts were not recorded/i.test(text)) return "worker-command-failed";
   return "worker-command-failed";

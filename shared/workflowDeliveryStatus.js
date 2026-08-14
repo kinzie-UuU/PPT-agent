@@ -35,9 +35,22 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   const editablePassed = editability.editable === true || editability.status === "pass";
   const partialDeck = Boolean(sourcePages && processedPages && processedPages < sourcePages);
   const failedStage = stages.some((stage) => stage?.status === "failed");
+  const semanticQuality = artifacts.visualTextQuality?.summary
+    || artifacts.visualQuality?.summary?.semanticQuality
+    || artifacts.visualQuality?.semanticQuality
+    || {};
+  const visualBlockedPageIds = uniqueStrings(semanticQuality.blockedPageIds || artifacts.visualQuality?.summary?.blockedPageIds || []);
+  const visualBlockedPages = Math.max(numberOrZero(semanticQuality.blockedCount), visualBlockedPageIds.length);
+  const imageDeckReviewReady = isWorkflowImageDeckReviewReady(artifacts, {
+    expectedPages: sourcePages || Math.max(visualPages, imageDeckPages),
+    visualBlockedPages,
+    visualBlockedPageIds
+  });
+  const unresolvedVisualBlockedPages = imageDeckReviewReady ? 0 : visualBlockedPages;
+  const fullImageDeckReady = Boolean(sourcePages && visualPages >= sourcePages && imageDeckPages >= sourcePages);
 
   let level = "pending";
-  if (failedPages || failedStage || validationFailed) level = "blocked";
+  if (unresolvedVisualBlockedPages || failedPages || failedStage || validationFailed) level = "blocked";
   else if (hasFinal && validationPassed && editablePassed && !partialDeck) level = "ready";
   else if (hasFinal) level = "warning";
   else if (processedPages || readyPages || runningPages) level = "working";
@@ -46,7 +59,8 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     { label: "源页面", value: sourcePages || "未知" },
     { label: "已渲染页面", value: renderedPages || 0 },
     { label: "图片型 PPT 页面", value: imageDeckPages || 0 },
-    { label: "就绪重建页面", value: readyPages || 0 },
+    { label: "图片版质量", value: imageDeckReviewReady ? (visualBlockedPages ? `${visualBlockedPages} 页风险已确认` : "已复核") : visualBlockedPages ? `${visualBlockedPages} 页待核对` : visualPages ? "待复核" : "未开始" },
+    { label: imageDeckReviewReady ? "可启动重建页面" : "已准备重建队列", value: readyPages || 0 },
     { label: "已记录页面", value: recordedPages || 0 },
     { label: "失败页面", value: failedPages || 0 },
     { label: "最终 PPTX", value: hasFinal ? "已生成" : "缺失" },
@@ -58,6 +72,10 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   if (partialDeck) warnings.push(`当前输出只覆盖 ${processedPages}/${sourcePages} 个源页面。`);
   if (failedPages) warnings.push(`${failedPages} 个页面重建任务失败，需要重试。`);
   if (runningPages) warnings.push(`${runningPages} 个页面重建任务正在运行或已被认领。`);
+  if (unresolvedVisualBlockedPages) warnings.push(`图片版有 ${visualBlockedPages} 页存在自动内容风险；请逐页对照原稿，确认无误可明确接受，否则标记重做。`);
+  else if (visualBlockedPages && imageDeckReviewReady) warnings.push(`${visualBlockedPages} 页自动内容风险已由人工逐页确认。`);
+  else if (visualPages && !imageDeckReviewReady) warnings.push("图片版尚未完成逐页复核，不能进入可编辑重建。");
+  if (visualPages && sourcePages && !fullImageDeckReady) warnings.push(`图片版当前只覆盖 ${Math.min(visualPages, imageDeckPages)}/${sourcePages} 页。`);
   if (!validationReady) warnings.push("缺少最终校验 JSON。");
   if (validationFailed) warnings.push("最终校验 JSON 未通过。");
   if (hasFinal && !editablePassed) warnings.push("最终 PPTX 尚未通过对象级可编辑检查。");
@@ -75,6 +93,9 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     runningPages,
     recordedPages,
     failedPages,
+    visualBlockedPages: unresolvedVisualBlockedPages,
+    imageDeckReviewReady,
+    fullImageDeckReady,
     hasFinal,
     validationReady,
     validationPassed,
@@ -104,12 +125,80 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   return {
     level,
     title: titleForLevel(level),
-    summary: summaryForLevel(level, { hasFinal, partialDeck, processedPages, sourcePages, validationPassed, editablePassed }),
+    summary: unresolvedVisualBlockedPages
+      ? `图片版有 ${visualBlockedPages} 页存在自动内容风险，请逐页对照原稿后确认或标记重做。`
+      : summaryForLevel(level, { hasFinal, partialDeck, processedPages, sourcePages, validationPassed, editablePassed }),
     facts,
     warnings: uniqueStrings(warnings),
     nextStep: effectiveNextStep,
     nextActions
   };
+}
+
+export function isWorkflowImageDeckReviewReady(artifacts = {}, { expectedPages = 0, visualBlockedPages = 0, visualBlockedPageIds = [] } = {}) {
+  const review = artifacts.imageDeckReview || {};
+  const summary = review.summary || {};
+  if (review.status !== "approved") return false;
+  if (summary.readyForApproval !== true || summary.allPagesReviewed !== true || summary.allMarksCurrent !== true) return false;
+  const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
+  const visualByPage = new Map(visualImages.map((image, index) => [
+    normalizeWorkflowPageId(image.pageId || image.pageNumber || index + 1),
+    image
+  ]).filter(([pageId]) => Boolean(pageId)));
+  const pageIds = [...visualByPage.keys()];
+  if (!pageIds.length || (expectedPages > 0 && pageIds.length !== expectedPages)) return false;
+
+  const textQuality = artifacts.visualTextQuality || {};
+  const textSummary = textQuality.summary
+    || artifacts.visualQuality?.summary?.semanticQuality
+    || artifacts.visualQuality?.semanticQuality
+    || {};
+  if (textSummary.complete !== true || !String(textQuality.evidenceSha256 || textQuality.sha256 || "").trim()) return false;
+  const blockedPageIds = uniqueStrings([
+    ...(Array.isArray(textSummary.blockedPageIds) ? textSummary.blockedPageIds : []),
+    ...(Array.isArray(visualBlockedPageIds) ? visualBlockedPageIds : [])
+  ]).map(normalizeWorkflowPageId).filter(Boolean);
+  const blockedCount = Math.max(numberOrZero(textSummary.blockedCount), numberOrZero(visualBlockedPages));
+  if (blockedPageIds.length < blockedCount) return false;
+  const blockedPageSet = new Set(blockedPageIds);
+
+  const styleConsistency = artifacts.visualQuality?.summary?.styleConsistency
+    || artifacts.visualQuality?.styleConsistency
+    || {};
+  const visualQualityEvidenceSha256 = String(artifacts.visualQuality?.evidenceSha256 || artifacts.visualQuality?.sha256 || "").trim();
+  if (!visualQualityEvidenceSha256) return false;
+  const styleDriftPageSet = new Set((Array.isArray(styleConsistency.driftPages) ? styleConsistency.driftPages : [])
+    .map((page) => normalizeWorkflowPageId(page?.pageId || page?.pageNumber))
+    .filter(Boolean));
+  const approvedSampleSha256 = String(artifacts.visualQuality?.approvedSampleSha256 || styleConsistency.approvedSampleSha256 || "").trim();
+  const currentSampleSha256 = String(artifacts.visualSample?.sha256 || "").trim();
+  if (!approvedSampleSha256 || !currentSampleSha256 || approvedSampleSha256 !== currentSampleSha256) return false;
+
+  const marks = review.marks || {};
+  const pageEvidenceSha256ByPage = textQuality.pageEvidenceSha256ByPage || {};
+  const qualityImageSha256ByPage = artifacts.visualQuality?.pageImageSha256ByPage || {};
+  const allPagesCurrentAndAccepted = pageIds.every((pageId) => {
+    const image = visualByPage.get(pageId) || {};
+    const mark = marks[pageId] || {};
+    const imageSha256 = String(image.sha256 || "").trim();
+    const qualityImageSha256 = String(qualityImageSha256ByPage[pageId] || "").trim();
+    const pageEvidenceSha256 = String(pageEvidenceSha256ByPage[pageId] || "").trim();
+    const status = String(mark.status || "").toLowerCase();
+    if (!image.path || !imageSha256 || !qualityImageSha256 || imageSha256 !== qualityImageSha256) return false;
+    if (mark.visualImagePath !== image.path || mark.visualImageSha256 !== imageSha256) return false;
+    if (!pageEvidenceSha256 || mark.visualTextQualityPageEvidenceSha256 !== pageEvidenceSha256) return false;
+    if (mark.visualQualityEvidenceSha256 !== visualQualityEvidenceSha256) return false;
+    if (!["pass", "accept"].includes(status)) return false;
+    if (blockedPageSet.has(pageId) && (status !== "accept" || mark.semanticRiskAccepted !== true)) return false;
+    if (styleDriftPageSet.has(pageId) && (status !== "accept" || mark.styleDriftAccepted !== true)) return false;
+    return true;
+  });
+  if (!allPagesCurrentAndAccepted) return false;
+  const total = numberOrZero(summary.totalPages ?? summary.pageCount ?? review.pageCount);
+  const passed = numberOrZero(summary.passCount ?? summary.passedCount ?? summary.approvedPages);
+  const accepted = numberOrZero(summary.acceptCount);
+  return total === pageIds.length && passed + accepted === pageIds.length;
 }
 
 function chooseNextStep({
@@ -123,6 +212,9 @@ function chooseNextStep({
   runningPages,
   recordedPages,
   failedPages,
+  visualBlockedPages,
+  imageDeckReviewReady,
+  fullImageDeckReady,
   hasFinal,
   validationReady,
   validationPassed,
@@ -133,6 +225,15 @@ function chooseNextStep({
   }
   if (!visualPages || !imageDeckPages) {
     return makeNextStep("generate-image-deck", "生成图片型 PPT", "使用 codex-ppt 创建视觉统一的页面图片，并组装图片型 PPTX。");
+  }
+  if (!fullImageDeckReady) {
+    return makeNextStep("continue-image-deck", "继续生成图片版", "当前只完成部分页面，请先生成并复核剩余图片页。");
+  }
+  if (visualBlockedPages) {
+    return makeNextStep("review-image-deck", "逐页核对图片版风险", `${visualBlockedPages} 页存在文字、数据、页码或页面角色等自动风险；确认无误可明确接受，否则标记重做。`);
+  }
+  if (!imageDeckReviewReady) {
+    return makeNextStep("review-image-deck", "逐页复核图片版", "确认信息保真、文字清晰和整套风格后，才能进入可编辑重建。");
   }
   if (!editableRunReady) {
     return makeNextStep("prepare-editable", "准备可编辑重建", "图片型 PPT 就绪后，准备 image-to-editable-ppt 运行目录。");
@@ -180,7 +281,7 @@ function buildNextActions(nextStep, {
     if (remainingPages > 0) actions.push(`继续生成剩余 ${remainingPages} 页：启动前必须再次确认 gpt-image-2 图片 API 和页面规格模型调用额度。`);
   }
   if (failedPages) actions.push("打开页面任务队列，检查失败页面，只重试这些页面。");
-  if (!hasFinal && readyPages) actions.push(`确认外部 API 用量后，为 ${readyPages} 个就绪页面运行受保护的可编辑重建批处理。`);
+  if (nextStep.id === "start-page-workers" && !hasFinal && readyPages) actions.push(`确认外部 API 用量后，为 ${readyPages} 个就绪页面运行受保护的可编辑重建批处理。`);
   if (!hasFinal && runningPages) actions.push("观察后台页面任务日志，直到所有页面已记录或失败。");
   if (!hasFinal && sourcePages && recordedPages >= sourcePages) actions.push("运行最终生成，创建最终可编辑 PPT 和校验证据。");
   if (hasFinal && validationReady && editablePassed && partialDeck) actions.push(`下载当前 ${processedPages || recordedPages || ""} 页小样本草稿、校验证据和日志包。`);

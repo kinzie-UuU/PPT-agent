@@ -4,18 +4,23 @@ import crypto from "crypto";
 import { rootDir } from "./store.js";
 import { getProviderConfig } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { buildDeckStyleSpec } from "./workflowDeckDesignSystem.js";
 
 export async function recordWorkflowCodexPptStyle(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const now = new Date().toISOString();
+  const styleBrief = cleanString(options.styleBrief || options.style || job.input?.style || defaultStyleBrief(job));
+  const audience = cleanString(options.audience || "");
+  const tone = cleanString(options.tone || "");
   const payload = {
     kind: "codex_ppt_style",
     version: 1,
     jobId: job.id,
     title: cleanString(options.title || job.input?.sourceOriginalName || "Codex PPT visual style"),
-    styleBrief: cleanString(options.styleBrief || options.style || job.input?.style || defaultStyleBrief(job)),
-    audience: cleanString(options.audience || ""),
-    tone: cleanString(options.tone || ""),
+    styleBrief,
+    styleSpec: buildDeckStyleSpec({ styleSpec: options.styleSpec, styleBrief, audience, tone, pageNumberPolicy: options.pageNumberPolicy }),
+    audience,
+    tone,
     constraints: cleanString(options.constraints || "Keep one coherent visual identity while varying layouts by slide role."),
     references: normalizeReferences(options.references),
     source: cleanString(options.source || "workflow-style"),
@@ -110,6 +115,7 @@ async function writeDecisionArtifact(job, { artifactKey, fileStem, eventType, ev
       baseUrl: payload.baseUrl || "",
       model: payload.model || "",
       styleBrief: payload.styleBrief || "",
+      styleSpec: payload.styleSpec || null,
       configured: payload.configured,
       enabled: payload.enabled,
       size: jsonStat.size,
@@ -144,6 +150,18 @@ function buildStyleMarkdown(payload) {
     "",
     payload.constraints
   ];
+  if (payload.styleSpec) {
+    lines.push(
+      "",
+      "## Style System",
+      "",
+      `- Typography: ${payload.styleSpec.typography?.rule || ""}`,
+      `- Palette: ${payload.styleSpec.palette?.background || ""}; ${payload.styleSpec.palette?.primaryAccent || ""}`,
+      `- Master: ${payload.styleSpec.master?.titleAnchor || ""}; ${payload.styleSpec.master?.header || ""}; ${payload.styleSpec.master?.footer || ""}`,
+      `- Components: ${payload.styleSpec.components?.cards || ""}; ${payload.styleSpec.components?.icons || ""}; ${payload.styleSpec.components?.charts || ""}`,
+      `- Variation: ${payload.styleSpec.variation?.rule || ""}`
+    );
+  }
   if (payload.audience) lines.push("", `- Audience: ${payload.audience}`);
   if (payload.tone) lines.push(`- Tone: ${payload.tone}`);
   if (payload.references.length) {

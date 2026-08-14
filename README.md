@@ -107,7 +107,7 @@ OCR_PROVIDER=paddleocr-local
 OCR_FALLBACK_PROVIDER=rapidocr-local
 OCR_PYTHON_PATH=python
 
-EDITPPT_SKILL_ROOT=C:\Users\Administrator\.codex\skills\image-to-editable-ppt
+EDITPPT_SKILL_ROOT=C:\Users\Administrator\.agents\skills\image-to-editable-ppt
 EDITPPT_PYTHON_PATH=python
 EDITPPT_RUN_ROOT=C:\Users\Administrator\AppData\Local\Temp\ppt-tool-editable-runs
 

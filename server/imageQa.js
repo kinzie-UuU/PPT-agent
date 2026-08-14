@@ -38,19 +38,25 @@ function analyzeRegion(image, region) {
   const x1 = clamp(Math.floor(region.x + region.width), x0 + 1, width);
   const y1 = clamp(Math.floor(region.y + region.height), y0 + 1, height);
   const step = Math.max(1, Math.floor(Math.sqrt(((x1 - x0) * (y1 - y0)) / 180000)));
-  let count = 0, sum = 0, sumSq = 0, dark = 0, saturated = 0, edge = 0, textLike = 0;
+  let count = 0, sum = 0, sumSq = 0, dark = 0, saturated = 0, edge = 0, textLike = 0, hueSamples = 0;
+  const hueBuckets = Array.from({ length: 12 }, () => 0);
   for (let y = y0 + step; y < y1 - step; y += step) {
     for (let x = x0 + step; x < x1 - step; x += step) {
       const lum = luminanceAt(pixels, width, x, y);
       const dx = Math.abs(luminanceAt(pixels, width, x + step, y) - luminanceAt(pixels, width, x - step, y));
       const dy = Math.abs(luminanceAt(pixels, width, x, y + step) - luminanceAt(pixels, width, x, y - step));
       const gradient = dx + dy;
-      const sat = saturationAt(pixels, width, x, y);
+      const color = colorAt(pixels, width, x, y);
+      const sat = color.saturation;
       count += 1;
       sum += lum;
       sumSq += lum * lum;
       if (lum < 78) dark += 1;
       if (sat > 0.42) saturated += 1;
+      if (sat > 0.2) {
+        hueSamples += 1;
+        hueBuckets[Math.floor(color.hue / 30) % 12] += 1;
+      }
       if (gradient > 44) edge += 1;
       if (gradient > 58 && lum < 150) textLike += 1;
     }
@@ -63,7 +69,10 @@ function analyzeRegion(image, region) {
     edgeDensity: round(edge / Math.max(1, count)),
     darkComponentDensity: round(dark / Math.max(1, count)),
     saturationDensity: round(saturated / Math.max(1, count)),
-    textLikeScore: round(textLike / Math.max(1, count))
+    textLikeScore: round(textLike / Math.max(1, count)),
+    hueCoverage: round(hueSamples / Math.max(1, count)),
+    hueHistogram: hueBuckets.map((value) => round(value / Math.max(1, hueSamples))),
+    dominantHue: hueSamples ? hueBuckets.indexOf(Math.max(...hueBuckets)) * 30 : null
   };
 }
 
@@ -140,11 +149,20 @@ function luminanceAt(pixels, width, x, y) {
   return 0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2];
 }
 
-function saturationAt(pixels, width, x, y) {
+function colorAt(pixels, width, x, y) {
   const index = (y * width + x) * 4;
   const r = pixels[index] / 255, g = pixels[index + 1] / 255, b = pixels[index + 2] / 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  return max ? (max - min) / max : 0;
+  const delta = max - min;
+  const saturation = max ? delta / max : 0;
+  const rawHue = delta === 0
+    ? 0
+    : max === r
+      ? 60 * (((g - b) / delta) % 6)
+      : max === g
+        ? 60 * ((b - r) / delta + 2)
+        : 60 * ((r - g) / delta + 4);
+  return { saturation, hue: (rawHue + 360) % 360 };
 }
 
 function parseTextSafeArea(value, width, height) {

@@ -2,15 +2,32 @@ import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import pptxgen from "pptxgenjs";
 import { imageSize } from "image-size";
 import { analyzeGeneratedImage } from "./imageQa.js";
+import { analyzeStyleReference } from "./styleFingerprint.js";
 import { editImageWithProvider, generateImageWithProvider, getProviderConfig } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { assertWorkflowImageDeckReviewReady } from "./workflowImageDeckReview.js";
+import { isCodexPptSampleApprovalCurrent } from "./workflowApprovals.js";
 import { prepareCodexPptSlideRun, recordCodexPptSlideDispatch, recordCodexPptSlideResult } from "./workflowCodexPptRunState.js";
+import { getWorkflowOcrCoverage } from "./workflowOcr.js";
+import { consumeExternalImageSpendAuthorization } from "./workflowAuthorizations.js";
+import {
+  buildDeckDesignContract,
+  buildDeckStyleSpec,
+  classifyDeckText,
+  formatDeckStyleSpecPrompt,
+  getRoleTypography,
+  inferPageNumberPolicyFromOcrHints,
+  inferDeckPageRole,
+  isClosingLabelText,
+  isSemanticClosingText,
+  resolveVisualSampleSelection
+} from "./workflowDeckDesignSystem.js";
+import { buildDeckStyleConsistencyReport } from "./workflowStyleConsistency.js";
+
+export { buildDeckStyleConsistencyReport } from "./workflowStyleConsistency.js";
 
 const SLIDE_W = 13.333;
 const SLIDE_H = 7.5;
@@ -20,20 +37,42 @@ const IMAGE_RE = /\.(png|jpe?g|webp|svg)$/i;
 const VISUAL_IMAGES_MANIFEST = "visual_images_manifest.json";
 const VISUAL_SAMPLE_MANIFEST = "visual_sample_manifest.json";
 const VISUAL_QUALITY_REPORT = "visual_quality_report.json";
-const execFileAsync = promisify(execFile);
 
 export async function generateWorkflowVisualSample(jobId, options = {}) {
-  const job = await readWorkflowJob(jobId);
+  let job = await readWorkflowJob(jobId);
   assertWorkflowVisualGenerationAllowed(options);
-  const renderedPages = getRenderedPages(job);
+  const renderedPages = mergeOutlineMetadata(job, getRenderedPages(job));
   if (!renderedPages.length) throw new Error("No rendered source pages. Run source/render first.");
-  const pageNumber = clampPageNumber(options.pageNumber || options.page || 1, renderedPages.length);
-  const page = renderedPages[pageNumber - 1];
+  const sampleSelection = resolveVisualSampleSelection(
+    addSourceOcrForSampleSelection(job, renderedPages),
+    withSampleRolePreference(job, options)
+  );
+  assertVisualSampleSelectionAllowed(sampleSelection);
+  const pageNumber = clampPageNumber(sampleSelection?.pageNumber || 1, renderedPages.length);
+  const page = sampleSelection?.page || renderedPages.find((item) => Number(item.pageNumber) === pageNumber) || renderedPages[pageNumber - 1];
+  if (options.authorizationSource === "authorization-ledger") {
+    job = (await consumeExternalImageSpendAuthorization(jobId, {
+      scope: "visual-sample",
+      imageCalls: 1,
+      runId: `visual-sample-${jobId}-${Date.now()}`,
+      consumedBy: options.requestedBy || "visual-sample"
+    })).job;
+  }
   const startedAt = new Date().toISOString();
   await ensureVisualDirs(job);
-  const prompts = await writeVisualPrompts(job, renderedPages, options);
+  const continuityReference = await resolveRetainedVisualContinuityReference(job, page.pageId);
+  const generationOptions = continuityReference
+    ? {
+      ...options,
+      continuityReferenceImagePath: continuityReference.path,
+      continuityReferencePageId: continuityReference.pageId,
+      continuityReferenceSha256: continuityReference.sha256,
+      continuityStyleFingerprint: await analyzeApprovedSampleStyle(continuityReference.path)
+    }
+    : options;
+  const prompts = await writeVisualPrompts(job, renderedPages, generationOptions);
   const result = await createVisualImageForPage(job, page, prompts.pages[pageNumber - 1], {
-    ...options,
+    ...generationOptions,
     prefix: `workflow_sample_${job.id}_${page.pageId}`,
     sample: true
   });
@@ -47,6 +86,7 @@ export async function generateWorkflowVisualSample(jobId, options = {}) {
   };
   const samplePath = path.join(job.dirs.visualImages, `sample_${page.pageId}${path.extname(result.path) || ".png"}`);
   await fs.copyFile(result.path, samplePath);
+  const sampleStyleFingerprint = await analyzeApprovedSampleStyle(samplePath);
   const sampleRecord = await buildVisualImageRecord({
     result: sampleRecordDraft,
     job,
@@ -56,7 +96,17 @@ export async function generateWorkflowVisualSample(jobId, options = {}) {
     prompt: prompts.pages[pageNumber - 1].prompt,
     extra: {
       sample: true,
+      sampleRole: inferDeckPageRole(page, { totalPages: renderedPages.length }),
+      sampleSelection: sampleSelection?.mode || "representative-content-page",
+      requestedSamplePageNumber: sampleSelection?.requestedPageNumber || null,
+      overriddenRequestedSamplePage: Boolean(sampleSelection?.overriddenRequestedPage),
       samplePath,
+      styleFingerprint: sampleStyleFingerprint,
+      continuityReference: continuityReference ? {
+        pageId: continuityReference.pageId,
+        path: continuityReference.path,
+        sha256: continuityReference.sha256
+      } : null,
       startedAt,
       finishedAt: sampleRecordDraft.finishedAt
     }
@@ -86,17 +136,47 @@ export async function generateWorkflowVisualSample(jobId, options = {}) {
   return saveWorkflowJob(job);
 }
 
+export function resolveWorkflowVisualSampleSelection(job = {}, options = {}) {
+  const renderedPages = mergeOutlineMetadata(job, getRenderedPages(job));
+  if (!renderedPages.length) return null;
+  return resolveVisualSampleSelection(
+    addSourceOcrForSampleSelection(job, renderedPages),
+    withSampleRolePreference(job, options)
+  );
+}
+
+export function assertVisualSampleSelectionAllowed(selection = null) {
+  if (!selection?.blocked) return selection;
+  const error = new Error(selection.blockerMessage || "The selected sample page is not representative of this deck.");
+  error.code = selection.blockerCode || "CODEX_PPT_NON_REPRESENTATIVE_SAMPLE_REQUIRES_OPT_IN";
+  error.pageNumber = selection.pageNumber || 0;
+  error.recommendedPageNumber = selection.recommendedPageNumber || 0;
+  throw error;
+}
+
 export async function generateWorkflowVisualImages(jobId, options = {}) {
-  const job = await readWorkflowJob(jobId);
+  let job = await readWorkflowJob(jobId);
   assertWorkflowVisualGenerationAllowed(options);
   const renderedPages = getRenderedPages(job);
   if (!renderedPages.length) throw new Error("No rendered source pages. Run source/render first.");
   await ensureVisualDirs(job);
   const prompts = await writeVisualPrompts(job, renderedPages, options);
+  const retainedSample = await retainApprovedSampleAsVisualImage(job, renderedPages);
   const maxPages = Number.isFinite(Number(options.maxPages)) ? Math.max(1, Number(options.maxPages)) : renderedPages.length;
   const selected = parsePageSelection(options.pages || options.pageNumbers, renderedPages.length).slice(0, maxPages);
+  const authorizedPages = selected.filter((pageNumber) => !retainedSample || Number(retainedSample.pageNumber) !== Number(pageNumber));
+  if (options.authorizationSource === "authorization-ledger" && authorizedPages.length) {
+    job = (await consumeExternalImageSpendAuthorization(jobId, {
+      scope: "full-deck",
+      imageCalls: authorizedPages.length,
+      pages: authorizedPages,
+      pageSelection: authorizedPages.join(","),
+      runId: `visual-deck-${jobId}-${Date.now()}`,
+      consumedBy: options.requestedBy || "visual-generate"
+    })).job;
+  }
   let slideRun = await prepareCodexPptSlideRun(job, { renderedPages, prompts, selectedPages: selected, options });
-  const records = [];
+  const records = retainedSample ? [retainedSample] : [];
   const errors = [];
   job.currentStage = "visual_generating";
   job.status = "visual_generating";
@@ -104,6 +184,7 @@ export async function generateWorkflowVisualImages(jobId, options = {}) {
   job.stages.visual_generating = markStage(job.stages.visual_generating, "running", "Generating visual slide images", { selectedPages: selected });
 
   for (const pageNumber of selected) {
+    if (retainedSample && Number(retainedSample.pageNumber) === Number(pageNumber)) continue;
     const page = renderedPages[pageNumber - 1];
     const prompt = prompts.pages[pageNumber - 1];
     try {
@@ -133,46 +214,136 @@ export async function generateWorkflowVisualImages(jobId, options = {}) {
   const manifestRecords = mergeVisualManifestRecords(previousManifest.images, records);
   await writeVisualManifest(manifestPath, manifestRecords);
   const allExisting = await discoverVisualImages(job.dirs.visualImages, manifestPath);
-  const visualQuality = await writeVisualQualityReport(job, allExisting, renderedPages);
+  const currentImages = allExisting.filter((image) => image.staleStyleReference !== true);
+  const visualQuality = await writeVisualQualityReport(job, currentImages, renderedPages);
+  const previousImageDeckReview = job.artifacts?.imageDeckReview || null;
+  const currentArtifacts = invalidateVisualDownstreamArtifacts(job.artifacts || {});
+  const retainedImageDeckReview = retainUnchangedImageDeckReviewMarks(previousImageDeckReview, currentImages);
   job.artifacts = {
-    ...(job.artifacts || {}),
+    ...currentArtifacts,
+    ...(retainedImageDeckReview ? { imageDeckReview: retainedImageDeckReview } : {}),
     visualPrompts: artifactRecord("visual_prompts", prompts.path),
     codexPptDeckSpec: slideRun.deckSpec,
     codexPptSpeech: slideRun.speech,
     codexPptSlideJobs: slideRun.slideJobs,
     codexPptSlideRunState: slideRun.slideRunState,
     codexPptSlidePrompts: slideRun.slidePrompts,
-    visualManifest: artifactRecord("visual_images_manifest", manifestPath, { imageCount: allExisting.length }),
+    visualManifest: artifactRecord("visual_images_manifest", manifestPath, { imageCount: allExisting.length, currentImageCount: currentImages.length }),
     visualQuality: artifactRecord("visual_quality_report", visualQuality.path, visualQuality.summary),
     visualImages: allExisting
   };
-  const existingPageNumbers = new Set(allExisting.map((image) => Number(image.pageNumber || 0)).filter(Number.isFinite));
+  const existingPageNumbers = new Set(currentImages.map((image) => Number(image.pageNumber || 0)).filter(Number.isFinite));
   const selectedComplete = selected.length > 0 && selected.every((pageNumber) => existingPageNumbers.has(Number(pageNumber)));
-  const complete = errors.length === 0 && selectedComplete;
+  const fullCoverage = renderedPages.length > 0 && renderedPages.every((page) => existingPageNumbers.has(Number(page.pageNumber || 0)));
+  const complete = errors.length === 0 && selectedComplete && fullCoverage;
   job.currentStage = complete ? "image_deck_ready" : "visual_generating";
   job.status = errors.length ? "failed" : complete ? "image_deck_ready" : "visual_generating";
   job.stageStatus = errors.length ? "failed" : complete ? "complete" : "running";
-  job.stages.visual_generating = markStage(job.stages.visual_generating, errors.length ? "failed" : "complete", errors.length ? "Some visual images failed" : `Generated ${records.length} visual image(s)`, {
+  job.stages.visual_generating = markStage(job.stages.visual_generating, errors.length ? "failed" : fullCoverage ? "complete" : "running", errors.length ? "Some visual images failed" : fullCoverage ? "All visual images generated" : `Generated ${records.length} visual image(s); full deck is still incomplete`, {
     generated: records.length,
-    existing: allExisting.length,
+    existing: currentImages.length,
+    fullCoverage,
     errors
   });
   if (complete) {
-    job.stages.image_deck_ready = markStage(job.stages.image_deck_ready, "pending", "Visual images ready; image deck assembly pending", { visualImages: allExisting.length });
+    job.stages.image_deck_ready = markStage(job.stages.image_deck_ready, "pending", "Visual images ready; full-deck review pending", { visualImages: currentImages.length });
   }
   job.events = appendEvent(job.events, errors.length ? "visual.generate_failed" : "visual.generated", errors.length ? "Some visual images failed" : `Generated ${records.length} visual image(s)`, {
     generated: records.length,
-    existing: allExisting.length,
+    existing: currentImages.length,
+    fullCoverage,
     errors
   });
   if (errors.length) job.errors = [...(job.errors || []), ...errors.map((item) => ({ stage: "visual_generating", message: item.error, details: item, createdAt: new Date().toISOString() }))].slice(-50);
   return saveWorkflowJob(job);
 }
 
+async function retainApprovedSampleAsVisualImage(job = {}, renderedPages = []) {
+  const sample = job.artifacts?.visualSample || {};
+  if (!sample.path || !sample.sha256 || !fsSync.existsSync(sample.path) || !isCodexPptSampleApprovalCurrent(job)) return null;
+  const pageNumber = Number(sample.pageNumber || String(sample.pageId || "").match(/\d+/)?.[0] || 0);
+  const page = renderedPages[pageNumber - 1];
+  if (!pageNumber || !page) return null;
+  const outputPath = path.join(job.dirs.visualImages, `${page.pageId || `page_${String(pageNumber).padStart(3, "0")}`}${path.extname(sample.path) || ".png"}`);
+  if (path.resolve(sample.path) !== path.resolve(outputPath)) await fs.copyFile(sample.path, outputPath);
+  const stat = await fs.stat(outputPath);
+  return {
+    ...sample,
+    kind: "visual_image",
+    pageId: page.pageId || `page_${String(pageNumber).padStart(3, "0")}`,
+    pageNumber,
+    path: outputPath,
+    sourcePagePath: page.path || page.sourcePagePath || "",
+    size: stat.size,
+    sha256: sample.sha256 || await hashFile(outputPath),
+    approvedSampleSha256: sample.sha256,
+    referenceImagePaths: [sample.path],
+    retainedApprovedSample: true,
+    staleStyleReference: false,
+    createdAt: sample.createdAt || new Date().toISOString()
+  };
+}
+
+function invalidateVisualDownstreamArtifacts(artifacts = {}) {
+  const next = { ...(artifacts || {}) };
+  for (const key of [
+    "imageDeck",
+    "imageDeckReview",
+    "visualQualityReview",
+    "editableRun",
+    "editableHints",
+    "editableNext",
+    "editableWorkerPrompts",
+    "editableWorkerTasks",
+    "editableDispatches",
+    "editableRecords",
+    "editableLocalRebuilds",
+    "editableWorkerBatchRuns",
+    "editableFinal",
+    "editableTextHintsAcknowledgement",
+    "workerBriefs"
+  ]) delete next[key];
+  return next;
+}
+
+export function retainUnchangedImageDeckReviewMarks(review = null, currentImages = []) {
+  const previousMarks = review?.marks && typeof review.marks === "object" ? review.marks : {};
+  const imagesByPage = new Map((Array.isArray(currentImages) ? currentImages : [])
+    .map((image) => [image.pageId || `page_${String(Number(image.pageNumber || 0)).padStart(3, "0")}`, image])
+    .filter(([pageId, image]) => pageId && image?.path));
+  const marks = Object.fromEntries(Object.entries(previousMarks).filter(([pageId, mark]) => {
+    const image = imagesByPage.get(pageId);
+    if (!image || !["pass", "accept"].includes(String(mark?.status || "").toLowerCase())) return false;
+    return Boolean(mark.visualImageSha256 && image.sha256 && mark.visualImageSha256 === image.sha256);
+  }));
+  if (!Object.keys(marks).length) return null;
+  const passCount = Object.values(marks).filter((mark) => mark.status === "pass").length;
+  const acceptCount = Object.values(marks).filter((mark) => mark.status === "accept").length;
+  return {
+    ...review,
+    status: "in_progress",
+    marks,
+    summary: {
+      totalPages: imagesByPage.size,
+      markedCount: Object.keys(marks).length,
+      passCount,
+      acceptCount,
+      rerunCount: 0,
+      allPagesReviewed: false,
+      allMarksCurrent: true,
+      readyForApproval: false
+    },
+    approvedAt: "",
+    visualImageHashes: [],
+    updatedAt: new Date().toISOString()
+  };
+}
+
 export async function assembleWorkflowImageDeck(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   assertWorkflowImageDeckReviewReady(job);
-  const visualImages = await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || visualManifestPath(job));
+  const visualImages = (await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || visualManifestPath(job)))
+    .filter((image) => image.staleStyleReference !== true);
   if (!visualImages.length) throw new Error("No visual images to assemble. Run visual/generate first.");
   await fs.mkdir(job.dirs.imageDeck, { recursive: true });
   const outName = sanitizeFileName(options.outName || "image-based-deck.pptx");
@@ -191,19 +362,32 @@ export async function assembleWorkflowImageDeck(jobId, options = {}) {
     slide.addNotes(`Image-based intermediate page ${image.pageNumber}. Final editable rebuild should use OCR and image-to-editable reconstruction.`);
   }
   await pptx.writeFile({ fileName: outPath });
+  const sourcePages = Number(job.sourceMeta?.pageCount || 0) || (Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0);
+  const fullCoverage = Boolean(sourcePages > 0 && visualImages.length >= sourcePages);
   job.artifacts = {
     ...(job.artifacts || {}),
     visualImages,
-    imageDeck: artifactRecord("image_deck", outPath, { pageCount: visualImages.length })
+    imageDeck: artifactRecord("image_deck", outPath, {
+      pageCount: visualImages.length,
+      sourcePageCount: sourcePages,
+      fullCoverage,
+      scope: fullCoverage ? "full" : "sample"
+    })
   };
   job.currentStage = "image_deck_ready";
-  job.status = "image_deck_ready";
-  job.stageStatus = "complete";
-  job.stages.image_deck_ready = markStage(job.stages.image_deck_ready, "complete", `Assembled image deck with ${visualImages.length} slide(s)`, {
+  job.status = fullCoverage ? "image_deck_ready" : "image_deck_partial";
+  job.stageStatus = fullCoverage ? "complete" : "pending";
+  job.stages.image_deck_ready = markStage(job.stages.image_deck_ready, fullCoverage ? "complete" : "pending", fullCoverage
+    ? `Assembled complete image deck with ${visualImages.length} slide(s)`
+    : `Assembled ${visualImages.length}/${sourcePages || "?"} slide image test deck`, {
     pageCount: visualImages.length,
+    sourcePageCount: sourcePages,
+    fullCoverage,
     path: outPath
   });
-  job.events = appendEvent(job.events, "image_deck.ready", `Assembled image deck with ${visualImages.length} slide(s)`, { path: outPath, pageCount: visualImages.length });
+  job.events = appendEvent(job.events, fullCoverage ? "image_deck.ready" : "image_deck.partial", fullCoverage
+    ? `Assembled complete image deck with ${visualImages.length} slide(s)`
+    : `Assembled ${visualImages.length}/${sourcePages || "?"} slide image test deck`, { path: outPath, pageCount: visualImages.length, sourcePageCount: sourcePages, fullCoverage });
   return saveWorkflowJob(job);
 }
 
@@ -223,7 +407,7 @@ async function createVisualImageForPage(job, page, promptRecord, options = {}) {
       prompt: promptRecord.prompt
     };
   }
-  if (options.useSourceImageReference !== false && page.path && fsSync.existsSync(page.path)) {
+  if (options.useSourceImageReference !== false && isVisualSourceImage(page.path) && fsSync.existsSync(page.path)) {
     const styleLock = buildCodexPptStyleLock(job, options);
     return editImageWithProvider({
       prompt: promptRecord.prompt,
@@ -240,6 +424,10 @@ async function createVisualImageForPage(job, page, promptRecord, options = {}) {
     height: VISUAL_IMAGE_H,
     prefix: options.prefix || `workflow_visual_${job.id}_${page.pageId}`
   });
+}
+
+export function isVisualSourceImage(filePath = "") {
+  return IMAGE_RE.test(String(filePath || ""));
 }
 
 export function assertWorkflowVisualGenerationAllowed(options = {}) {
@@ -283,8 +471,7 @@ export function assertWorkflowVisualGenerationAllowed(options = {}) {
 }
 
 function isNonProductVisualAllowed(options = {}) {
-  const marker = `${options.approvedBy || ""} ${options.requestedBy || ""} ${options.note || ""} ${options.visualProfile || ""} ${options.mode || ""}`;
-  return Boolean(options.allowNonProductVisual || options.allowNonProductBackend) || /regression|smoke|test/i.test(marker);
+  return options.allowNonProductVisual === true || options.allowNonProductBackend === true;
 }
 
 function isExternalImageSpendConfirmed(options = {}) {
@@ -300,7 +487,12 @@ function throwCodexVisualError(code, message, details = {}) {
 
 export async function writeVisualPrompts(job, renderedPages, options = {}) {
   await fs.mkdir(job.dirs.visualImages, { recursive: true });
-  const prompts = buildVisualPromptsPayload(job, renderedPages, options);
+  const sampleStyleFingerprint = await ensureApprovedSampleStyleFingerprint(job, options);
+  const promptPages = mergeOutlineMetadata(job, renderedPages);
+  const prompts = buildVisualPromptsPayload(job, promptPages, {
+    ...options,
+    sampleStyleFingerprint
+  });
   const promptPath = path.join(job.dirs.visualImages, "visual_prompts.json");
   await fs.writeFile(promptPath, JSON.stringify(prompts, null, 2), "utf8");
   return { ...prompts, path: promptPath };
@@ -310,40 +502,492 @@ export function buildVisualPromptsPayload(job = {}, renderedPages = [], options 
   const styleLock = buildCodexPptStyleLock(job, options);
   const styleBrief = cleanText(options.styleBrief || options.style || styleLock.styleBrief);
   const informationAssetMap = readInformationAssetMap(job);
+  const sourceOcrByPage = readSourceOcrByPage(job);
+  const ocrPromptLexicon = buildOcrPromptLexicon(sourceOcrByPage);
+  const rerunGuidanceByPage = job.artifacts?.codexPptRerunGuidance || {};
+  const briefSourcePrompt = buildBriefSourcePrompt(job);
+  const isBriefSource = Boolean(briefSourcePrompt);
+  const importedDeckSource = isImportedDeckSource(job);
   return {
-    version: 1,
+    version: 2,
     jobId: job.id,
     styleBrief,
     styleLock,
     createdAt: new Date().toISOString(),
-    pages: renderedPages.map((page) => ({
-      pageId: page.pageId,
-      pageNumber: page.pageNumber,
-      sourcePagePath: page.path || page.sourcePagePath || "",
-      styleReferenceImages: styleLock.referenceImages,
-      prompt: [
+    pages: renderedPages.map((page) => {
+      const pageId = page.pageId || `page_${String(Number(page.pageNumber || 0)).padStart(3, "0")}`;
+      const sourceOcrEvidence = sourceOcrByPage.get(pageId);
+      const role = inferDeckPageRole({
+        ...page,
+        ocrText: [
+          ...(Array.isArray(page.ocrText) ? page.ocrText : []),
+          ...(Array.isArray(sourceOcrEvidence?.ocrLines)
+            ? sourceOcrEvidence.ocrLines
+              .filter((line) => isTrustedOcrLine(line) && isOcrPromptTextAllowed(line.text, ocrPromptLexicon))
+              .map((line) => cleanText(line?.text || ""))
+              .filter(Boolean)
+            : [])
+        ]
+      }, {
+        totalPages: renderedPages.length,
+        preferExplicitRole: isBriefSource
+      });
+      const typography = resolvePromptTypography(styleLock, role);
+      const pageNumberPrompt = buildPageNumberPrompt(styleLock.designContract, page, role, renderedPages.length);
+      const rerunGuidance = rerunGuidanceByPage[page.pageId] || rerunGuidanceByPage[String(page.pageNumber)] || null;
+      return {
+        pageId: page.pageId,
+        pageNumber: page.pageNumber,
+        role,
+        storyRole: page.storyRole || page.outlineStoryRole || "",
+        visualIntent: page.visualIntent || page.outlineVisualIntent || "",
+        sourcePagePath: page.path || page.sourcePagePath || "",
+        styleReferenceImages: styleLock.referenceImages,
+        prompt: [
         `Create one polished 16:9 full-slide presentation visual at ${VISUAL_IMAGE_W}x${VISUAL_IMAGE_H}; no letterbox, no crop, no extra border.`,
         `Use this deck-wide style: ${styleBrief}`,
         buildStyleLockPrompt(styleLock),
-        `This is page ${page.pageNumber} of ${renderedPages.length}.`,
-        page.outlineTitle ? `Slide title: ${page.outlineTitle}.` : "",
+        pageNumberPrompt,
+        `PAGE ROLE: ${role}. STORY ROLE: ${page.storyRole || page.outlineStoryRole || "develop the narrative"}.`,
+        `ROLE TYPOGRAPHY LIMITS: title ${typography.titlePt[0]}-${typography.titlePt[1]}pt, subtitle ${typography.subtitlePt[0]}-${typography.subtitlePt[1]}pt, body ${typography.bodyPt[0]}-${typography.bodyPt[1]}pt, labels ${typography.labelPt[0]}-${typography.labelPt[1]}pt. Keep comparable pages within this hierarchy.`,
+        page.outlineTitle
+          ? importedDeckSource
+            ? `OUTLINE PLANNING LABEL (not output copy): ${page.outlineTitle}. Preserve the actual visible title in source image 1 exactly; never replace it with this planning label or with a body quote.`
+            : `Slide title: ${page.outlineTitle}.`
+          : importedDeckSource
+            ? "SOURCE TITLE AUTHORITY: preserve the actual visible source-page title exactly; do not invent or summarize a replacement title."
+            : "",
         page.outlinePurpose ? `Slide purpose: ${page.outlinePurpose}.` : "",
         page.outlineEvidence ? `Approved outline evidence: ${page.outlineEvidence}.` : "",
-        buildInformationAssetPrompt(informationAssetMap, page),
-        "Respect the source page structure and approximate information density, but redraw with a consistent visual system.",
-        "Preserve clearly visible logos, brand color blocks, short slide titles, cover subtitles, title positions, key visual anchors, charts, icons, and content density from the source.",
-        "Keep short visible headings readable when they are legible in the source image; only long paragraphs or dense body copy should become clean text-safe placeholder regions or subtle blurred/abstract text texture.",
-        "Do not invent new readable long text, fake Chinese text, watermarks, or UI chrome.",
+        page.outlineVisualIntent || page.visualIntent ? `Visual intent: ${page.outlineVisualIntent || page.visualIntent}.` : "",
+        buildSourceOcrFidelityPrompt(sourceOcrByPage, page, role, ocrPromptLexicon),
+        buildSourceCleanupPrompt(sourceOcrByPage, page, styleLock.designContract, role),
+        buildRerunGuidancePrompt(rerunGuidance),
+        briefSourcePrompt,
+        isBriefSource ? "This is a from-brief slide. Do not invent a company name, logo, date, location, slogan, or unrelated business theme." : buildInformationAssetPrompt(informationAssetMap, page),
+        styleLock.locked
+          ? "CONTENT AUTHORITY: use the current source page only for factual content, information hierarchy, logos, products, charts, data, and approximate density. VISUAL AUTHORITY: the approved sample overrides the source page for palette, background treatment, typography mood, decorative geometry, icon/illustration rendering, component skin, spacing rhythm, and overall finish."
+          : isBriefSource
+            ? "Treat the user's brief as the content authority. Use its exact subject and requested title; create the visual composition from scratch."
+            : "Respect the source page structure and approximate information density, but redraw with a consistent visual system.",
+        styleLock.locked
+          ? "INPUT ORDER: image 1 is the current source page and supplies content only; image 2 is the approved sample and supplies the deck-wide visual identity. Never treat image 1 as the style reference."
+          : "",
+        styleLock.locked
+          ? "STYLE REFERENCE CONTENT EXCLUSION: never copy words, logos, brands, products, mascots, numbers, dates, slogans, or factual objects from image 2 unless the exact same item is visibly present in image 1. Image 2 supplies visual grammar only."
+          : "",
+        styleLock.locked
+          ? "Do not preserve or imitate the source page's palette, background, decorative shapes, template chrome, mascot rendering style, card skin, or font styling when they conflict with the approved sample. Retheme those elements into the approved sample's visual language. Preserve brand marks and factual assets accurately, but do not let their local colors redefine the deck-wide palette."
+          : isBriefSource
+            ? "Keep the requested Chinese title clear and prominent. Use only supporting text justified by the brief."
+            : "Preserve clearly visible logos, brand color blocks, short slide titles, cover subtitles, title positions, key visual anchors, charts, icons, and content density from the source.",
+        "Keep visible headings, labels, and critical facts readable when they are legible in the source image. Dense body copy may be tightened without changing meaning, but never replace readable content with blank boxes, gray bars, fake glyphs, or abstract text texture.",
+        "Do not invent new readable long text, fake Chinese text, watermarks, UI chrome, company names, brands, logos, slogans, or template labels.",
+        styleLock.designContract?.master?.pageNumberPolicy === "normalize" && role !== "cover"
+          ? `FORBIDDEN OUTPUT: Slide N, Page N, any page counter except the exact required counter ${formatPageCounter(page.pageNumber, renderedPages.length)}, YOUR BRAND, YOUR LOGO, COMPANY NAME, placeholder text, Lorem Ipsum, or anonymous gray bars that erase readable source content.`
+          : styleLock.designContract?.master?.pageNumberPolicy === "preserve" && role !== "cover"
+            ? "FORBIDDEN OUTPUT: duplicate page counters, Slide N or Page N template titles, YOUR BRAND, YOUR LOGO, COMPANY NAME, placeholder text, Lorem Ipsum, or anonymous gray bars that erase readable source content. One intentional counter already present in the source is allowed."
+            : "FORBIDDEN OUTPUT: Slide N, Page N, N/total page counters, YOUR BRAND, YOUR LOGO, COMPANY NAME, placeholder text, Lorem Ipsum, or anonymous gray bars that erase readable source content.",
+        "Do not add a QR code, barcode, website, phone number, email address, price, date, percentage, or model number unless it is visibly present in the current source page.",
         "Leave clean safe areas for editable title/body text while keeping the slide composition visibly complete.",
         "Output should look like a premium business PowerPoint slide visual target, not an empty background."
-      ].filter(Boolean).join(" ")
-    }))
+        ].filter(Boolean).join(" ")
+      };
+    })
   };
+}
+
+function buildPageNumberPrompt(contract = {}, page = {}, role = "content", totalPages = 0) {
+  const pageNumber = Number(page.pageNumber || 0);
+  const policy = contract?.master?.pageNumberPolicy || "none";
+  if (role === "cover" || policy === "none") {
+    return `INTERNAL PAGE INDEX: ${pageNumber} of ${totalPages}; use it only for narrative context and do not render a page number or counter.`;
+  }
+  if (policy === "normalize") {
+    return `PAGE COUNTER MASTER: render exactly "${formatPageCounter(pageNumber, totalPages)}" once, using the single deck-wide counter anchor established by the approved sample or dominant verified source-page pattern. Keep that anchor identical on every non-cover page. Do not render Slide N, Page N, duplicate counters, or any other counter format.`;
+  }
+  return `PAGE COUNTER POLICY: preserve one intentional source counter only when clearly present, while keeping its format and anchor consistent with comparable pages. Never render Slide N or Page N as a title.`;
+}
+
+function formatPageCounter(pageNumber = 0, totalPages = 0) {
+  const width = Math.max(2, String(Math.max(1, Number(totalPages || 0))).length);
+  return `${String(Math.max(0, Number(pageNumber || 0))).padStart(width, "0")} / ${String(Math.max(0, Number(totalPages || 0))).padStart(width, "0")}`;
+}
+
+export function mergeOutlineMetadata(job = {}, renderedPages = []) {
+  const outlinePath = cleanText(job.artifacts?.codexPptOutline?.path || "");
+  let sequence = [];
+  let outlinePayload = {};
+  if (outlinePath && fsSync.existsSync(outlinePath)) {
+    try {
+      outlinePayload = JSON.parse(fsSync.readFileSync(outlinePath, "utf8"));
+      sequence = Array.isArray(outlinePayload.layoutSequence) ? outlinePayload.layoutSequence : [];
+    } catch {
+      sequence = [];
+      outlinePayload = {};
+    }
+  }
+  const pages = Array.isArray(renderedPages) ? renderedPages : [];
+  const sourceDeck = isImportedDeckSource(job) && pages.length > 1;
+  const legacyMachineOutline = Boolean(
+    sourceDeck
+    && Number(outlinePayload.version || 0) > 0
+    && Number(outlinePayload.version || 0) < 2
+    && /(?:frontend|workflow|skill-first)/i.test(cleanText(outlinePayload.source || ""))
+  );
+  const degenerateLegacyRole = legacyMachineOutline ? findDegenerateLegacyRole(sequence) : "";
+  return pages.map((page, index) => {
+    const step = sequence[Number(page.pageNumber || index + 1) - 1] || sequence[index] || {};
+    const pageNumber = Number(page.pageNumber || index + 1);
+    const rawLayout = cleanText(page.layout || resolveLegacyOutlineLayout(step.layout, pageNumber, legacyMachineOutline, degenerateLegacyRole) || "");
+    const rawVisualIntent = cleanText(page.visualIntent || step.visualIntent || "");
+    const rawOutlineTitle = cleanText(page.outlineTitle || step.title || "");
+    const rawOutlineEvidence = cleanText(page.outlineEvidence || step.evidence || "");
+    return {
+      ...page,
+      layout: sanitizeSourceEdgeRole(rawLayout, pageNumber, pages.length, legacyMachineOutline),
+      storyRole: cleanText(page.storyRole || step.storyRole || ""),
+      visualIntent: sanitizeSourceVisualIntent(rawVisualIntent, pageNumber, pages.length, legacyMachineOutline),
+      outlineTitle: sanitizeSourceOutlineTitle(rawOutlineTitle, legacyMachineOutline),
+      outlinePurpose: cleanText(page.outlinePurpose || step.purpose || ""),
+      outlineEvidence: sanitizeSourceOutlineEvidence(rawOutlineEvidence, legacyMachineOutline),
+      outlineStoryRole: cleanText(page.outlineStoryRole || step.storyRole || ""),
+      outlineVisualIntent: sanitizeSourceVisualIntent(cleanText(page.outlineVisualIntent || step.visualIntent || ""), pageNumber, pages.length, legacyMachineOutline)
+    };
+  });
+}
+
+function withSampleRolePreference(job = {}, options = {}) {
+  const briefSource = job.artifacts?.source?.kind === "brief_source";
+  return {
+    ...options,
+    preferExplicitRole: typeof options.preferExplicitRole === "boolean" ? options.preferExplicitRole : briefSource
+  };
+}
+
+function isImportedDeckSource(job = {}) {
+  const source = job.artifacts?.source || {};
+  if (source.kind === "brief_source") return false;
+  const ext = path.extname(cleanText(source.path || source.originalName || "")).toLowerCase();
+  return [".ppt", ".pptx", ".pdf"].includes(ext);
+}
+
+function findDegenerateLegacyRole(sequence = []) {
+  const middle = (Array.isArray(sequence) ? sequence : []).slice(1, -1);
+  if (middle.length < 3) return "";
+  const counts = new Map();
+  for (const step of middle) {
+    const role = cleanText(step?.layout || "").toLowerCase();
+    if (role) counts.set(role, (counts.get(role) || 0) + 1);
+  }
+  const dominant = [...counts.entries()].sort((left, right) => right[1] - left[1])[0];
+  if (!dominant || dominant[0] !== "visual" || dominant[1] / middle.length < 0.8) return "";
+  const machineCoverIntentCount = middle.filter((step) => isMachineCoverVisualIntent(step?.visualIntent || "")).length;
+  return machineCoverIntentCount / middle.length >= 0.8 ? "visual" : "";
+}
+
+function resolveLegacyOutlineLayout(value = "", pageNumber = 0, legacyMachineOutline = false, degenerateLegacyRole = "") {
+  const role = cleanText(value).toLowerCase();
+  if (!legacyMachineOutline) return role;
+  if (pageNumber === 1) return "cover";
+  if (role === "cover") return "";
+  if (degenerateLegacyRole && role === degenerateLegacyRole) return "";
+  return role;
+}
+
+function isMachineCoverVisualIntent(value = "") {
+  const intent = cleanText(value);
+  return /^(?:参考源页类型[：:]\s*)?(?:cover|封面)$|^按\s*(?:cover|封面)\s*页面角色重绘[；;].*$/i.test(intent);
+}
+
+function sanitizeSourceEdgeRole(value = "", pageNumber = 0, totalPages = 0, sourceDeck = false) {
+  if (!sourceDeck) return value;
+  const role = cleanText(value).toLowerCase();
+  if (role === "cover" && pageNumber > 1) return "content";
+  if (role === "closing" && pageNumber !== totalPages) return "content";
+  return value;
+}
+
+function sanitizeSourceVisualIntent(value = "", pageNumber = 0, totalPages = 0, sourceDeck = false) {
+  if (!sourceDeck) return value;
+  const intent = cleanText(value);
+  const machineCoverIntent = isMachineCoverVisualIntent(intent);
+  const machineClosingIntent = /^(?:参考源页类型[：:]\s*)?(?:closing|尾页|收尾页)$|^按\s*(?:closing|尾页|收尾页)\s*页面角色重绘[；;].*$/i.test(intent);
+  if (pageNumber > 1 && machineCoverIntent) return "";
+  if (machineClosingIntent) return "";
+  return intent;
+}
+
+function sanitizeSourceOutlineTitle(value = "", sourceDeck = false) {
+  const title = cleanText(value);
+  if (!sourceDeck) return title;
+  return /^(?:page|slide)\s*0*\d{1,3}$/i.test(title) || /^源稿第\s*\d{1,3}\s*页$/.test(title) ? "" : title;
+}
+
+function sanitizeSourceOutlineEvidence(value = "", sourceDeck = false) {
+  const evidence = cleanText(value);
+  if (!sourceDeck) return evidence;
+  return /^source[-_ ]page[-_ ]0*\d{1,3}$/i.test(evidence) ? "" : evidence;
+}
+
+function readSourceOcrByPage(job = {}) {
+  const filePath = cleanText(job.artifacts?.ocrTextHints?.path || "");
+  if (!filePath || !fsSync.existsSync(filePath)) return new Map();
+  try {
+    const hints = JSON.parse(fsSync.readFileSync(filePath, "utf8"));
+    return new Map((Array.isArray(hints.pages) ? hints.pages : []).map((page) => [
+      page.pageId || `page_${String(Number(page.pageNumber || 0)).padStart(3, "0")}`,
+      page
+    ]));
+  } catch {
+    return new Map();
+  }
+}
+
+function addSourceOcrForSampleSelection(job = {}, pages = []) {
+  const sourceOcrByPage = readSourceOcrByPage(job);
+  const lexicon = buildOcrPromptLexicon(sourceOcrByPage);
+  return pages.map((page) => {
+    const pageId = page.pageId || `page_${String(Number(page.pageNumber || 0)).padStart(3, "0")}`;
+    const evidence = sourceOcrByPage.get(pageId) || {};
+    const ocrText = (Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+      .filter(isTrustedOcrLine)
+      .map((line) => cleanText(line.text))
+      .filter((text) => text && isOcrPromptTextAllowed(text, lexicon));
+    const requiredText = [...getExplicitRequiredText(evidence), ...(Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+      .filter(isManuallyCorrectedOcrLine)
+      .map((line) => cleanText(line.text))]
+      .filter(Boolean);
+    const sampleText = [...new Set([...requiredText, ...ocrText])];
+    return {
+      ...page,
+      ocrText: sampleText,
+      textChars: sampleText.join("").length || page.textChars || 0
+    };
+  });
+}
+
+function buildOcrPromptLexicon(sourceOcrByPage = new Map()) {
+  const pageFrequencies = new Map();
+  const requiredTokens = new Set();
+  for (const [pageId, evidence] of sourceOcrByPage.entries()) {
+    const pageTokens = new Set();
+    for (const line of Array.isArray(evidence?.ocrLines) ? evidence.ocrLines : []) {
+      if (!isTrustedOcrLine(line)) continue;
+      const token = normalizeLatinBrandToken(line.text);
+      if (!token) continue;
+      pageTokens.add(token);
+    }
+    for (const token of pageTokens) {
+      const pages = pageFrequencies.get(token) || new Set();
+      pages.add(pageId);
+      pageFrequencies.set(token, pages);
+    }
+    for (const line of Array.isArray(evidence?.ocrLines) ? evidence.ocrLines : []) {
+      if (!isManuallyCorrectedOcrLine(line)) continue;
+      const token = normalizeLatinBrandToken(line.text);
+      if (token) requiredTokens.add(token);
+    }
+    for (const value of getExplicitRequiredText(evidence)) {
+      const token = normalizeLatinBrandToken(value);
+      if (token) requiredTokens.add(token);
+    }
+  }
+  const canonicalBrands = [...pageFrequencies.entries()]
+    .filter(([token, pages]) => pages.size >= 3 && isCanonicalBrandCandidate(token))
+    .map(([token]) => token)
+    .sort((left, right) => right.length - left.length || left.localeCompare(right));
+  return { pageFrequencies, requiredTokens, canonicalBrands };
+}
+
+function isTrustedOcrLine(line = {}) {
+  return Boolean(
+    line?.text
+    && line.low_confidence !== true
+    && line.mojibake_suspect !== true
+    && Number(line.confidence ?? 1) >= 0.8
+  );
+}
+
+function isManuallyCorrectedOcrLine(line = {}) {
+  return Boolean(line?.corrected === true && cleanText(line.text));
+}
+
+function getExplicitRequiredText(evidence = {}) {
+  const ocrText = new Set((Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .map((line) => cleanText(line?.text || ""))
+    .filter(Boolean));
+  return [...new Set((Array.isArray(evidence.requiredText) ? evidence.requiredText : [])
+    .map(cleanText)
+    .filter((text) => text && !ocrText.has(text)))];
+}
+
+function isOcrPromptTextAllowed(value = "", lexicon = null) {
+  const text = cleanText(value);
+  if (!text) return false;
+  const token = normalizeLatinBrandToken(text);
+  if (!token || !lexicon?.canonicalBrands?.length) return true;
+  if (lexicon.requiredTokens?.has(token)) return true;
+  if (Number(lexicon.pageFrequencies?.get(token)?.size || 0) >= 2) return true;
+  return !lexicon.canonicalBrands.some((canonical) => {
+    if (canonical === token) return false;
+    if (token.startsWith(canonical) || canonical.startsWith(token)) return false;
+    const maxLength = Math.max(canonical.length, token.length);
+    if (Math.abs(canonical.length - token.length) > 3) return false;
+    const threshold = Math.min(3, Math.max(1, Math.round(maxLength * 0.35)));
+    return levenshteinDistance(token, canonical) <= threshold;
+  });
+}
+
+function isCanonicalBrandCandidate(token = "") {
+  if (classifyDeckText(token) !== "brand_or_code") return false;
+  return !new Set([
+    "ABOUT", "AGENDA", "CATEGORY", "COMPANY", "CONTENT", "FESTIVAL", "OVERVIEW",
+    "PAGE", "PARAMETER", "PRICE", "PRODUCT", "PRODUCTS", "QUANTITY", "SLIDE",
+    "SUMMARY", "TABLE", "TOTAL"
+  ]).has(token);
+}
+
+function normalizeLatinBrandToken(value = "") {
+  const token = cleanText(value).replace(/\s+/g, "").toUpperCase();
+  return /^[A-Z]{5,20}$/.test(token) ? token : "";
+}
+
+function levenshteinDistance(left = "", right = "") {
+  const previous = Array.from({ length: right.length + 1 }, (_item, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length];
+}
+
+function buildSourceOcrFidelityPrompt(sourceOcrByPage = new Map(), page = {}, role = "content", lexicon = null) {
+  const pageId = page.pageId || `page_${String(Number(page.pageNumber || 0)).padStart(3, "0")}`;
+  const evidence = sourceOcrByPage.get(pageId);
+  if (!evidence) return "SOURCE TEXT EVIDENCE: no current OCR evidence is available for this page; preserve visible titles, brands, numbers, and codes conservatively and do not invent replacements.";
+  const lines = (Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .filter((line) => isTrustedOcrLine(line) || isManuallyCorrectedOcrLine(line))
+    .map((line) => cleanText(line.text))
+    .filter((text) => isOcrPromptTextAllowed(text, lexicon))
+    .filter((text) => !["placeholder", "page_number", "template_chrome"].includes(classifyDeckText(text)))
+    .filter((text) => role === "closing" || !isSemanticClosingText(text) || isContactCallToActionText(text));
+  const explicitRequired = [...getExplicitRequiredText(evidence), ...(Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .filter(isManuallyCorrectedOcrLine)
+    .map((line) => cleanText(line.text))]
+    .filter(Boolean);
+  const allRequired = [...new Set([...explicitRequired, ...lines])].filter(Boolean);
+  const allCritical = allRequired.filter((text) => ["data", "brand_or_code", "contact"].includes(classifyDeckText(text)));
+  const requiredLimit = role === "table" ? 28 : 16;
+  const criticalLimit = role === "table" ? 20 : 12;
+  const critical = allCritical.slice(0, criticalLimit);
+  const required = [...new Set([...critical, ...allRequired])].slice(0, requiredLimit);
+  return [
+    required.length ? `SOURCE TEXT EVIDENCE: preserve these readable source strings exactly when they appear in the design: ${required.join(" | ")}.` : "",
+    critical.length ? `CRITICAL TOKENS: do not alter, translate, approximate, or replace these brands/numbers/codes: ${critical.join(" | ")}.` : ""
+  ].filter(Boolean).join(" ");
+}
+
+function resolvePromptTypography(styleLock = {}, role = "content") {
+  const fallback = getRoleTypography(role);
+  const custom = styleLock.styleSpec?.typography?.roles?.[role];
+  if (!custom || typeof custom !== "object") return fallback;
+  const normalizeRange = (value, fallbackRange) => {
+    if (!Array.isArray(value) || value.length < 2) return fallbackRange;
+    const range = value.slice(0, 2).map(Number);
+    return range.every(Number.isFinite) ? range : fallbackRange;
+  };
+  return {
+    titlePt: normalizeRange(custom.titlePt, fallback.titlePt),
+    subtitlePt: normalizeRange(custom.subtitlePt, fallback.subtitlePt),
+    bodyPt: normalizeRange(custom.bodyPt, fallback.bodyPt),
+    labelPt: normalizeRange(custom.labelPt, fallback.labelPt)
+  };
+}
+
+function buildSourceCleanupPrompt(sourceOcrByPage = new Map(), page = {}, contract = {}, role = "content") {
+  const pageId = page.pageId || `page_${String(Number(page.pageNumber || 0)).padStart(3, "0")}`;
+  const evidence = sourceOcrByPage.get(pageId);
+  if (!evidence) return "";
+  const removable = [...new Set((Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .filter((line) => line?.text && line.corrected !== true && line.low_confidence !== true && Number(line.confidence ?? 1) >= 0.7)
+    .map((line) => cleanText(line.text))
+    .filter((text) => ["placeholder", "template_chrome"].includes(classifyDeckText(text))))].slice(0, 12);
+  const sourceCounters = [...new Set((Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .filter((line) => line?.text && classifyDeckText(line.text) === "page_number")
+    .map((line) => cleanText(line.text)))].slice(0, 6);
+  const misleadingClosingLabels = role === "closing" ? [] : [...new Set((Array.isArray(evidence.ocrLines) ? evidence.ocrLines : [])
+    .filter((line) => line?.text && line.corrected !== true && line.low_confidence !== true && Number(line.confidence ?? 1) >= 0.7)
+    .map((line) => cleanText(line.text))
+    .filter((text) => isClosingLabelText(text) && !isContactCallToActionText(text)))].slice(0, 6);
+  return [
+    removable.length ? `SOURCE TEMPLATE CLEANUP: these are source-template artifacts, not factual content; remove them instead of preserving them: ${removable.join(" | ")}.` : "",
+    misleadingClosingLabels.length ? `SOURCE ROLE CLEANUP: this is a ${role} page, not a closing page. Remove these misleading terminal labels instead of preserving them: ${misleadingClosingLabels.join(" | ")}.` : "",
+    sourceCounters.length && contract?.master?.pageNumberPolicy === "normalize"
+      ? `SOURCE COUNTER REPLACEMENT: ignore these inconsistent source counters and use only the required page-counter master: ${sourceCounters.join(" | ")}.`
+      : ""
+  ].filter(Boolean).join(" ");
+}
+
+function isContactCallToActionText(value = "") {
+  const text = cleanText(value).replace(/[\s:：。.!！,，?？;；]+$/g, "");
+  return /^(?:联系我们|联系(?:方式|电话|邮箱)|contact\s+us|get\s+in\s+touch)$/i.test(text);
+}
+
+function buildRerunGuidancePrompt(guidance = null) {
+  if (!guidance || typeof guidance !== "object") return "";
+  const reasons = [...new Set(Array.isArray(guidance.reasons) ? guidance.reasons.map(cleanText).filter(Boolean) : [])].slice(0, 12);
+  const requiredTexts = [...new Set(Array.isArray(guidance.requiredTexts) ? guidance.requiredTexts.map(cleanText).filter(Boolean) : [])].slice(0, 20);
+  const note = cleanText(guidance.note || "");
+  if (!reasons.length && !requiredTexts.length && !note) return "";
+  const instructions = reasons.map((reason) => ({
+    "placeholder-text-detected": "remove every placeholder or generic brand label",
+    "template-chrome-detected": "remove Slide N, Page N, and other template chrome",
+    "unexpected-page-number": "remove every page number and counter",
+    "missing-page-number": "render the exact required page counter once at the master anchor",
+    "page-number-value-mismatch": "correct the page counter value and total",
+    "inconsistent-page-number-format": "use only the exact deck page-counter format",
+    "inconsistent-page-number-position": "move the page counter to the confirmed deck-wide master anchor",
+    "closing-label-on-content-page": "remove the misleading closing label and use the factual content title",
+    "synthetic-closing-on-content-page": "keep the source page role and do not turn it into a closing slide",
+    "severe-language-drift": "keep the source language and do not replace Chinese content with English filler",
+    "critical-data-or-contact-missing": "restore every source number, price, code, and contact token exactly",
+    "critical-brand-or-code-missing": "restore every source brand, company name, logo wordmark, and model code exactly",
+    "substantial-source-text-loss": "restore the readable source meaning instead of blank or gray placeholder bars",
+    "missing-critical-source-text": "restore every missing critical source token exactly",
+    "invented-critical-text": "remove invented brands, codes, numbers, URLs, dates, and slogans",
+    "source-title-mismatch": "restore the prominent source-page title exactly and do not promote a body quote or planning label into the title",
+    "semantic-evidence-missing": "rebuild local OCR evidence for this page before approval",
+    "title-scale-outlier": "match the approved sample's role-specific title hierarchy",
+    "deck-style-drift": "match the approved sample's typography, palette, spacing, and component language"
+  }[reason] || `correct the previous QA issue: ${reason}`));
+  return `RERUN CORRECTION: this page failed a previous product review. ${[...new Set(instructions)].join("; ")}.${requiredTexts.length ? ` Restore these exact missing or altered source strings: ${requiredTexts.join(" | ")}.` : ""}${note ? ` Reviewer note: ${note}.` : ""} Do not repeat the previous defects.`;
+}
+
+export function buildBriefSourcePrompt(job = {}) {
+  const source = job.artifacts?.source || {};
+  if (source.kind !== "brief_source" || !source.path || !fsSync.existsSync(source.path)) return "";
+  try {
+    const text = fsSync.readFileSync(source.path, "utf8");
+    const requirements = text.match(/用户需求：\s*([\s\S]*?)(?:\n已确认大纲：|\n##|$)/)?.[1] || text;
+    const normalized = cleanText(requirements).slice(0, 2400);
+    return normalized ? `BRIEF CONTENT AUTHORITY: ${normalized}` : "";
+  } catch {
+    return "";
+  }
 }
 
 export function buildCodexPptStyleLock(job = {}, options = {}) {
   const sample = job.artifacts?.visualSample || {};
   const styleArtifact = job.artifacts?.codexPptStyle || {};
+  const stylePayload = readArtifactJson(styleArtifact.path);
   const samplePath = cleanText(sample.path || "");
   const sampleReady = Boolean(
     samplePath
@@ -351,19 +995,74 @@ export function buildCodexPptStyleLock(job = {}, options = {}) {
     && sample.sha256
     && sample.dryRun !== true
     && sample.provider !== "passthrough"
+    && isCodexPptSampleApprovalCurrent(job, options)
   );
-  const referenceImages = sampleReady && options.useStyleReference !== false ? [samplePath] : [];
+  const continuityReferencePath = cleanText(options.continuityReferenceImagePath || "");
+  const continuityReady = Boolean(
+    !sampleReady
+    && continuityReferencePath
+    && fsSync.existsSync(continuityReferencePath)
+    && options.useStyleReference !== false
+  );
+  const referenceReady = sampleReady || continuityReady;
+  const referenceImages = options.useStyleReference === false
+    ? []
+    : sampleReady
+      ? [samplePath]
+      : continuityReady
+        ? [continuityReferencePath]
+        : [];
+  const sampleStyleFingerprint = options.sampleStyleFingerprint
+    || sample.styleFingerprint
+    || options.continuityStyleFingerprint
+    || null;
+  const paletteFingerprint = Array.isArray(sampleStyleFingerprint?.palette) && sampleStyleFingerprint.palette.length
+    ? sampleStyleFingerprint.palette.join(" / ")
+    : "read the exact dominant colors directly from the approved sample image";
+  const sampleFinish = [
+    sampleStyleFingerprint?.brightness ? `brightness=${sampleStyleFingerprint.brightness}` : "",
+    sampleStyleFingerprint?.saturation ? `saturation=${sampleStyleFingerprint.saturation}` : "",
+    sampleStyleFingerprint?.density ? `density=${sampleStyleFingerprint.density}` : "",
+    Array.isArray(sampleStyleFingerprint?.traits) && sampleStyleFingerprint.traits.length
+      ? `traits=${sampleStyleFingerprint.traits.join("/")}`
+      : ""
+  ].filter(Boolean).join("; ");
   const styleBrief = cleanText(
     options.styleBrief
     || options.style
     || styleArtifact.styleBrief
     || "Unified premium business presentation system with one locked visual identity: consistent Chinese typography hierarchy, fixed restrained palette, shared grid, repeated title/content zones, stable icon/card/chart language, and role-specific layouts."
   );
-  return {
-    version: 1,
-    locked: sampleReady,
-    source: sampleReady ? "approved-visual-sample" : "style-text-only",
+  const sourceOcrHintsPath = cleanText(job.artifacts?.ocrTextHints?.path || "");
+  let sourceOcrHints = {};
+  if (sourceOcrHintsPath && fsSync.existsSync(sourceOcrHintsPath)) {
+    try {
+      sourceOcrHints = JSON.parse(fsSync.readFileSync(sourceOcrHintsPath, "utf8"));
+    } catch {
+      sourceOcrHints = {};
+    }
+  }
+  const recordedPageNumberPolicy = options.pageNumberPolicy
+    || styleArtifact.styleSpec?.master?.pageNumberPolicy
+    || stylePayload.styleSpec?.master?.pageNumberPolicy
+    || "";
+  const designContract = buildDeckDesignContract({
+    pageNumberPolicy: inferPageNumberPolicyFromOcrHints(sourceOcrHints, recordedPageNumberPolicy)
+  });
+  const recordedStyleSpec = options.styleSpec || styleArtifact.styleSpec || stylePayload.styleSpec || null;
+  const styleSpec = buildDeckStyleSpec({
+    styleSpec: recordedStyleSpec || (referenceReady ? { typography: { familyMode: "sample-matched" } } : null),
     styleBrief,
+    audience: options.audience || styleArtifact.audience || stylePayload.audience,
+    tone: options.tone || styleArtifact.tone || stylePayload.tone,
+    pageNumberPolicy: designContract.master.pageNumberPolicy
+  });
+  return {
+    version: 2,
+    locked: referenceReady,
+    source: sampleReady ? "approved-visual-sample" : continuityReady ? "retained-deck-continuity" : "style-text-only",
+    styleBrief,
+    styleSpec,
     referenceImages,
     approvedSample: sampleReady ? {
       path: samplePath,
@@ -374,23 +1073,54 @@ export function buildCodexPptStyleLock(job = {}, options = {}) {
       model: sample.model || "",
       imageInputMode: sample.imageInputMode || ""
     } : null,
+    continuityReference: continuityReady ? {
+      path: continuityReferencePath,
+      pageId: cleanText(options.continuityReferencePageId || ""),
+      sha256: cleanText(options.continuityReferenceSha256 || "")
+    } : null,
+    sampleStyleFingerprint,
+    designContract,
     tokens: {
-      typography: "Use one clean Chinese business font mood across the deck; keep title, subtitle, section label, body label, chart label, and footer sizes visually consistent from slide to slide.",
-      palette: "Use one restrained palette across all pages: neutral light backgrounds, one primary brand accent, one secondary accent, and consistent low-saturation support colors.",
-      grid: "Use a stable 16:9 grid, aligned title zone, consistent outer margins, repeated footer/logo handling, and predictable card/chart spacing.",
-      components: "Reuse the same card radius, line weights, icon style, callout treatment, chart/table framing, and image mask language.",
+      typography: `${sampleReady ? "The approved sample is the final typography authority. " : continuityReady ? "The retained current-deck page is the typography continuity authority for this replacement sample. " : ""}${styleSpec.typography.rule} Use only ${styleSpec.typography.weights.join(", ")} weights and keep role-specific title, subtitle, body, chart-label, and footer scales stable.`,
+      palette: referenceReady
+        ? `Use the attached style reference's actual palette across all pages. Local fingerprint: ${paletteFingerprint}. Do not fall back to the source page's palette or to a generic blue business template.`
+        : "Use one restrained palette across all pages: neutral light backgrounds, one primary brand accent, one secondary accent, and consistent low-saturation support colors.",
+      grid: `Use a stable 16:9 grid with ${styleSpec.master.outerMarginPercent.join("-")}% outer margins. ${styleSpec.master.titleAnchor}. ${styleSpec.master.header} ${styleSpec.master.footer} ${designContract.master.pageNumberRule}`,
+      components: `Cards: ${styleSpec.components.cards}. Icons: ${styleSpec.components.icons}. Charts: ${styleSpec.components.charts}. Imagery: ${styleSpec.components.imagery}.`,
       density: "Keep comparable visual density for comparable slide roles; do not switch between unrelated poster, dashboard, magazine, and template styles unless the role explicitly requires a controlled variation."
     },
     requirements: [
-      "Match the approved sample's typography mood, color discipline, spacing rhythm, and component finish.",
+      sampleReady
+        ? "The approved sample is the sole deck-level visual authority. When source styling conflicts with it, the approved sample wins."
+        : continuityReady
+          ? "The retained current-deck page is attached only to preserve visual continuity while replacing the sample. Match its typography, palette, spacing, component finish, and master anchors; never copy its words, brands, products, logos, numbers, or layout content."
+        : "Establish one coherent deck-level visual identity before full production.",
+      referenceReady && sampleFinish ? `Style reference fingerprint: ${sampleFinish}.` : "",
+      referenceReady
+        ? "Match the attached style reference's typography mood, color discipline, spacing rhythm, and component finish."
+        : "Apply the confirmed style brief consistently to typography, palette, spacing rhythm, and component finish.",
+      formatDeckStyleSpecPrompt(styleSpec),
       "Vary composition by slide role, but do not change the deck's font family mood, title hierarchy, palette, icon language, or card/chart treatment.",
-      "Prefer consistent readable Chinese headings over decorative or mixed random fonts.",
-      "If the source page has mixed or messy styling, normalize it into the locked deck style instead of copying the inconsistency."
-    ]
+      "FONT FAMILY LOCK: use one deck-wide Chinese/Latin type system. Never alternate serif, sans-serif, calligraphic, handwritten, or decorative display faces between pages; match the approved sample, or use a modern sans-serif system when no font style was explicitly approved.",
+      "MASTER ELEMENT LOCK: keep recurring header, footer, logo, section label, and page-counter anchors identical on comparable page roles. Do not improvise a new header strip, footer treatment, or page-number position on each page.",
+      designContract.contentSafety.placeholderPolicy,
+      designContract.contentSafety.inventionPolicy,
+      designContract.contentSafety.longTextPolicy,
+      designContract.structure.existingDeckClosingPolicy,
+      "If the source page has mixed or messy styling, normalize it into the locked deck style instead of copying the inconsistency.",
+      referenceReady
+        ? "Use the source page as content evidence only. Re-render non-factual visual styling in the attached style reference's language."
+        : ""
+    ].filter(Boolean)
   };
 }
 
 function buildStyleLockPrompt(styleLock = {}) {
+  const referenceInstruction = styleLock.source === "approved-visual-sample"
+    ? "An approved sample slide is attached as the deck-level visual authority. Match its palette, typography mood, decorative geometry, illustration/icon language, spacing rhythm, and component finish. Do not copy its exact layout unless this page has the same role; vary composition without changing visual identity."
+    : styleLock.source === "retained-deck-continuity"
+      ? "A retained, locally validated page from this same deck is attached as a visual continuity reference for the replacement sample. Match its palette, typography mood, spacing rhythm, master anchors, icon language, and component finish. Do not copy any of its factual content or exact layout."
+      : "No approved sample image is available yet; follow the style contract strictly and keep every page consistent.";
   const parts = [
     "STYLE LOCK: all slides must share one visual identity.",
     `Typography: ${styleLock.tokens?.typography || ""}`,
@@ -398,10 +1128,60 @@ function buildStyleLockPrompt(styleLock = {}) {
     `Grid: ${styleLock.tokens?.grid || ""}`,
     `Components: ${styleLock.tokens?.components || ""}`,
     `Density: ${styleLock.tokens?.density || ""}`,
-    ...(styleLock.locked ? ["An approved sample slide is attached as a style-only reference; match its typography mood, palette discipline, spacing rhythm, and component finish. Do not copy its exact layout unless this page has the same role."] : ["No approved sample image is available yet; follow the style contract strictly and keep every page consistent."]),
+    referenceInstruction,
     ...(Array.isArray(styleLock.requirements) ? styleLock.requirements : [])
   ];
   return parts.filter(Boolean).join(" ");
+}
+
+async function ensureApprovedSampleStyleFingerprint(job = {}, options = {}) {
+  if (options.sampleStyleFingerprint) return options.sampleStyleFingerprint;
+  const sample = job.artifacts?.visualSample || null;
+  if (sample?.styleFingerprint) return sample.styleFingerprint;
+  const samplePath = cleanText(sample?.path || "");
+  if (!samplePath || !fsSync.existsSync(samplePath)) return null;
+  const fingerprint = await analyzeApprovedSampleStyle(samplePath);
+  if (sample && fingerprint) sample.styleFingerprint = fingerprint;
+  return fingerprint;
+}
+
+export async function resolveRetainedVisualContinuityReference(job = {}, targetPageId = "") {
+  const target = cleanText(targetPageId);
+  const images = (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
+    .filter((image) => image?.path && fsSync.existsSync(image.path) && image.staleStyleReference !== true)
+    .filter((image) => cleanText(image.pageId || "") !== target);
+  if (!images.length) return null;
+  const semanticReport = readArtifactJson(job.artifacts?.visualTextQuality?.path || "");
+  const semanticPassPageIds = new Set((Array.isArray(semanticReport.pages) ? semanticReport.pages : [])
+    .filter((page) => page?.status === "pass" && !page?.blockingReasons?.length)
+    .map((page) => cleanText(page.pageId || ""))
+    .filter(Boolean));
+  const reviewMarks = job.artifacts?.imageDeckReview?.marks || {};
+  const reviewedPageIds = new Set(Object.entries(reviewMarks)
+    .filter(([, mark]) => ["pass", "accept"].includes(cleanText(mark?.status || "").toLowerCase()))
+    .map(([pageId]) => cleanText(pageId))
+    .filter(Boolean));
+  const qualified = images
+    .map((image) => ({
+      image,
+      score: semanticPassPageIds.has(cleanText(image.pageId || "")) ? 2 : reviewedPageIds.has(cleanText(image.pageId || "")) ? 1 : 0
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || Number(right.image.pageNumber || 0) - Number(left.image.pageNumber || 0));
+  return qualified[0]?.image || null;
+}
+
+async function analyzeApprovedSampleStyle(samplePath = "") {
+  if (!samplePath || !fsSync.existsSync(samplePath)) return null;
+  const stat = await fs.stat(samplePath).catch(() => null);
+  return analyzeStyleReference({
+    path: samplePath,
+    originalName: path.basename(samplePath),
+    size: stat?.size || 0
+  }, {
+    name: "approved visual sample",
+    tone: "deck-level visual authority"
+  }).catch(() => null);
 }
 
 function readInformationAssetMap(job = {}) {
@@ -411,6 +1191,16 @@ function readInformationAssetMap(job = {}) {
     return JSON.parse(fsSync.readFileSync(filePath, "utf8"));
   } catch {
     return null;
+  }
+}
+
+function readArtifactJson(filePath = "") {
+  const cleanPath = cleanText(filePath);
+  if (!cleanPath || !fsSync.existsSync(cleanPath)) return {};
+  try {
+    return JSON.parse(fsSync.readFileSync(cleanPath, "utf8"));
+  } catch {
+    return {};
   }
 }
 
@@ -444,7 +1234,7 @@ function buildInformationAssetPrompt(assetMap = null, page = {}) {
     reusableAssets.length ? `Reusable source assets are recorded for later composition or comparison: ${reusableAssets.join("; ")}.` : "",
     reusableAssets.length ? "Design around preserved assets; do not invent replacement products, logos, screenshots, charts, or QR/data visuals." : "",
     "Model work should focus on design layer: background, layout atmosphere, card containers, decorative elements, spacing, and unified style.",
-    "Readable factual text and strict source assets may be re-rendered or overlaid by the product pipeline after image generation; leave clean, well-composed regions for them instead of hallucinating details.",
+    "Information assets ground the visual prompt. OCR remains separate evidence for content checks and later editable reconstruction. Keep the generated visual intact; the image-stage pipeline must not paste OCR boxes or source-page crops over it.",
     risks.length ? `Fidelity risks: ${risks.join(", ")}.` : "",
     guardrails.length ? `Guardrails: ${guardrails.join(" ")}` : ""
   ].filter(Boolean).join(" ");
@@ -456,14 +1246,6 @@ export function getRenderedPages(job) {
 }
 
 export async function buildVisualImageRecord({ result = {}, job = null, page = {}, pageNumber = 1, outputPath = "", prompt = "", extra = {} }) {
-  const fidelityOverlay = await applyFidelityOverlayToVisualImage({ job, page, outputPath, result }).catch((error) => ({
-    applied: false,
-    error: error.message || "fidelity overlay failed"
-  }));
-  const textOverlay = await applyProgramTextOverlayToVisualImage({ job, page, outputPath, result }).catch((error) => ({
-    applied: false,
-    error: error.message || "program text overlay failed"
-  }));
   const dimensions = getImageDimensions(outputPath);
   const stat = await fs.stat(outputPath);
   return {
@@ -479,243 +1261,10 @@ export async function buildVisualImageRecord({ result = {}, job = null, page = {
     sha256: await hashFile(outputPath),
     width: dimensions?.width || result.width || page.width || null,
     height: dimensions?.height || result.height || page.height || null,
-    fidelityOverlay,
-    textOverlay,
     createdAt: new Date().toISOString(),
+    approvedSampleSha256: result.approvedSampleSha256 || (Array.isArray(result.referenceImagePaths) && result.referenceImagePaths.length ? job?.artifacts?.visualSample?.sha256 || "" : ""),
     ...extra
   };
-}
-
-async function applyFidelityOverlayToVisualImage({ job = null, page = {}, outputPath = "", result = {} } = {}) {
-  if (!job?.id || !outputPath || result?.dryRun || result?.provider === "passthrough") {
-    return { applied: false, reason: result?.dryRun || result?.provider === "passthrough" ? "passthrough-result" : "missing-job-or-output" };
-  }
-  const pageId = page.pageId || `page_${String(page.pageNumber || 1).padStart(3, "0")}`;
-  const pageAssets = getFidelityAssetsForPage(job, pageId);
-  const overlayAssets = pageAssets.filter(isStrictOverlayAsset);
-  if (!overlayAssets.length) return { applied: false, reason: "no-strict-overlay-assets" };
-  const designLayerPath = path.join(path.dirname(outputPath), `design_layer_${path.basename(outputPath)}`);
-  await fs.copyFile(outputPath, designLayerPath);
-  const spec = {
-    outputPath,
-    designLayerPath,
-    sourcePagePath: page.path || page.sourcePagePath || "",
-    assets: overlayAssets.map((asset) => ({
-      assetId: asset.assetId,
-      type: asset.type,
-      path: asset.path,
-      sourceBoxPx: asset.sourceBoxPx
-    }))
-  };
-  const composeResult = await composeFidelityOverlay(spec);
-  return {
-    applied: Boolean(composeResult.applied),
-    mode: "design-layer-plus-source-assets",
-    designLayerPath,
-    designLayerRelativePath: path.relative(process.cwd(), designLayerPath),
-    overlayCount: composeResult.overlayCount || 0,
-    overlayAssets: overlayAssets.map((asset) => ({
-      assetId: asset.assetId,
-      type: asset.type,
-      path: asset.path,
-      relativePath: asset.relativePath,
-      sourceBoxPx: asset.sourceBoxPx
-    }))
-  };
-}
-
-function getFidelityAssetsForPage(job = {}, pageId = "") {
-  const manifestPath = job.artifacts?.codexPptFidelityAssets?.path || job.artifacts?.codexPptInformationAssets?.fidelityAssetManifestPath || "";
-  if (!manifestPath || !fsSync.existsSync(manifestPath)) return [];
-  try {
-    const manifest = JSON.parse(fsSync.readFileSync(manifestPath, "utf8"));
-    const page = (Array.isArray(manifest.pages) ? manifest.pages : []).find((item) => item.pageId === pageId);
-    return Array.isArray(page?.assets) ? page.assets : [];
-  } catch {
-    return [];
-  }
-}
-
-function isStrictOverlayAsset(asset = {}) {
-  const type = cleanText(asset.type);
-  if (!["brand-mark", "photo-screenshot", "chart-table"].includes(type)) return false;
-  if (!asset.path || !fsSync.existsSync(asset.path)) return false;
-  const box = Array.isArray(asset.sourceBoxPx) ? asset.sourceBoxPx.map(Number) : [];
-  return box.length === 4 && box.every(Number.isFinite) && box[2] > 8 && box[3] > 8;
-}
-
-async function composeFidelityOverlay(spec = {}) {
-  const code = [
-    "import json, sys",
-    "from pathlib import Path",
-    "from PIL import Image",
-    "spec = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))",
-    "out = Path(spec['outputPath'])",
-    "base = Image.open(out).convert('RGBA')",
-    "source_path = spec.get('sourcePagePath') or ''",
-    "source_size = Image.open(source_path).size if source_path and Path(source_path).exists() else base.size",
-    "sw, sh = source_size",
-    "bw, bh = base.size",
-    "sx = bw / max(1, sw)",
-    "sy = bh / max(1, sh)",
-    "overlays = []",
-    "for asset in spec.get('assets', []):",
-    "    asset_path = Path(asset.get('path') or '')",
-    "    box = asset.get('sourceBoxPx') or []",
-    "    if not asset_path.exists() or len(box) != 4:",
-    "        continue",
-    "    x, y, w, h = [float(v) for v in box]",
-    "    dx = max(0, min(int(round(x * sx)), bw - 1))",
-    "    dy = max(0, min(int(round(y * sy)), bh - 1))",
-    "    dw = max(1, min(int(round(w * sx)), bw - dx))",
-    "    dh = max(1, min(int(round(h * sy)), bh - dy))",
-    "    patch = Image.open(asset_path).convert('RGBA').resize((dw, dh), Image.LANCZOS)",
-    "    base.alpha_composite(patch, (dx, dy))",
-    "    overlays.append({'assetId': asset.get('assetId'), 'type': asset.get('type'), 'targetBoxPx': [dx, dy, dw, dh]})",
-    "base.convert('RGB').save(out)",
-    "print(json.dumps({'applied': bool(overlays), 'overlayCount': len(overlays), 'overlays': overlays}, ensure_ascii=False))"
-  ].join("\n");
-  const specPath = `${spec.outputPath}.fidelity_overlay_spec.json`;
-  await fs.writeFile(specPath, JSON.stringify(spec, null, 2), "utf8");
-  const { stdout } = await execFileAsync("python", ["-c", code, specPath], {
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: 60000,
-    env: {
-      ...process.env,
-      PYTHONIOENCODING: "utf-8"
-    }
-  });
-  const result = JSON.parse(String(stdout || "{}"));
-  result.specPath = specPath;
-  return result;
-}
-
-async function applyProgramTextOverlayToVisualImage({ job = null, page = {}, outputPath = "", result = {} } = {}) {
-  if (!job?.id || !outputPath || result?.dryRun || result?.provider === "passthrough") {
-    return { applied: false, reason: result?.dryRun || result?.provider === "passthrough" ? "passthrough-result" : "missing-job-or-output" };
-  }
-  const pageId = page.pageId || `page_${String(page.pageNumber || 1).padStart(3, "0")}`;
-  const lines = getOcrLinesForPage(job, pageId)
-    .filter(isRenderableOcrLine)
-    .slice(0, 80);
-  if (!lines.length) return { applied: false, reason: "no-ocr-lines" };
-  const spec = {
-    outputPath,
-    sourcePagePath: page.path || page.sourcePagePath || "",
-    lines: lines.map((line) => ({
-      id: line.id || "",
-      text: cleanText(line.correctedText || line.text || "").slice(0, 180),
-      boxPx: Array.isArray(line.box_px) ? line.box_px : line.boxPx,
-      confidence: line.confidence ?? null
-    }))
-  };
-  const composeResult = await composeProgramTextOverlay(spec);
-  return {
-    applied: Boolean(composeResult.applied),
-    mode: "program-rendered-source-text",
-    lineCount: composeResult.lineCount || 0,
-    specPath: composeResult.specPath || "",
-    specRelativePath: composeResult.specPath ? path.relative(process.cwd(), composeResult.specPath) : ""
-  };
-}
-
-function getOcrLinesForPage(job = {}, pageId = "") {
-  const hintsPath = cleanText(job.artifacts?.ocrTextHints?.path || "");
-  if (!hintsPath || !fsSync.existsSync(hintsPath)) return [];
-  try {
-    const hints = JSON.parse(fsSync.readFileSync(hintsPath, "utf8"));
-    const page = (Array.isArray(hints.pages) ? hints.pages : []).find((item) => normalizePageId(item.pageId) === normalizePageId(pageId));
-    return Array.isArray(page?.ocrLines) ? page.ocrLines : [];
-  } catch {
-    return [];
-  }
-}
-
-function isRenderableOcrLine(line = {}) {
-  const text = cleanText(line.correctedText || line.text || "");
-  if (!text || text.length > 180) return false;
-  if (line.low_confidence || line.mojibake_suspect) return false;
-  const box = Array.isArray(line.box_px) ? line.box_px.map(Number) : Array.isArray(line.boxPx) ? line.boxPx.map(Number) : [];
-  if (box.length !== 4 || !box.every(Number.isFinite)) return false;
-  return box[2] >= 12 && box[3] >= 8;
-}
-
-function normalizePageId(value = "") {
-  const match = String(value || "").match(/\d+/);
-  return match ? `page_${String(Number(match[0])).padStart(3, "0")}` : "";
-}
-
-async function composeProgramTextOverlay(spec = {}) {
-  const code = [
-    "import json, sys",
-    "from pathlib import Path",
-    "from PIL import Image, ImageDraw, ImageFont",
-    "spec = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))",
-    "out = Path(spec['outputPath'])",
-    "base = Image.open(out).convert('RGBA')",
-    "source_path = spec.get('sourcePagePath') or ''",
-    "source_size = Image.open(source_path).size if source_path and Path(source_path).exists() else base.size",
-    "sw, sh = source_size",
-    "bw, bh = base.size",
-    "sx = bw / max(1, sw)",
-    "sy = bh / max(1, sh)",
-    "draw = ImageDraw.Draw(base)",
-    "font_candidates = [r'C:\\Windows\\Fonts\\msyh.ttc', r'C:\\Windows\\Fonts\\simhei.ttf', r'C:\\Windows\\Fonts\\arial.ttf']",
-    "def pick_font(size):",
-    "    for fp in font_candidates:",
-    "        if Path(fp).exists():",
-    "            try: return ImageFont.truetype(fp, max(8, int(size)))",
-    "            except Exception: pass",
-    "    return ImageFont.load_default()",
-    "def text_size(font, text):",
-    "    try:",
-    "        box = draw.textbbox((0,0), text, font=font)",
-    "        return box[2]-box[0], box[3]-box[1]",
-    "    except Exception:",
-    "        return draw.textlength(text, font=font), max(10, getattr(font, 'size', 14))",
-    "rendered = []",
-    "for line in spec.get('lines', []):",
-    "    text = (line.get('text') or '').strip()",
-    "    box = line.get('boxPx') or []",
-    "    if not text or len(box) != 4:",
-    "        continue",
-    "    x, y, w, h = [float(v) for v in box]",
-    "    dx = max(0, min(int(round(x * sx)), bw - 1))",
-    "    dy = max(0, min(int(round(y * sy)), bh - 1))",
-    "    dw = max(1, min(int(round(w * sx)), bw - dx))",
-    "    dh = max(1, min(int(round(h * sy)), bh - dy))",
-    "    font_size = max(10, min(48, int(dh * 0.76)))",
-    "    font = pick_font(font_size)",
-    "    tw, th = text_size(font, text)",
-    "    while tw > max(8, dw - 6) and font_size > 8:",
-    "        font_size -= 1",
-    "        font = pick_font(font_size)",
-    "        tw, th = text_size(font, text)",
-    "    pad_x = max(2, int(font_size * 0.18))",
-    "    pad_y = max(1, int(font_size * 0.1))",
-    "    bg = (255, 255, 255, 210)",
-    "    fg = (18, 24, 38, 255)",
-    "    draw.rounded_rectangle([dx, dy, min(bw, dx + dw), min(bh, dy + dh)], radius=max(2, int(font_size * 0.12)), fill=bg)",
-    "    draw.text((dx + pad_x, dy + max(0, (dh - th) // 2) - pad_y), text, font=font, fill=fg)",
-    "    rendered.append({'id': line.get('id'), 'targetBoxPx': [dx, dy, dw, dh]})",
-    "base.convert('RGB').save(out)",
-    "print(json.dumps({'applied': bool(rendered), 'lineCount': len(rendered), 'rendered': rendered}, ensure_ascii=False))"
-  ].join("\n");
-  const specPath = `${spec.outputPath}.program_text_overlay_spec.json`;
-  await fs.writeFile(specPath, JSON.stringify(spec, null, 2), "utf8");
-  const { stdout } = await execFileAsync("python", ["-c", code, specPath], {
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: 60000,
-    env: {
-      ...process.env,
-      PYTHONIOENCODING: "utf-8"
-    }
-  });
-  const result = JSON.parse(String(stdout || "{}"));
-  result.specPath = specPath;
-  return result;
 }
 
 export async function discoverVisualImages(dir, manifestPath = "") {
@@ -782,9 +1331,19 @@ export async function writeVisualManifest(filePath, images = [], extra = {}) {
 
 export async function writeVisualQualityReport(job, visualImages = [], renderedPages = []) {
   const reportPath = path.join(job.dirs.visualImages, VISUAL_QUALITY_REPORT);
-  const renderedByPage = new Map((Array.isArray(renderedPages) ? renderedPages : []).map((page) => [page.pageId, page]));
+  const currentVisualImages = (Array.isArray(visualImages) ? visualImages : []).filter((image) => image.staleStyleReference !== true);
+  const enrichedRenderedPages = mergeOutlineMetadata(job, renderedPages);
+  const renderedByPage = new Map(enrichedRenderedPages.map((page) => [page.pageId, page]));
+  const approvedSamplePath = cleanText(job.artifacts?.visualSample?.path || "");
+  const approvedSampleQa = approvedSamplePath && fsSync.existsSync(approvedSamplePath)
+    ? await analyzeImageSafely(approvedSamplePath)
+    : null;
+  const sourceOcrCoverage = getWorkflowOcrCoverage(job, {
+    pages: currentVisualImages.map((image) => image.pageId || image.pageNumber)
+  });
+  const missingSourceOcr = new Set(sourceOcrCoverage.missingPageIds);
   const pages = [];
-  for (const image of Array.isArray(visualImages) ? visualImages : []) {
+  for (const image of currentVisualImages) {
     const sourcePage = renderedByPage.get(image.pageId) || null;
     const visualQa = await analyzeImageSafely(image.path);
     const sourceQa = sourcePage?.path ? await analyzeImageSafely(sourcePage.path) : null;
@@ -792,12 +1351,14 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
       ...(sourceQa?.full?.textLikeScore > 0.004 || sourceQa?.full?.darkComponentDensity > 0.012 ? ["source-has-readable-text-or-title"] : []),
       ...detectSourceTextLoss(sourceQa, visualQa),
       ...(visualQa.risks || []),
+      ...(missingSourceOcr.has(image.pageId) ? ["missing-source-ocr-evidence"] : []),
       ...(!image.sourcePagePath && !image.sourceImagePath ? ["missing-source-reference"] : [])
     ];
     const status = visualQa.status === "pass" && !manualReasons.length ? "pass" : "review";
     pages.push({
       pageId: image.pageId,
       pageNumber: image.pageNumber,
+      role: inferDeckPageRole(sourcePage || image, { totalPages: enrichedRenderedPages.length || currentVisualImages.length }),
       status,
       manualReviewRequired: status !== "pass",
       manualReviewReasons: [...new Set(manualReasons)],
@@ -808,7 +1369,8 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
       sourceQa
     });
   }
-  const styleConsistency = buildDeckStyleConsistencyReport(pages);
+  const styleConsistency = buildDeckStyleConsistencyReport(pages, approvedSampleQa);
+  styleConsistency.approvedSampleSha256 = cleanText(job.artifacts?.visualSample?.sha256 || "");
   const driftByPage = new Map((styleConsistency.driftPages || []).map((page) => [page.pageId, page]));
   for (const page of pages) {
     const drift = driftByPage.get(page.pageId);
@@ -837,102 +1399,13 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
       failedCount: failedPages.length,
       manualReviewRequired: reviewPages.length > 0,
       primaryReason: reviewPages[0]?.manualReviewReasons?.[0] || "",
-      styleConsistency
+      styleConsistency,
+      sourceOcrCoverage
     },
     pages
   };
   await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   return { path: reportPath, report, summary: report.summary };
-}
-
-function buildDeckStyleConsistencyReport(pages = []) {
-  const candidates = (Array.isArray(pages) ? pages : [])
-    .map((page) => ({
-      pageId: page.pageId,
-      pageNumber: page.pageNumber,
-      metrics: extractStyleMetrics(page.visualQa)
-    }))
-    .filter((page) => page.metrics);
-  if (candidates.length < 3) {
-    return {
-      status: "insufficient-data",
-      checkedPages: candidates.length,
-      driftCount: 0,
-      driftPages: [],
-      message: "Need at least 3 generated pages for deck-level style consistency QA."
-    };
-  }
-  const baseline = {
-    brightness: median(candidates.map((page) => page.metrics.brightness)),
-    saturationDensity: median(candidates.map((page) => page.metrics.saturationDensity)),
-    edgeDensity: median(candidates.map((page) => page.metrics.edgeDensity)),
-    textLikeScore: median(candidates.map((page) => page.metrics.textLikeScore)),
-    titleEdgeDensity: median(candidates.map((page) => page.metrics.titleEdgeDensity))
-  };
-  const driftPages = candidates
-    .map((page) => {
-      const deltas = {
-        brightness: round(Math.abs(page.metrics.brightness - baseline.brightness)),
-        saturationDensity: round(Math.abs(page.metrics.saturationDensity - baseline.saturationDensity)),
-        edgeDensity: round(Math.abs(page.metrics.edgeDensity - baseline.edgeDensity)),
-        textLikeScore: round(Math.abs(page.metrics.textLikeScore - baseline.textLikeScore)),
-        titleEdgeDensity: round(Math.abs(page.metrics.titleEdgeDensity - baseline.titleEdgeDensity))
-      };
-      const reasons = [
-        ...(deltas.brightness > 0.22 ? ["style-brightness-drift"] : []),
-        ...(deltas.saturationDensity > 0.35 ? ["style-color-drift"] : []),
-        ...(deltas.edgeDensity > 0.085 ? ["style-density-drift"] : []),
-        ...(deltas.textLikeScore > 0.04 ? ["style-text-density-drift"] : []),
-        ...(deltas.titleEdgeDensity > 0.08 ? ["style-title-density-drift"] : [])
-      ];
-      return {
-        pageId: page.pageId,
-        pageNumber: page.pageNumber,
-        reasons,
-        metrics: page.metrics,
-        deltas
-      };
-    })
-    .filter((page) => page.reasons.length);
-  return {
-    status: driftPages.length ? "review" : "pass",
-    checkedPages: candidates.length,
-    driftCount: driftPages.length,
-    driftPages,
-    baseline,
-    thresholds: {
-      brightness: 0.22,
-      saturationDensity: 0.35,
-      edgeDensity: 0.085,
-      textLikeScore: 0.04,
-      titleEdgeDensity: 0.08
-    },
-    message: driftPages.length
-      ? `${driftPages.length} page(s) visually drift from the deck baseline and need human review or rerun.`
-      : "Deck-level pixel consistency QA did not detect obvious style drift."
-  };
-}
-
-function extractStyleMetrics(qa = null) {
-  if (!qa || qa.status === "failed" || !qa.full) return null;
-  return {
-    brightness: Number(qa.full.brightness || 0),
-    saturationDensity: Number(qa.full.saturationDensity || 0),
-    edgeDensity: Number(qa.full.edgeDensity || 0),
-    textLikeScore: Number(qa.full.textLikeScore || 0),
-    titleEdgeDensity: Number(qa.titleArea?.edgeDensity || 0)
-  };
-}
-
-function median(values = []) {
-  const numbers = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
-  if (!numbers.length) return 0;
-  const middle = Math.floor(numbers.length / 2);
-  return numbers.length % 2 ? numbers[middle] : round((numbers[middle - 1] + numbers[middle]) / 2);
-}
-
-function round(value) {
-  return Math.round(Number(value || 0) * 1000) / 1000;
 }
 
 function detectSourceTextLoss(sourceQa = null, visualQa = null) {
@@ -1020,7 +1493,7 @@ export function upsertPage(pages = [], pageNumber, status, message, details = {}
 
 export function markStage(stage = {}, status, message, details = {}) {
   const now = new Date().toISOString();
-  return {
+  const next = {
     ...stage,
     status,
     message,
@@ -1029,6 +1502,8 @@ export function markStage(stage = {}, status, message, details = {}) {
     startedAt: stage.startedAt || now,
     ...(status === "complete" || status === "failed" ? { finishedAt: now } : {})
   };
+  if (status !== "complete" && status !== "failed") delete next.finishedAt;
+  return next;
 }
 
 export function appendEvent(events = [], type, message, details = {}) {

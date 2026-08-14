@@ -1,15 +1,17 @@
 import { renderWorkflowSource } from "./sourceRenderer.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, generateWorkflowVisualImages, generateWorkflowVisualSample } from "./workflowVisuals.js";
+import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, generateWorkflowVisualImages, generateWorkflowVisualSample, parsePageSelection } from "./workflowVisuals.js";
 import { runWorkflowOcr } from "./workflowOcr.js";
 import { buildWorkflowEditableWorkerPrompts, finalizeWorkflowEditableRun, isImageDeckReviewApproved, prepareWorkflowEditableRun, regenerateWorkflowEditableHints } from "./workflowEditable.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
-import { assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES } from "./workflowApprovals.js";
+import { assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, isCodexPptSampleApprovalCurrent } from "./workflowApprovals.js";
 import { syncWorkflowCodexPptSlideTasks } from "./workflowCodexPptWorkerQueue.js";
 import { readWorkflowJob, updateWorkflowStage } from "./workflowJobs.js";
 import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
 import { retryStaleWorkflowPageEvidence } from "./workflowPageRetry.js";
 import { listWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { getWorkflowDeliveryStatus } from "./workflowDelivery.js";
+import { buildPartialFinalCoverage } from "./workflowContinuation.js";
+import { assertWorkflowImageDeckReviewReady } from "./workflowImageDeckReview.js";
 
 const MANUAL_ACTION_RE = /approve|approval|review\/approve|codex slide worker|slide workers|editable\/dispatch|editable\/record|page workers|reset failed/i;
 
@@ -17,8 +19,14 @@ export async function runWorkflowNextAction(jobId, options = {}) {
   const compliance = await getWorkflowComplianceStatus(jobId);
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
   const job = await readWorkflowJob(jobId);
+  const visualTest = buildPendingVisualTestGuidance(job, compliance);
+  if (visualTest) return { ok: true, didRun: false, jobId, compliance, job, ...visualTest };
   const partialFinal = buildPartialFinalContinuation(job);
-  if (partialFinal && (!action || action === "review/approve" || /review\/approve/i.test(action))) {
+  if (partialFinal) {
+    const partialDelivery = await buildExistingFinalDeliveryResult(jobId, compliance, job);
+    if (partialDelivery?.blockingIssues?.length) {
+      return mergePartialFinalDelivery(partialDelivery, partialFinal);
+    }
     return {
       ok: true,
       didRun: false,
@@ -75,9 +83,23 @@ export async function runWorkflowNextAction(jobId, options = {}) {
   if (action === "visual/generate" || action.includes("visual/generate")) {
     await assertCodexPptApprovals(jobId, CODEX_PPT_VISUAL_DECK_GATES);
     const jobState = await readWorkflowJob(jobId);
-    const pageCount = Array.isArray(jobState.artifacts?.renderedPages) ? jobState.artifacts.renderedPages.length : 0;
-    const authorization = getExternalImageAuthorizationStatus(jobState, { scope: "full-deck", imageCalls: pageCount });
-    const authorizedBody = withExternalImageAuthorization(body, authorization);
+    const { requestedPages, pageCount, pageSelection } = buildVisualGenerationScope(jobState, body);
+    if (!pageCount) {
+      return {
+        ok: true,
+        didRun: false,
+        manualRequired: false,
+        action: "visual/generate",
+        reason: "没有剩余图片页需要生成，已跳过外部图片 API 调用。",
+        compliance: await getWorkflowComplianceStatus(jobId),
+        job: jobState
+      };
+    }
+    const authorization = getExternalImageAuthorizationStatus(jobState, { scope: "full-deck", imageCalls: pageCount, pages: requestedPages, pageSelection });
+    const authorizedBody = withExternalImageAuthorization({
+      ...body,
+      ...(!pageSelection ? {} : { pages: pageSelection, maxPages: pageCount })
+    }, authorization);
     assertWorkflowVisualGenerationAllowed(authorizedBody);
     const job = await runStage(jobId, "visual_generating", "正在生成视觉图片", "视觉图片生成失败", authorizedBody, () => generateWorkflowVisualImages(jobId, authorizedBody));
     return makeRunResult(jobId, compliance, "visual/generate", { job });
@@ -91,8 +113,17 @@ export async function runWorkflowNextAction(jobId, options = {}) {
     return makeRunResult(jobId, compliance, "ocr/run", { job });
   }
   if (action === "editable/prepare" || action.includes("editable/prepare")) {
-    if (job.artifacts?.imageDeck && !isImageDeckReviewApproved(job.artifacts || {})) {
-      return { ...base, action: "editable/prepare", blockingIssues: ["Route B requires image deck review approval before editable prepare."] };
+    if (job.artifacts?.imageDeck && !isWorkflowJobImageDeckReviewApproved(job)) {
+      return {
+        ok: true,
+        didRun: false,
+        manualRequired: true,
+        action: "editable/prepare",
+        reason: "Route B requires image deck review approval before editable prepare.",
+        blockingIssues: ["Route B requires image deck review approval before editable prepare."],
+        compliance,
+        job
+      };
     }
     if (body.confirmRouteB !== true) {
       return {
@@ -105,8 +136,8 @@ export async function runWorkflowNextAction(jobId, options = {}) {
         job
       };
     }
-    const job = await runStage(jobId, "editable_prepared", "正在准备 editppt 运行目录", "可编辑重建准备失败", body, () => prepareWorkflowEditableRun(jobId, { force: true, maxConcurrentPages: 6, ...body }));
-    return makeRunResult(jobId, compliance, "editable/prepare", { job });
+    const preparedJob = await runStage(jobId, "editable_prepared", "正在准备 editppt 运行目录", "可编辑重建准备失败", body, () => prepareWorkflowEditableRun(jobId, { force: true, maxConcurrentPages: 6, ...body }));
+    return makeRunResult(jobId, compliance, "editable/prepare", { job: preparedJob });
   }
   if (action === "editable/hints" || action.includes("editable/hints")) {
     const job = await runStage(jobId, "editable_prepared", "正在重新生成 editppt 文字提示", "可编辑文字提示重新生成失败", body, () => regenerateWorkflowEditableHints(jobId, body));
@@ -130,8 +161,24 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
   const action = String((compliance.runbook?.allowedActions || [])[0] || "").trim();
   const job = await readWorkflowJob(jobId);
   const body = { ...options, requestedBy: options.requestedBy || "workflow-next-action-preflight" };
+  const visualTest = buildPendingVisualTestGuidance(job, compliance);
+  if (visualTest) {
+    return {
+      ok: true,
+      preview: true,
+      didRun: false,
+      jobId,
+      compliance,
+      updatedAt: new Date().toISOString(),
+      ...visualTest
+    };
+  }
   const partialFinal = buildPartialFinalContinuation(job);
-  if (partialFinal && (!action || action === "review/approve" || /review\/approve/i.test(action))) {
+  if (partialFinal) {
+    const partialDelivery = await buildExistingFinalDeliveryPreflight(jobId, compliance, job);
+    if (partialDelivery?.blockingIssues?.length) {
+      return mergePartialFinalDelivery(partialDelivery, partialFinal);
+    }
     return {
       ok: true,
       preview: true,
@@ -252,13 +299,27 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
     }, { externalImageCalls: 1, authorization });
   }
   if (action === "visual/generate" || action.includes("visual/generate")) {
-    const pageCount = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
-    const authorization = getExternalImageAuthorizationStatus(job, { scope: "full-deck", imageCalls: pageCount });
+    const { pendingPages, requestedPages, pageCount, pageSelection } = buildVisualGenerationScope(job, body);
+    if (!pageCount) {
+      return {
+        ...base,
+        action: "visual/generate",
+        title: "图片页已补齐",
+        summary: "没有剩余图片页需要生成。",
+        startReady: false,
+        externalImageCalls: 0,
+        blockingIssues: ["没有剩余图片页需要生成。"],
+        warnings: []
+      };
+    }
+    const authorization = getExternalImageAuthorizationStatus(job, { scope: "full-deck", imageCalls: pageCount, pages: requestedPages, pageSelection });
     return previewWithAssertions(base, async () => {
       await assertCodexPptApprovals(jobId, CODEX_PPT_VISUAL_DECK_GATES);
       assertWorkflowVisualGenerationAllowed(withExternalImageAuthorization(body, authorization));
       return {
         action: "visual/generate",
+        title: pendingPages.length ? `继续生成剩余 ${pendingPages.length} 页` : "生成 codex-ppt 图片页",
+        summary: pendingPages.length ? `保留当前 ${currentVisualImages(job).length} 页，只生成尚未完成的页面。` : "生成当前选择范围的 codex-ppt 图片页。",
         startReady: true,
         externalImageCalls: pageCount,
         authorization,
@@ -267,16 +328,31 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
     }, { externalImageCalls: pageCount, authorization });
   }
   if (action === "image-deck/assemble" || action.includes("image-deck/assemble")) {
-    const visualImages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages.length : 0;
-    return visualImages
-      ? { ...base, action: "image-deck/assemble", startReady: true, reason: `可以把 ${visualImages} 张视觉图组装成图片型 PPT。` }
-      : { ...base, action: "image-deck/assemble", blockingIssues: ["没有可用于组装的视觉图片。"] };
+    const visualImages = Array.isArray(job.artifacts?.visualImages)
+      ? job.artifacts.visualImages.filter((image) => image?.path && image.staleStyleReference !== true).length
+      : 0;
+    if (!visualImages) {
+      return { ...base, action: "image-deck/assemble", blockingIssues: ["没有可用于组装的视觉图片。"] };
+    }
+    try {
+      assertWorkflowImageDeckReviewReady(job);
+      return { ...base, action: "image-deck/assemble", startReady: true, reason: `可以把 ${visualImages} 张已复核视觉图组装成图片型 PPT。` };
+    } catch (error) {
+      return {
+        ...base,
+        action: "image-deck/assemble",
+        startReady: false,
+        manualRequired: true,
+        reason: "请先逐页复核整套图片，确认信息、文字和视觉风格后再组装。",
+        blockingIssues: [error.message || "整套图片尚未完成复核。"]
+      };
+    }
   }
   if (action === "ocr/run" || action.includes("ocr/run")) {
     return { ...base, action: "ocr/run", startReady: true, reason: "可以运行 OCR/文字提示提取。" };
   }
   if (action === "editable/prepare" || action.includes("editable/prepare")) {
-    if (job.artifacts?.imageDeck && !isImageDeckReviewApproved(job.artifacts || {})) {
+    if (job.artifacts?.imageDeck && !isWorkflowJobImageDeckReviewApproved(job)) {
       return { ...base, action: "editable/prepare", blockingIssues: ["Route B requires image deck review approval before editable prepare."] };
     }
     return job.artifacts?.imageDeck
@@ -305,9 +381,100 @@ export async function getWorkflowNextActionPreflight(jobId, options = {}) {
   };
 }
 
+function currentVisualImages(job = {}) {
+  return (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
+}
+
+function isWorkflowJobImageDeckReviewApproved(job = {}) {
+  const artifacts = job.artifacts || {};
+  const expectedPages = Number(
+    job.sourceMeta?.pageCount
+    || artifacts.sourceMeta?.pageCount
+    || job.input?.sourcePageCount
+    || artifacts.source?.pageCount
+    || 0
+  ) || Math.max(
+    Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
+    Number(artifacts.imageDeck?.pageCount || 0),
+    Number(artifacts.ocrTextHints?.pageCount || 0),
+    currentVisualImages(job).length
+  );
+  return isImageDeckReviewApproved(artifacts, { expectedPages });
+}
+
+export function buildPendingVisualTestGuidance(job = {}, compliance = null) {
+  const sourcePages = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
+  const targetPages = Math.min(2, sourcePages);
+  const visualImages = currentVisualImages(job);
+  const approvals = Array.isArray(job.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [];
+  const sampleApproved = approvals.some((approval) => approval?.gate === "sample" && approval?.status === "approved");
+  const fullDeckApproved = approvals.some((approval) => approval?.gate === "fullDeck" && approval?.status === "approved");
+  const slideJobs = job.artifacts?.codexPptSlideJobs || {};
+  const testScopeRecorded = Number(slideJobs.total || 0) > 0 && Number(slideJobs.total || 0) <= Math.max(2, targetPages);
+  const rerunPageIds = Object.entries(job.artifacts?.imageDeckReview?.marks || {})
+    .filter(([, mark]) => mark?.status === "rerun")
+    .map(([pageId]) => pageId);
+  const missingCount = Math.max(0, targetPages - visualImages.length);
+  if (!sampleApproved || fullDeckApproved || !targetPages || !missingCount || (!testScopeRecorded && !rerunPageIds.length)) return null;
+  const pageLabel = missingCount === 1 ? "1 页" : `${missingCount} 页`;
+  return {
+    action: "visual/generate",
+    title: `补生成 ${pageLabel}测试图`,
+    summary: `当前测试范围 ${visualImages.length}/${targetPages} 页；保留已通过页面，只补生成缺失的 ${pageLabel}。`,
+    reason: "测试页尚未齐全，不能提前进入全量授权。",
+    startReady: false,
+    manualRequired: true,
+    requiredConfirmation: `确认调用 ${missingCount} 次外部图片 API 后补生成测试页。`,
+    externalImageCalls: missingCount,
+    mutatesWorkflow: true,
+    blockingIssues: [],
+    warnings: rerunPageIds.length ? [`待重做页面：${rerunPageIds.join(", ")}`] : [],
+    testScope: {
+      targetPages,
+      generatedPages: visualImages.length,
+      missingPages: missingCount,
+      rerunPageIds
+    },
+    compliance
+  };
+}
+
+export function getPendingVisualPageNumbers(job = {}) {
+  const currentPages = new Set(currentVisualImages(job)
+    .map((image) => Number(image.pageNumber || String(image.pageId || "").match(/\d+/)?.[0] || 0))
+    .filter(Boolean));
+  const sample = job.artifacts?.visualSample || {};
+  if (sample.path && sample.sha256 && isCodexPptSampleApprovalCurrent(job)) {
+    const samplePageNumber = Number(sample.pageNumber || String(sample.pageId || "").match(/\d+/)?.[0] || 0);
+    if (samplePageNumber) currentPages.add(samplePageNumber);
+  }
+  return (Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages : [])
+    .map((page, index) => Number(page.pageNumber || String(page.pageId || "").match(/\d+/)?.[0] || index + 1))
+    .filter((pageNumber) => pageNumber > 0 && !currentPages.has(pageNumber));
+}
+
+export function buildVisualGenerationScope(job = {}, options = {}) {
+  const pendingPages = getPendingVisualPageNumbers(job);
+  const explicitPages = String(options.pages || options.pageNumbers || "").trim();
+  const renderedPageCount = Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0;
+  const pendingSet = new Set(pendingPages);
+  const requestedPages = explicitPages
+    ? parsePageSelection(explicitPages, renderedPageCount).filter((pageNumber) => options.force === true || pendingSet.has(pageNumber))
+    : pendingPages;
+  return {
+    pendingPages,
+    explicitPages,
+    requestedPages,
+    pageCount: requestedPages.length,
+    pageSelection: requestedPages.join(",")
+  };
+}
+
 async function tryBuildFastEditablePageWorkerPreflight(jobId) {
   const job = await readWorkflowJob(jobId).catch(() => null);
   if (!job) return null;
+  const imageDeckReviewReady = !job.artifacts?.imageDeck || isWorkflowJobImageDeckReviewApproved(job);
   const taskBundle = await listWorkflowEditableWorkerTasks(jobId).catch(() => null);
   const tasks = Array.isArray(taskBundle?.tasks)
     ? taskBundle.tasks
@@ -324,12 +491,14 @@ async function tryBuildFastEditablePageWorkerPreflight(jobId) {
     ok: true,
     lightweight: true,
     runbook: {
-      level: "working",
-      currentTitle: "继续剩余页面可编辑重建",
-      summary: `${recordedPages}/${tasks.length || "?"} 页已记录；剩余页面等待 image-to-editable-ppt 重建。`,
-      allowedActions: ["editable/dispatch + editable/record"],
-      blockers: [],
-      nextActions: ["下一步：启动可编辑页面任务"]
+      level: imageDeckReviewReady ? "working" : "blocked",
+      currentTitle: imageDeckReviewReady ? "继续剩余页面可编辑重建" : "先完成图片版复核",
+      summary: imageDeckReviewReady
+        ? `${recordedPages}/${tasks.length || "?"} 页已记录；剩余页面等待 image-to-editable-ppt 重建。`
+        : `${recordedPages}/${tasks.length || "?"} 页属于历史可编辑草稿；图片版复核完成前暂停继续重建。`,
+      allowedActions: imageDeckReviewReady ? ["editable/dispatch + editable/record"] : ["image-deck/review"],
+      blockers: imageDeckReviewReady ? [] : ["图片版逐页复核尚未完成。"],
+      nextActions: [imageDeckReviewReady ? "下一步：启动可编辑页面任务" : "下一步：返回图片版逐页复核"]
     }
   };
   return buildEditablePageWorkerPreflight({
@@ -535,6 +704,35 @@ async function buildEditablePageWorkerManualResult(jobId, compliance, job = null
 
 async function buildEditablePageWorkerPreflight(base, jobId) {
   const job = await readWorkflowJob(jobId);
+  if (job.artifacts?.imageDeck && !isWorkflowJobImageDeckReviewApproved(job)) {
+    const reviewIssue = describeImageDeckReviewIssue(job);
+    const reason = reviewIssue.reason;
+    return {
+      ...base,
+      action: "image-deck/review",
+      title: "先复核整套图片",
+      summary: reason,
+      startReady: false,
+      manualRequired: true,
+      mutatesWorkflow: false,
+      reason,
+      pageSelection: "",
+      pages: [],
+      externalImageCalls: 0,
+      blockingIssues: [reason],
+      warnings: [],
+      nextOptions: [
+        {
+          id: "review-image-deck-style",
+          label: "复核整套图片",
+          detail: reviewIssue.detail,
+          targetPanel: "image-deck-review",
+          mutatesWorkflow: false,
+          externalImageCalls: 0
+        }
+      ]
+    };
+  }
   const taskBundle = await listWorkflowEditableWorkerTasks(jobId).catch(() => null);
   const tasks = Array.isArray(taskBundle?.tasks)
     ? taskBundle.tasks
@@ -671,22 +869,52 @@ function withExternalImageAuthorization(body = {}, authorization = {}) {
 }
 
 function buildPartialFinalContinuation(job = {}) {
-  const artifacts = job.artifacts || {};
-  const final = artifacts.editableFinal || {};
-  const editability = final.pptxEditability || {};
-  const sourcePages = numberOrZero(job.sourceMeta?.pageCount)
-    || numberOrZero(artifacts.sourceMeta?.pageCount)
-    || countArray(artifacts.renderedPages);
-  const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || job.finalValidation?.slides);
-  const visualPages = countArray(artifacts.visualImages);
-  const hasFinal = Boolean(final.path);
-  if (!hasFinal || !sourcePages || !finalPages || finalPages >= sourcePages) return null;
+  const coverage = buildPartialFinalCoverage(job);
+  const {
+    sourcePages = 0,
+    finalPages = 0,
+    visualPages = 0,
+    missingVisualPageIds = [],
+    missingEditablePageIds = [],
+    canContinueRemainingPages = false,
+    canContinueEditablePages = false
+  } = coverage;
+  if (!canContinueRemainingPages && !canContinueEditablePages) return null;
 
-  const remainingPages = Math.max(0, sourcePages - finalPages);
-  const startPage = finalPages + 1;
-  const endPage = sourcePages;
-  const pageSelection = `page_${String(startPage).padStart(3, "0")}-page_${String(endPage).padStart(3, "0")}`;
-  const reason = `当前最终 PPT 只覆盖 ${finalPages}/${sourcePages} 页。请先复核当前 ${finalPages} 页样例，或确认额度后继续生成剩余 ${remainingPages} 页。`;
+  const continueVisuals = canContinueRemainingPages;
+  const imageDeckReviewReady = isWorkflowJobImageDeckReviewApproved(job);
+  const requiresImageDeckReview = Boolean(!continueVisuals && canContinueEditablePages && !imageDeckReviewReady);
+  const remainingPageIds = continueVisuals ? missingVisualPageIds : missingEditablePageIds;
+  const remainingPages = remainingPageIds.length;
+  const pageSelection = remainingPageIds.join(",");
+  const externalImageCalls = continueVisuals ? remainingPages : remainingPages * getEditableWorkerExternalImageCallsPerPage();
+  const reviewIssue = describeImageDeckReviewIssue(job);
+  const reason = continueVisuals
+    ? `当前最终 PPT 只覆盖 ${finalPages}/${sourcePages} 页。请先复核当前 ${finalPages} 页样例，或确认额度后继续生成缺失的 ${remainingPages} 个图片页。`
+    : requiresImageDeckReview
+      ? `图片版已经覆盖 ${visualPages}/${sourcePages} 页。${reviewIssue.reason}之后再继续重建缺失的 ${remainingPages} 个可编辑页。`
+      : `图片版已经覆盖 ${visualPages}/${sourcePages} 页。下一步应继续重建缺失的 ${remainingPages} 个可编辑页，不会重复生成图片页。`;
+  const continuationOption = requiresImageDeckReview
+    ? {
+      id: "review-image-deck-style",
+      label: "复核整套图片",
+      detail: reviewIssue.detail,
+      targetPanel: "image-deck-review",
+      mutatesWorkflow: false,
+      externalImageCalls: 0
+    }
+    : {
+      id: continueVisuals ? "continue-remaining-pages" : "continue-editable-pages",
+      label: continueVisuals ? `继续生成缺失的 ${remainingPages} 个图片页` : `继续重建缺失的 ${remainingPages} 个可编辑页`,
+      detail: continueVisuals
+        ? `继续处理 ${pageSelection}。启动前必须再次确认 gpt-image-2 图片 API 调用额度。`
+        : `继续处理 ${pageSelection}。只进入 image-to-editable-ppt 页面重建，不重复调用 codex-ppt 生成图片页。`,
+      targetPanel: continueVisuals ? "codex-slide-worker-panel" : "editable-page-worker-panel",
+      pageSelection,
+      mutatesWorkflow: true,
+      requiresExternalImageConfirmation: true,
+      externalImageCalls
+    };
   return {
     partialFinal: {
       sourcePages,
@@ -694,9 +922,15 @@ function buildPartialFinalContinuation(job = {}) {
       remainingPages,
       visualPages,
       pageSelection,
-      finalPath: final.path || "",
+      continuationKind: continueVisuals ? "visual" : "editable",
+      missingVisualPageIds,
+      missingEditablePageIds,
+      finalPath: coverage.finalPath || "",
       canReviewCurrentSample: true,
-      canContinueRemainingPages: remainingPages > 0
+      canContinueRemainingPages: continueVisuals,
+      canContinueEditablePages: Boolean(canContinueEditablePages && imageDeckReviewReady),
+      imageDeckReviewReady,
+      requiresImageDeckReview
     },
     nextOptions: [
       {
@@ -707,19 +941,57 @@ function buildPartialFinalContinuation(job = {}) {
         mutatesWorkflow: false,
         externalImageCalls: 0
       },
-      {
-        id: "continue-remaining-pages",
-        label: `继续生成剩余 ${remainingPages} 页`,
-        detail: `继续处理 ${pageSelection}。启动前必须再次确认 gpt-image-2 图片 API 和页面规格模型调用额度。`,
-        targetPanel: "codex-slide-worker-panel",
-        pageSelection,
-        mutatesWorkflow: true,
-        requiresExternalImageConfirmation: true,
-        externalImageCalls: remainingPages
-      }
+      continuationOption
     ],
     reason,
     warnings: [`当前是 ${finalPages}/${sourcePages} 页小样本，不是完整产品级交付。`]
+  };
+}
+
+function describeImageDeckReviewIssue(job = {}) {
+  const semantic = job.artifacts?.visualTextQuality?.summary
+    || job.artifacts?.visualQuality?.semanticQuality
+    || job.artifacts?.visualQuality?.summary?.semanticQuality
+    || {};
+  const blockedCount = Number(semantic.blockedCount || 0);
+  if (blockedCount > 0) {
+    return {
+      blockedCount,
+      reason: `图片版有 ${blockedCount} 页存在文字、数据、页码或页面角色等自动风险，请逐页对照原稿后确认或标记重做。`,
+      detail: `内容确认无误可明确接受；确有问题的页面可单独或批量加入重做，该动作本身不会立即调用外部 API。`
+    };
+  }
+  return {
+    blockedCount: 0,
+    reason: "图片版已生成，但整套人工复核尚未完成。请先确认信息保真和正常的版式差异。",
+    detail: "逐页确认信息保真和风格差异；正常变化需要明确确认，有问题的页面应标记重做。"
+  };
+}
+
+function mergePartialFinalDelivery(delivery = {}, partial = {}) {
+  if (partial.partialFinal?.requiresImageDeckReview) {
+    const reviewOptions = (partial.nextOptions || []).filter((option) => option.id === "review-current-sample" || option.id === "review-image-deck-style");
+    return {
+      ...delivery,
+      action: "image-deck/review",
+      title: "先复核整套图片",
+      summary: partial.reason,
+      reason: partial.reason,
+      startReady: false,
+      manualRequired: true,
+      mutatesWorkflow: false,
+      externalImageCalls: 0,
+      blockingIssues: [partial.reason],
+      partialFinal: partial.partialFinal,
+      nextOptions: reviewOptions,
+      warnings: [...new Set([...(delivery.warnings || []), ...(partial.warnings || [])])]
+    };
+  }
+  return {
+    ...delivery,
+    partialFinal: partial.partialFinal,
+    nextOptions: [...(delivery.nextOptions || []), ...(partial.nextOptions || [])],
+    warnings: [...new Set([...(delivery.warnings || []), ...(partial.warnings || [])])]
   };
 }
 

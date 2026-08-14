@@ -3,7 +3,8 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { execFile } from "child_process";
+import crypto from "crypto";
+import { execFile, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { getProviderConfig, requestOpenAiCompatible, readProviderError, stripEndpoint } from "../server/providers.js";
@@ -36,7 +37,7 @@ const activeModelResponse = {
   latest: {},
   finalWritten: false
 };
-const SOURCE_CRITICAL_VISUAL_RE = /\b(product|packaging|package|mooncake|tea|cup|food|drink|gift|box)\b/i;
+const SOURCE_CRITICAL_VISUAL_RE = /\b(product|packaging|package|beverage|container|merchandise|gift|box)\b/i;
 
 installTerminationFinalResponseHandlers();
 
@@ -102,6 +103,10 @@ async function main() {
       ? await readSpecFromResponse(pageDir, args["from-response"])
       : await callVisionModel(promptBundle);
     if (spec.passed === false) {
+      spec.needed_visual_asset_jobs = normalizeDeclaredVisualAssetJobs(
+        spec.needed_visual_asset_jobs,
+        pageRequest
+      );
       if (hydrateNeededAssetJobsFromAvailableAssets(spec, promptBundle)) {
         spec.passed = true;
         spec.notes = [
@@ -119,17 +124,21 @@ async function main() {
     }
     normalizeSpecDraft(spec, promptBundle, pageRequest);
     const missingImageAssetJobs = promptBundle.includeImage
-      ? [
+      ? deduplicateVisualAssetJobs([
         ...collectMissingImageAssetJobs(spec),
         ...collectMissingForegroundInventoryAssetJobs(spec),
-        ...collectMissingBrandBlockAssetJobs(spec, promptBundle)
-      ]
+        ...collectMissingBrandBlockAssetJobs(spec, promptBundle),
+        ...collectMissingComplexBackgroundAssetJobs(spec, pageRequest),
+        ...collectUncoveredVisualDeltaAssetJobs(spec, promptBundle, pageRequest),
+        ...normalizeDeclaredVisualAssetJobs(spec.needed_visual_asset_jobs, pageRequest)
+      ]).filter((job) => !isNeededVisualAssetJobCovered(job, spec, promptBundle, pageRequest))
       : [];
     if (missingImageAssetJobs.length) {
       await writeJson(path.join(pageDir, "visual-asset-jobs.json"), buildVisualAssetSpec(missingImageAssetJobs));
       const ids = missingImageAssetJobs.map((job) => job.id).filter(Boolean).join(", ");
       throw new Error(`required assets are missing; needed_visual_asset_jobs written for: ${ids}`);
     }
+    await fs.rm(path.join(pageDir, "visual-asset-jobs.json"), { force: true });
     validateSpecDraft(spec, pageRequest);
     await writeJson(outputSpecPath, spec);
     console.log(JSON.stringify({
@@ -200,7 +209,11 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "Never invent placeholder image paths such as path/to/...; if no matching asset exists, return passed:false with needed_visual_asset_jobs so the pipeline can generate the asset and retry.",
     "Do not claim the background is preserved unless the required background/decoration objects are represented by shapes, images, or needed_visual_asset_jobs.",
     "Brand logos, complex icons, screenshots, decorative maps, patterned panels, cards, shadows, and image-like decorations must be represented as images with real separated/generated assets, or requested through needed_visual_asset_jobs.",
-    "Simple borders, divider lines, arcs, circles, ellipses, bullets, rectangles, grids, and translucent blocks must be represented as native structural shapes with source pixel coordinates.",
+    "Simple flat borders, divider lines, arcs, circles, ellipses, bullets, rectangles, grids, and translucent blocks must be represented as native structural shapes with source pixel coordinates.",
+    "Do not reduce gradient, glow, texture, layered transparency, or overlapping decorative orbs to flat native circles. When those effects carry the page identity, request one source-faithful clean background asset through needed_visual_asset_jobs and place it at z_index 0, with editable text and separated foreground objects above it.",
+    "OCR coordinates must describe the attached source.png for this editable run. Copy high-confidence OCR box_px and font sizes instead of relocating text by eye.",
+    "For every native text box, preserve the source font color and set font_size_source to measured when the box comes from OCR text hints. Do not default colored or white source text to black.",
+    "Inventory each visible foreground icon, badge, logo, wordmark, sticker, and decorative mark separately from the clean background. A clean-background inventory item must never also be requested as a foreground asset.",
     "If a foreground logo/photo/icon/screenshot/device/illustration must be reused, represent it only as an image asset with asset_provenance from asset-sheet-separated or imagegen, and only if an actual asset path exists.",
     "Never reference source.png in images[].path.",
     "Never use words crop, approximation, fallback, or emoji anywhere in visual_inventory or asset_provenance.",
@@ -472,7 +485,12 @@ function hydrateNeededAssetJobsFromAvailableAssets(spec = {}, bundle = {}) {
   const remaining = [];
   for (const job of jobs) {
     const assetPath = findExistingAssetForNeededJob(pageDir, job);
-    const box = coerceAssetJobBox(job);
+    const availableAsset = assetPath
+      ? listAvailableAssets(pageDir).find((asset) => normalizeAssetPath(asset.path || "") === assetPath)
+      : null;
+    const box = coerceAssetJobBox(job)
+      || coerceBox(availableAsset?.source_box_px)
+      || inferAssetJobBox(job, bundle.pageRequest);
     if (!assetPath || !box) {
       remaining.push(job);
       continue;
@@ -531,6 +549,20 @@ function hydrateNeededAssetJobsFromAvailableAssets(spec = {}, bundle = {}) {
   spec.notes = removeForbiddenFallbackTerms(spec.notes);
   spec.background_strategy.source_consistency_contract = removeForbiddenFallbackTerms(spec.background_strategy.source_consistency_contract);
   return remaining.length === 0;
+}
+
+function inferAssetJobBox(job = {}, pageRequest = {}) {
+  const text = cleanLooseText([
+    job.id,
+    job.type,
+    job.asset_type,
+    job.purpose,
+    job.description
+  ].filter(Boolean).join(" "));
+  if (!/background|full-slide|base visual layer/i.test(text)) return null;
+  const width = Number(pageRequest?.source_size_px?.width || 0);
+  const height = Number(pageRequest?.source_size_px?.height || 0);
+  return width > 0 && height > 0 ? [0, 0, width, height] : null;
 }
 
 function cleanLooseText(value = "") {
@@ -716,9 +748,9 @@ function assetJobTextScore(asset = {}, job = {}) {
   if (!assetText || !jobText) return 0;
   let score = 0;
   const groups = [
-    ["product", "products", "package", "packaging", "gift", "box", "mooncake", "bottle", "cluster", "arrangement", "snack"],
-    ["photo", "photograph", "image", "scene", "bed", "bedroom", "bedding", "sheet", "pillow"],
-    ["logo", "brand", "inovance", "crown", "badge"],
+    ["product", "products", "package", "packaging", "gift", "box", "bottle", "cluster", "arrangement", "merchandise", "object"],
+    ["photo", "photograph", "image", "scene", "portrait", "landscape", "screenshot", "render"],
+    ["logo", "brand", "wordmark", "badge", "mark", "emblem"],
     ["background", "decor", "texture", "shadow", "line"]
   ];
   for (const group of groups) {
@@ -726,6 +758,9 @@ function assetJobTextScore(asset = {}, job = {}) {
     const jobHits = group.filter((term) => jobText.includes(term));
     if (assetHits.length && jobHits.length) score += Math.min(assetHits.length, jobHits.length);
   }
+  const assetTokens = semanticAssetTokens(assetText);
+  const jobTokens = semanticAssetTokens(jobText);
+  score += Math.min(3, [...assetTokens].filter((token) => jobTokens.has(token)).length);
   if (assetText.includes(cleanAssetId(job.id || "")) && job.id) score += 2;
   return score;
 }
@@ -751,12 +786,20 @@ function assetJobFamilyMatch(asset = {}, job = {}) {
   ].filter(Boolean).join(" ")).toLowerCase();
   if (!assetText || !jobText) return false;
   const families = [
-    ["photo", "photograph", "image", "scene", "bed", "bedroom", "bedding", "sheet", "pillow"],
-    ["logo", "brand", "inovance", "crown", "badge"],
-    ["product", "products", "package", "packaging", "gift", "box", "mooncake", "bottle", "cluster", "arrangement", "snack"],
+    ["photo", "photograph", "image", "scene", "portrait", "landscape", "screenshot", "render"],
+    ["logo", "brand", "wordmark", "badge", "mark", "emblem"],
+    ["product", "products", "package", "packaging", "gift", "box", "bottle", "cluster", "arrangement", "merchandise", "object"],
     ["background", "decor", "texture", "shadow", "line"]
   ];
-  return families.some((family) => family.some((term) => assetText.includes(term)) && family.some((term) => jobText.includes(term)));
+  if (families.some((family) => family.some((term) => assetText.includes(term)) && family.some((term) => jobText.includes(term)))) return true;
+  const jobTokens = semanticAssetTokens(jobText);
+  return [...semanticAssetTokens(assetText)].some((token) => jobTokens.has(token));
+}
+
+function semanticAssetTokens(value = "") {
+  const stopWords = new Set(["asset", "image", "visual", "source", "page", "slide", "generated", "required", "output"]);
+  return new Set((String(value || "").toLowerCase().match(/[a-z0-9][a-z0-9_-]{2,}|[\u3400-\u9fff]{2,}/g) || [])
+    .filter((token) => !stopWords.has(token)));
 }
 
 function isExcludedAssetCandidate(asset = {}) {
@@ -921,6 +964,8 @@ function buildCompactSpecMessages(bundle = {}) {
     "You rebuild a slide image into editable PowerPoint objects.",
     "Return exactly one valid JSON object. No markdown.",
     "Use source.png pixel coordinates for every box_px and points_px.",
+    "Preserve each source text color and mark OCR-derived font sizes with font_size_source measured.",
+    "List foreground icons, badges, logos, wordmarks, stickers, and decorative marks separately from the clean background.",
     "Do not reference source.png as an image asset.",
     "Do not create a mostly blank editable text-only page. Cover all large visible non-text objects as shapes, images, or needed_visual_asset_jobs.",
     "Do not claim the background is preserved unless the visible decoration is actually represented.",
@@ -988,13 +1033,412 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
   normalizeTextBoxes(spec);
   normalizeRequiredText(spec);
   mergeBriefOcrText(spec, bundle, pageRequest);
+  calibrateTextBoxesFromMeasuredOcr(spec, bundle, pageRequest);
   normalizeImageAssetReferences(spec, bundle);
-  ensureAvailableBrandAssetsRepresented(spec, bundle);
+  ensureAvailableComplexBackgroundAssetsRepresented(spec, bundle, pageRequest);
+  ensureAvailableBrandAssetsRepresented(spec, bundle, pageRequest);
   ensureAvailableForegroundAssetsRepresented(spec, bundle);
+  deduplicatePositionedAssets(spec, bundle);
+  addDetectedStructuralShapes(spec, bundle, pageRequest);
+  matchTextColorsToSource(spec, bundle, pageRequest);
   normalizeVisualInventoryProvenance(spec);
   normalizeShapeGeometry(spec, pageRequest);
   sanitizeSpecDraft(spec, bundle, pageRequest);
   if (!bundle.includeImage) normalizeTextOnlySpec(spec, pageRequest);
+}
+
+function calibrateTextBoxesFromMeasuredOcr(spec = {}, bundle = {}, pageRequest = {}) {
+  const lines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines : [];
+  if (!Array.isArray(spec.text_boxes) || !lines.length) return;
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  const byText = new Map();
+  for (const line of lines) {
+    const key = normalizeTextForCompare(line?.text);
+    const box = coerceBox(line?.box_px);
+    if (!key || !validBox(box, width, height)) continue;
+    const size = Number(line?.font_pt_if_cjk || line?.font_pt_if_latin || line?.font_size || 0);
+    const matches = byText.get(key) || [];
+    matches.push({ line, box, size, used: false });
+    byText.set(key, matches);
+  }
+  for (const box of spec.text_boxes) {
+    const candidates = (byText.get(normalizeTextForCompare(box?.text)) || []).filter((item) => !item.used);
+    const draftBox = coerceBox(box?.box_px);
+    const measured = candidates.sort((left, right) => boxCenterDistance(left.box, draftBox) - boxCenterDistance(right.box, draftBox))[0];
+    if (!measured) continue;
+    measured.used = true;
+    box.box_px = measured.box;
+    if (measured.size > 0) box.font_size = measured.size;
+    box.font_size_source = "measured";
+    box.polygon_px = coercePolygon(measured.line?.polygon_px) || box.polygon_px;
+  }
+}
+
+function boxCenterDistance(left = [], right = []) {
+  const a = coerceBox(left);
+  const b = coerceBox(right);
+  if (!a || !b) return Number.MAX_SAFE_INTEGER;
+  return Math.hypot((a[0] + a[2] / 2) - (b[0] + b[2] / 2), (a[1] + a[3] / 2) - (b[1] + b[3] / 2));
+}
+
+function matchTextColorsToSource(spec = {}, bundle = {}, pageRequest = {}) {
+  if (!Array.isArray(spec.text_boxes) || !spec.text_boxes.length || !bundle.pageDir) return;
+  const sourcePath = path.join(bundle.pageDir, "source.png");
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  const slideWidth = Number(pageRequest.slide?.width || 13.333);
+  const sourcePixelsPerPoint = width > 0 && slideWidth > 0 ? width / (slideWidth * 72) : 1;
+  const titleInkHeightThreshold = 30 * sourcePixelsPerPoint;
+  const backgroundImage = (Array.isArray(spec.images) ? spec.images : []).find((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const box = coerceBox(image?.box_px);
+    return imagePath && box && box[0] <= 2 && box[1] <= 2 && box[2] >= width * 0.95 && box[3] >= height * 0.95
+      && /background|clean base|base visual/i.test(cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" ")));
+  });
+  const backgroundPath = backgroundImage ? path.join(bundle.pageDir, normalizeAssetPath(backgroundImage.path || "")) : "";
+  if (!fsSync.existsSync(sourcePath) || !backgroundPath || !fsSync.existsSync(backgroundPath)) return;
+  const inputs = spec.text_boxes.map((box, index) => ({ index, box: coerceBox(box.box_px) })).filter((item) => item.box);
+  if (!inputs.length) return;
+  const script = [
+    "import json, sys",
+    "from collections import Counter",
+    "from PIL import Image",
+    "src = Image.open(sys.argv[1]).convert('RGB')",
+    "bg = Image.open(sys.argv[2]).convert('RGB').resize(src.size)",
+    "items = json.loads(sys.argv[3])",
+    "out = []",
+    "for item in items:",
+    "    x,y,w,h = [int(round(float(v))) for v in item['box']]",
+    "    x=max(0,min(x,src.width-1)); y=max(0,min(y,src.height-1))",
+    "    w=max(1,min(w,src.width-x)); h=max(1,min(h,src.height-y))",
+    "    colors=[]",
+    "    for yy in range(y,y+h):",
+    "        for xx in range(x,x+w):",
+    "            a=src.getpixel((xx,yy)); b=bg.getpixel((xx,yy))",
+    "            if sum(abs(a[i]-b[i]) for i in range(3)) >= 72: colors.append(a)",
+    "    if len(colors) < 8:",
+    "        out.append({'index':item['index'],'color':None,'samples':len(colors),'inkRatio':len(colors)/max(1,w*h)}); continue",
+    "    buckets=Counter(tuple((c//16)*16 for c in px) for px in colors)",
+    "    key,_=buckets.most_common(1)[0]",
+    "    chosen=[px for px in colors if tuple((c//16)*16 for c in px)==key]",
+    "    chosen.sort(key=lambda p: sum(p))",
+    "    color=chosen[len(chosen)//2]",
+    "    out.append({'index':item['index'],'color':'#%02X%02X%02X'%color,'samples':len(colors),'inkRatio':len(colors)/max(1,w*h)})",
+    "print(json.dumps(out))"
+  ].join("\n");
+  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify(inputs)], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 120000,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  if (result.status !== 0) return;
+  let samples = [];
+  try { samples = JSON.parse(String(result.stdout || "[]")); } catch { return; }
+  for (const sample of samples) {
+    if (!sample?.color || !spec.text_boxes[sample.index]) continue;
+    spec.text_boxes[sample.index].color = sample.color;
+    spec.text_boxes[sample.index].font_color = sample.color;
+    spec.text_boxes[sample.index].color_source = "source-clean-background-diff";
+    if (Number(spec.text_boxes[sample.index].font_size || 0) >= 24 && Number(sample.inkRatio || 0) >= 0.22) {
+      spec.text_boxes[sample.index].bold = true;
+      spec.text_boxes[sample.index].font_weight = 700;
+      spec.text_boxes[sample.index].font_weight_source = "source-ink-density";
+      const measuredBox = coerceBox(spec.text_boxes[sample.index].box_px);
+      if (measuredBox && measuredBox[3] >= titleInkHeightThreshold) {
+        spec.text_boxes[sample.index].font_size = Math.max(
+          Number(spec.text_boxes[sample.index].font_size || 0),
+          Math.round((measuredBox[3] / sourcePixelsPerPoint) * 1.12 * 10) / 10
+        );
+        spec.text_boxes[sample.index].font_size_source = "measured";
+        spec.text_boxes[sample.index].font_size_calibration = "source-title-ink-height";
+        spec.text_boxes[sample.index].fit_text = false;
+      }
+    }
+  }
+  harmonizeLargeTitleTextGeometry(spec, pageRequest);
+}
+
+function harmonizeLargeTitleTextGeometry(spec = {}, pageRequest = {}) {
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const slideWidth = Number(pageRequest.slide?.width || 13.333);
+  if (!width || !slideWidth || !Array.isArray(spec.text_boxes)) return;
+  const sourcePixelsPerPoint = width / (slideWidth * 72);
+  const titleInkHeightThreshold = 30 * sourcePixelsPerPoint;
+  const candidates = spec.text_boxes
+    .filter((box) => {
+      const measured = coerceBox(box?.box_px);
+      return measured
+        && measured[3] >= titleInkHeightThreshold
+        && Number(box?.font_size || 0) >= 24
+        && (box?.bold === true || Number(box?.font_weight || 0) >= 600);
+    })
+    .sort((a, b) => Number(a.box_px?.[1] || 0) - Number(b.box_px?.[1] || 0));
+  const consumed = new Set();
+  for (const anchor of candidates) {
+    if (consumed.has(anchor)) continue;
+    const anchorBox = coerceBox(anchor.box_px);
+    const group = candidates.filter((candidate) => {
+      if (consumed.has(candidate)) return false;
+      const box = coerceBox(candidate.box_px);
+      if (!box || !anchorBox) return false;
+      const sizeRatio = Math.min(Number(anchor.font_size || 0), Number(candidate.font_size || 0))
+        / Math.max(1, Number(anchor.font_size || 0), Number(candidate.font_size || 0));
+      const verticalDistance = Math.abs(box[1] - anchorBox[1]);
+      return Math.abs(box[0] - anchorBox[0]) <= width * 0.04
+        && verticalDistance <= Math.max(box[3], anchorBox[3]) * 1.8
+        && sizeRatio >= 0.78
+        && textColorDistance(anchor.color, candidate.color) <= 56;
+    });
+    if (group.length > 1) {
+      const sharedSize = Math.min(...group.map((box) => Number(box.font_size || 0)).filter((value) => value > 0));
+      for (const box of group) box.font_size = Math.round(sharedSize * 10) / 10;
+    }
+    for (const box of group) {
+      consumed.add(box);
+      if (box.position_calibration === "source-ink-top") continue;
+      const measured = coerceBox(box.box_px);
+      const fontSize = Number(box.font_size || 0);
+      if (!measured || !fontSize) continue;
+      const sourcePixelsPerPoint = width / slideWidth / 72;
+      const topInset = Math.max(0, Math.round(fontSize * sourcePixelsPerPoint * 0.22));
+      box.source_ink_box_px = [...measured];
+      box.box_px = [measured[0], Math.max(0, measured[1] - topInset), measured[2], measured[3] + topInset];
+      box.position_calibration = "source-ink-top";
+      const boldPreviewFont = path.join(process.env.WINDIR || "C:\\Windows", "Fonts", "msyhbd.ttc");
+      if (fsSync.existsSync(boldPreviewFont)) box.preview_font = boldPreviewFont;
+    }
+  }
+}
+
+function textColorDistance(left = "", right = "") {
+  const parse = (value) => {
+    const match = String(value || "").trim().match(/^#?([0-9a-f]{6})$/i);
+    if (!match) return null;
+    return [0, 2, 4].map((offset) => Number.parseInt(match[1].slice(offset, offset + 2), 16));
+  };
+  const a = parse(left);
+  const b = parse(right);
+  if (!a || !b) return left === right ? 0 : Number.POSITIVE_INFINITY;
+  return Math.sqrt(a.reduce((sum, value, index) => sum + (value - b[index]) ** 2, 0));
+}
+
+function deduplicatePositionedAssets(spec = {}, bundle = {}) {
+  if (!Array.isArray(spec.images)) return;
+  const pageDir = String(bundle.pageDir || "");
+  const chosen = [];
+  for (const image of spec.images) {
+    const id = cleanAssetId(image?.id || path.basename(image?.path || "", path.extname(image?.path || "")));
+    const box = coerceBox(image?.box_px);
+    const duplicateIndex = chosen.findIndex((existing) => {
+      const existingId = cleanAssetId(existing?.id || path.basename(existing?.path || "", path.extname(existing?.path || "")));
+      const existingBox = coerceBox(existing?.box_px);
+      return (id && existingId && id === existingId)
+        || (box && existingBox && positionedBoxesEquivalent(box, existingBox) && assetJobFamilyMatch(image, existing));
+    });
+    if (duplicateIndex < 0) {
+      chosen.push(image);
+      continue;
+    }
+    const currentComplete = hasCompletePositionedAsset(image, pageDir);
+    const existingComplete = hasCompletePositionedAsset(chosen[duplicateIndex], pageDir);
+    if (currentComplete && !existingComplete) {
+      chosen[duplicateIndex] = image;
+      continue;
+    }
+    const currentPath = normalizeAssetPath(image?.path || "");
+    const existingPath = normalizeAssetPath(chosen[duplicateIndex]?.path || "");
+    if (/\/generated\//i.test(existingPath) && !/\/generated\//i.test(currentPath)) chosen[duplicateIndex] = image;
+  }
+  spec.images = chosen;
+  const keptPaths = new Set(chosen.map((image) => normalizeAssetPath(image?.path || "")).filter(Boolean));
+  const seenVisual = new Set();
+  spec.visual_inventory = (Array.isArray(spec.visual_inventory) ? spec.visual_inventory : []).filter((item) => {
+    const itemPath = normalizeAssetPath(item?.path || item?.asset_provenance?.path || "");
+    if (itemPath && !keptPaths.has(itemPath) && /asset|image/i.test(cleanLooseText([item?.type, item?.decision].filter(Boolean).join(" ")))) return false;
+    const key = itemPath || cleanAssetId(item?.id || "") || JSON.stringify(coerceBox(item?.box_px) || []);
+    if (key && seenVisual.has(key)) return false;
+    if (key) seenVisual.add(key);
+    return true;
+  });
+  const seenProvenance = new Set();
+  spec.asset_provenance = (Array.isArray(spec.asset_provenance) ? spec.asset_provenance : []).filter((item) => {
+    const itemPath = normalizeAssetPath(item?.path || item?.source || "");
+    if (itemPath && !keptPaths.has(itemPath)) return false;
+    if (itemPath && seenProvenance.has(itemPath)) return false;
+    if (itemPath) seenProvenance.add(itemPath);
+    return true;
+  });
+}
+
+function hasCompletePositionedAsset(image = {}, pageDir = "") {
+  const imagePath = normalizeAssetPath(image?.path || "");
+  const box = coerceBox(image?.box_px);
+  if (!imagePath || !box) return false;
+  return !pageDir || fsSync.existsSync(path.join(pageDir, imagePath));
+}
+
+function isNeededVisualAssetJobCovered(job = {}, spec = {}, bundle = {}, pageRequest = {}) {
+  const jobId = cleanAssetId(job.id || job.job_id || job.jobId || "");
+  const jobBox = coerceAssetJobBox(job);
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  const jobCoverage = jobBox && width && height
+    ? Math.max(0, jobBox[2]) * Math.max(0, jobBox[3]) / Math.max(1, width * height)
+    : 0;
+  const jobText = cleanLooseText([
+    job.id,
+    job.asset_type,
+    job.purpose,
+    job.description,
+    job.prompt,
+    job.required_for
+  ].filter(Boolean).join(" "));
+  return (Array.isArray(spec.images) ? spec.images : []).some((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const imageId = cleanAssetId(image?.id || path.basename(imagePath, path.extname(imagePath)));
+    const imageBox = coerceBox(image?.box_px);
+    if (!imagePath || !imageBox || !hasCompletePositionedAsset(image, bundle.pageDir || "")) return false;
+    if (jobId && imageId && jobId === imageId) return true;
+    const overlap = jobBox ? boxOverlapRatio(jobBox, imageBox) : 0;
+    if (overlap >= 0.82 && assetJobFamilyMatch(image, { ...job, prompt: jobText })) return true;
+    const imageText = cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" "));
+    const imageCoverage = width && height
+      ? Math.max(0, imageBox[2]) * Math.max(0, imageBox[3]) / Math.max(1, width * height)
+      : 0;
+    return jobCoverage >= 0.82
+      && imageCoverage >= 0.82
+      && /background|clean base|base visual/i.test(imageText);
+  });
+}
+
+function positionedBoxesEquivalent(a = [], b = []) {
+  const boxA = coerceBox(a);
+  const boxB = coerceBox(b);
+  if (!boxA || !boxB) return false;
+  const areaA = Math.max(1, boxA[2] * boxA[3]);
+  const areaB = Math.max(1, boxB[2] * boxB[3]);
+  return Math.min(areaA, areaB) / Math.max(areaA, areaB) >= 0.65 && boxOverlapRatio(boxA, boxB) >= 0.92;
+}
+
+function addDetectedStructuralShapes(spec = {}, bundle = {}, pageRequest = {}) {
+  const pageDir = bundle.pageDir || "";
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  if (!pageDir || !width || !height) return;
+  const sourcePath = path.join(pageDir, "source.png");
+  const background = (Array.isArray(spec.images) ? spec.images : []).find((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const box = coerceBox(image?.box_px);
+    return imagePath && box && box[2] >= width * 0.95 && box[3] >= height * 0.95
+      && /background|clean base|base visual/i.test(cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" ")));
+  });
+  const backgroundPath = background ? path.join(pageDir, normalizeAssetPath(background.path || "")) : "";
+  if (!fsSync.existsSync(sourcePath) || !backgroundPath || !fsSync.existsSync(backgroundPath)) return;
+  const textBoxes = (Array.isArray(spec.text_boxes) ? spec.text_boxes : [])
+    .map((item) => ({ box: coerceBox(item?.source_ink_box_px || item?.box_px), text: String(item?.text || "") }))
+    .filter((item) => item.box);
+  const masks = [
+    ...(Array.isArray(spec.text_boxes) ? spec.text_boxes.map((item) => coerceBox(item?.box_px)) : []),
+    ...(Array.isArray(spec.images) ? spec.images.filter((item) => item !== background).map((item) => coerceBox(item?.box_px)) : [])
+  ].filter(Boolean);
+  const script = [
+    "import json, sys",
+    "from collections import Counter, deque",
+    "from PIL import Image, ImageChops, ImageFilter",
+    "src0=Image.open(sys.argv[1]).convert('RGB')",
+    "bg0=Image.open(sys.argv[2]).convert('RGB').resize(src0.size)",
+    "payload=json.loads(sys.argv[3]); masks=payload.get('masks',[]); text_boxes=payload.get('textBoxes',[]); scale=min(1.0,384/src0.width)",
+    "size=(max(1,round(src0.width*scale)),max(1,round(src0.height*scale)))",
+    "src=src0.resize(size); bg=bg0.resize(size)",
+    "mask=ImageChops.difference(src,bg).convert('L').point(lambda v:255 if v>=52 else 0).filter(ImageFilter.MaxFilter(3))",
+    "pix=mask.load(); w,h=size",
+    "for box in masks:",
+    "    x,y,bw,bh=box; x0=max(0,int(x*scale)); y0=max(0,int(y*scale)); x1=min(w,int((x+bw)*scale)); y1=min(h,int((y+bh)*scale))",
+    "    for yy in range(y0,y1):",
+    "        for xx in range(x0,x1): pix[xx,yy]=0",
+    "seen=set(); out=[]",
+    "for yy in range(h):",
+    "    for xx in range(w):",
+    "        if not pix[xx,yy] or (xx,yy) in seen: continue",
+    "        q=deque([(xx,yy)]); seen.add((xx,yy)); pts=[]",
+    "        while q:",
+    "            x,y=q.popleft(); pts.append((x,y))",
+    "            for nx,ny in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):",
+    "                if 0<=nx<w and 0<=ny<h and pix[nx,ny] and (nx,ny) not in seen: seen.add((nx,ny)); q.append((nx,ny))",
+    "        if len(pts)<8: continue",
+    "        xs=[p[0] for p in pts]; ys=[p[1] for p in pts]; x0,y0,x1,y1=min(xs),min(ys),max(xs)+1,max(ys)+1",
+    "        bw,bh=x1-x0,y1-y0; area=max(1,bw*bh); fill=len(pts)/area",
+    "        sw,sh=bw/scale,bh/scale; sx,sy=x0/scale,y0/scale",
+    "        kind=None",
+    "        if 12<=sw<=38 and 12<=sh<=38 and 0.65<=sw/sh<=1.45 and fill>=0.72: kind='ellipse'",
+    "        elif 28<=sw<=170 and sh<=22 and sw/max(1,sh)>=3 and fill>=0.72: kind='line'",
+    "        if not kind: continue",
+    "        cx=min(src0.width-1,max(0,round(sx+sw/2))); cy=min(src0.height-1,max(0,round(sy+sh/2)))",
+    "        color=src0.getpixel((cx,cy))",
+    "        if kind=='line': sy=sy+sh/2-2; sh=4",
+    "        out.append({'type':kind,'box':[round(sx),round(sy),round(sw),round(sh)],'color':'#%02X%02X%02X'%color})",
+    "for hint in text_boxes:",
+    "    x,y,bw,bh=[int(round(float(v))) for v in hint.get('box',[])]",
+    "    if not (10<=bh<=42 and 20<=bw<=min(450,src0.width*0.45)): continue",
+    "    pad_x=max(12,min(120,round(bh*3))); pad_y=max(6,min(48,round(bh*1.2)))",
+    "    sx0=max(0,x-pad_x); sy0=max(0,y-pad_y); sx1=min(src0.width,x+bw+pad_x); sy1=min(src0.height,y+bh+pad_y)",
+    "    pts=[]; colors=[]",
+    "    for yy in range(sy0,sy1):",
+    "        for xx in range(sx0,sx1):",
+    "            a=src0.getpixel((xx,yy)); b=bg0.getpixel((xx,yy))",
+    "            if sum(abs(a[i]-b[i]) for i in range(3))>=52: pts.append((xx,yy)); colors.append(a)",
+    "    if len(pts)<24: continue",
+    "    xs=[p[0] for p in pts]; ys=[p[1] for p in pts]; bx0,by0,bx1,by1=min(xs),min(ys),max(xs)+1,max(ys)+1",
+    "    cw,ch=bx1-bx0,by1-by0; fill=len(pts)/max(1,cw*ch)",
+    "    if not (cw>=bw*1.18 and ch>=bh*1.25 and cw/max(1,ch)>=2 and 0.06<=fill<=0.35): continue",
+    "    if not (bx0<=x and bx1>=x+bw and by0<=y and by1>=y+bh): continue",
+    "    def side_occ(coords):",
+    "        if not coords: return 0",
+    "        return sum(1 for xx,yy in coords if sum(abs(src0.getpixel((xx,yy))[i]-bg0.getpixel((xx,yy))[i]) for i in range(3))>=52)/len(coords)",
+    "    strip=3",
+    "    top=side_occ([(xx,yy) for yy in range(by0,min(by1,by0+strip)) for xx in range(bx0,bx1)])",
+    "    bottom=side_occ([(xx,yy) for yy in range(max(by0,by1-strip),by1) for xx in range(bx0,bx1)])",
+    "    left=side_occ([(xx,yy) for xx in range(bx0,min(bx1,bx0+strip)) for yy in range(by0,by1)])",
+    "    right=side_occ([(xx,yy) for xx in range(max(bx0,bx1-strip),bx1) for yy in range(by0,by1)])",
+    "    if min(top,bottom)<0.38 or min(left,right)<0.18: continue",
+    "    corner=max(3,min(7,round(ch*0.18)))",
+    "    corner_sets=[[(xx,yy) for yy in range(by0,min(by1,by0+corner)) for xx in range(bx0,min(bx1,bx0+corner))],[(xx,yy) for yy in range(by0,min(by1,by0+corner)) for xx in range(max(bx0,bx1-corner),bx1)],[(xx,yy) for yy in range(max(by0,by1-corner),by1) for xx in range(bx0,min(bx1,bx0+corner))],[(xx,yy) for yy in range(max(by0,by1-corner),by1) for xx in range(max(bx0,bx1-corner),bx1)]]",
+    "    if sum(side_occ(points) for points in corner_sets)/4>0.30: continue",
+    "    buckets=Counter(tuple((c//16)*16 for c in px) for px in colors); key,_=buckets.most_common(1)[0]",
+    "    chosen=[px for px in colors if tuple((c//16)*16 for c in px)==key]; chosen.sort(key=lambda p:sum(p)); color=chosen[len(chosen)//2]",
+    "    out.append({'type':'roundRectOutline','box':[bx0,by0,cw,ch],'color':'#%02X%02X%02X'%color,'radius':round(ch/2),'strokeWidth':2})",
+    "print(json.dumps(out[:12]))"
+  ].join("\n");
+  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify({ masks, textBoxes })], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 120000,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  if (result.status !== 0) return;
+  let detected = [];
+  try { detected = JSON.parse(String(result.stdout || "[]")); } catch { return; }
+  if (!Array.isArray(spec.shapes)) spec.shapes = [];
+  for (const [index, item] of detected.entries()) {
+    const box = coerceBox(item?.box);
+    if (!box || spec.shapes.some((shape) => positionedBoxesEquivalent(shape?.box_px, box))) continue;
+    spec.shapes.push({
+      id: `source_structural_${index + 1}`,
+      type: item.type === "ellipse" ? "ellipse" : item.type === "roundRectOutline" ? "roundRect" : "rect",
+      box_px: box,
+      fill: item.type === "roundRectOutline" ? "none" : item.color,
+      stroke: item.type === "roundRectOutline" ? item.color : undefined,
+      stroke_width: item.type === "roundRectOutline" ? Number(item.strokeWidth || 1) : undefined,
+      source_corner_radius_px: item.type === "roundRectOutline" ? Number(item.radius || Math.min(box[2], box[3]) / 2) : undefined,
+      line: item.type === "roundRectOutline" ? { color: item.color, width: Number(item.strokeWidth || 1) } : { color: item.color, transparency: 100 },
+      z_index: 30,
+      decision: "native structural shape detected from source-clean-background difference"
+    });
+  }
 }
 
 function normalizeTextBoxes(spec) {
@@ -1324,18 +1768,66 @@ function collectMissingImageAssetJobs(spec) {
     });
 }
 
+function normalizeDeclaredVisualAssetJobs(jobs = [], pageRequest = {}) {
+  if (!Array.isArray(jobs)) return [];
+  const width = Number(pageRequest.source_size_px?.width || 1280);
+  const height = Number(pageRequest.source_size_px?.height || 720);
+  return jobs
+    .filter((job) => job && typeof job === "object")
+    .map((job, index) => {
+      const text = cleanLooseText([
+        job.type,
+        job.asset_type,
+        job.purpose,
+        job.description,
+        job.object,
+        job.required_output
+      ].filter(Boolean).join(" "));
+      const isComplexBackground = /background|full-slide|base visual layer|gradient|glow|texture|wave|orb|decorative circle/i.test(text);
+      const id = cleanAssetId(job.id || job.job_id || job.jobId || (isComplexBackground ? `background_asset_${index + 1}` : `visual_asset_${index + 1}`));
+      return {
+        ...job,
+        id,
+        description: isComplexBackground
+          ? [
+            text || "Create the source-faithful clean background for this slide.",
+            "Create one full-slide clean background that preserves the exact source gradients, glow, texture, waves, and decorative geometry.",
+            "Remove all text, logos, badges, icons, photos, and other foreground objects so editable/native layers can be placed above it."
+          ].join(" ")
+          : text,
+        target_asset_path: normalizeAssetPath(job.target_asset_path || job.expected_asset_path || job.path || path.join("assets", `${id}.png`)),
+        ...(isComplexBackground ? {
+          source_box_px: [0, 0, width, height],
+          transparent_background: false,
+          asset_type: "full-slide base visual layer",
+          purpose: "source-faithful clean background",
+          z_index: 0
+        } : {})
+      };
+    });
+}
+
 function collectMissingForegroundInventoryAssetJobs(spec) {
   if (!Array.isArray(spec?.visual_inventory)) return [];
+  const images = Array.isArray(spec.images) ? spec.images : [];
   const imageIds = new Set((Array.isArray(spec.images) ? spec.images : []).map((image) => cleanAssetId(image.id || "")).filter(Boolean));
   const imagePaths = new Set((Array.isArray(spec.images) ? spec.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
   const provenanceText = JSON.stringify(spec.asset_provenance || []);
   return spec.visual_inventory
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => !isBackgroundInventoryItem(item, spec))
     .filter((item) => requiresForegroundAsset(item))
     .filter((item) => {
       const id = cleanAssetId(item.id || "");
       const itemPath = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
+      const itemBox = coerceBox(item.source_box_px || item.box_px || item.bounds_px || item.box);
       const text = JSON.stringify(item);
+      const representedByImage = images.some((image) => {
+        const imageBox = coerceBox(image.source_box_px || image.box_px || image.bounds_px || image.box);
+        if (itemBox && imageBox && boxOverlapRatio(itemBox, imageBox) >= 0.45) return true;
+        return assetJobTextScore(image, item) >= 2;
+      });
+      if (representedByImage) return false;
       const mentionsImagePath = Array.from(imagePaths).some((imagePath) => imagePath && text.includes(imagePath));
       if (id && imageIds.has(id)) return false;
       if (mentionsImagePath && ASSET_SEPARATION_RE.test(provenanceText)) return false;
@@ -1353,67 +1845,363 @@ function collectMissingForegroundInventoryAssetJobs(spec) {
         id,
         description,
         target_asset_path: path.join("assets", `${id}.png`).replace(/\\/g, "/"),
-        source_box_px: item.box_px,
+        source_box_px: item.source_box_px || item.box_px,
         transparent_background: true,
         asset_provenance: "asset-sheet-separated image edit for foreground asset reuse"
       };
     });
 }
 
+function isBackgroundInventoryItem(item = {}, spec = {}) {
+  const text = cleanLooseText([
+    item.id,
+    item.asset_id,
+    item.path,
+    item.type,
+    item.kind,
+    item.description,
+    item.decision
+  ].filter(Boolean).join(" "));
+  if (!/background|clean base|base visual layer|full-slide/i.test(text)) return false;
+  const box = coerceBox(item.source_box_px || item.box_px || item.bounds_px || item.box);
+  if (!box) return true;
+  return (Array.isArray(spec.images) ? spec.images : []).some((image) => {
+    const imageText = cleanLooseText([image?.id, image?.type, image?.description].filter(Boolean).join(" "));
+    return /background|clean base|base visual/i.test(imageText) && boxOverlapRatio(box, image?.box_px) >= 0.8;
+  });
+}
+
+function deduplicateVisualAssetJobs(jobs = []) {
+  const chosen = [];
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    if (!job || typeof job !== "object") continue;
+    const id = cleanAssetId(job.id || job.job_id || job.jobId || "");
+    const box = coerceAssetJobBox(job);
+    const duplicate = chosen.some((existing) => {
+      const existingId = cleanAssetId(existing.id || existing.job_id || existing.jobId || "");
+      const existingBox = coerceAssetJobBox(existing);
+      return (id && existingId && id === existingId)
+        || (box && existingBox && boxOverlapRatio(box, existingBox) >= 0.78 && assetJobFamilyMatch(job, existing));
+    });
+    if (!duplicate) chosen.push(job);
+  }
+  return chosen;
+}
+
+function collectMissingComplexBackgroundAssetJobs(spec = {}, pageRequest = {}) {
+  const inventory = Array.isArray(spec.visual_inventory) ? spec.visual_inventory : [];
+  const images = Array.isArray(spec.images) ? spec.images : [];
+  const width = Number(pageRequest.source_size_px?.width || 1280);
+  const height = Number(pageRequest.source_size_px?.height || 720);
+  return inventory
+    .filter((item) => item && typeof item === "object")
+    .filter((item) => /gradient|glow|texture|layered transparency|overlapping|orb|wave|complex background/i.test(cleanLooseText([
+      item.type,
+      item.kind,
+      item.description,
+      item.decision
+    ].filter(Boolean).join(" "))))
+    .filter((item) => {
+      const itemBox = coerceBox(item.source_box_px || item.box_px || item.bounds_px || item.box) || [0, 0, width, height];
+      return !images.some((image) => {
+        const imageBox = coerceBox(image.source_box_px || image.box_px || image.bounds_px || image.box);
+        return (imageBox && boxOverlapRatio(itemBox, imageBox) >= 0.65) || assetJobTextScore(image, item) >= 2;
+      });
+    })
+    .slice(0, 1)
+    .map((item) => ({
+      id: "background_asset_1",
+      description: [
+        cleanLooseText(item.description || "Source-faithful complex background"),
+        "Create one full-slide clean background that preserves the exact source gradients, glow, texture, waves, and decorative geometry.",
+        "Remove all text, logos, badges, icons, photos, and other foreground objects so editable/native layers can be placed above it."
+      ].join(" "),
+      target_asset_path: "assets/background_asset_1.png",
+      source_box_px: [0, 0, width, height],
+      transparent_background: false,
+      asset_type: "full-slide base visual layer",
+      purpose: "source-faithful clean background",
+      z_index: 0,
+      asset_provenance: "imagegen source-faithful clean background for editable rebuild"
+    }));
+}
+
+function collectUncoveredVisualDeltaAssetJobs(spec = {}, bundle = {}, pageRequest = {}) {
+  const pageDir = bundle.pageDir || "";
+  const width = Number(pageRequest.source_size_px?.width || 0);
+  const height = Number(pageRequest.source_size_px?.height || 0);
+  if (!pageDir || !width || !height) return [];
+  const sourcePath = path.join(pageDir, "source.png");
+  const background = (Array.isArray(spec.images) ? spec.images : []).find((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const box = coerceBox(image?.box_px);
+    return imagePath && box && box[2] >= width * 0.95 && box[3] >= height * 0.95
+      && /background|clean base|base visual/i.test(cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" ")));
+  });
+  const backgroundPath = background ? path.join(pageDir, normalizeAssetPath(background.path || "")) : "";
+  if (!fsSync.existsSync(sourcePath) || !backgroundPath || !fsSync.existsSync(backgroundPath)) return [];
+  const masks = [
+    ...(Array.isArray(spec.text_boxes) ? spec.text_boxes.map((item) => coerceBox(item?.box_px)) : []),
+    ...(Array.isArray(spec.images) ? spec.images.filter((item) => item !== background).map((item) => coerceBox(item?.box_px)) : [])
+  ].filter(Boolean);
+  const script = [
+    "import json, sys",
+    "from collections import deque",
+    "from PIL import Image, ImageChops, ImageFilter",
+    "src=Image.open(sys.argv[1]).convert('RGB')",
+    "bg=Image.open(sys.argv[2]).convert('RGB').resize(src.size)",
+    "masks=json.loads(sys.argv[3])",
+    "target=384",
+    "scale=min(1.0,target/src.width)",
+    "size=(max(1,round(src.width*scale)),max(1,round(src.height*scale)))",
+    "src=src.resize(size); bg=bg.resize(size)",
+    "diff=ImageChops.difference(src,bg).convert('L')",
+    "mask=diff.point(lambda v:255 if v>=52 else 0).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(3))",
+    "pix=mask.load(); w,h=size",
+    "for box in masks:",
+    "    x,y,bw,bh=box",
+    "    x0=max(0,int((x-8)*scale)); y0=max(0,int((y-8)*scale))",
+    "    x1=min(w,int((x+bw+8)*scale)); y1=min(h,int((y+bh+8)*scale))",
+    "    for yy in range(y0,y1):",
+    "        for xx in range(x0,x1): pix[xx,yy]=0",
+    "seen=set(); comps=[]",
+    "for yy in range(h):",
+    "    for xx in range(w):",
+    "        if not pix[xx,yy] or (xx,yy) in seen: continue",
+    "        q=deque([(xx,yy)]); seen.add((xx,yy)); pts=[]",
+    "        while q:",
+    "            x,y=q.popleft(); pts.append((x,y))",
+    "            for nx,ny in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):",
+    "                if 0<=nx<w and 0<=ny<h and pix[nx,ny] and (nx,ny) not in seen:",
+    "                    seen.add((nx,ny)); q.append((nx,ny))",
+    "        if len(pts)<max(45,int(w*h*0.0008)): continue",
+    "        xs=[p[0] for p in pts]; ys=[p[1] for p in pts]",
+    "        box=(min(xs),min(ys),max(xs)+1,max(ys)+1)",
+    "        area=(box[2]-box[0])*(box[3]-box[1])",
+    "        if area>w*h*0.24 or area<w*h*0.006: continue",
+    "        comps.append((area,box))",
+    "out=[]",
+    "for _,box in sorted(comps,reverse=True)[:4]:",
+    "    x0,y0,x1,y1=box; pad=max(4,round(max(x1-x0,y1-y0)*0.08))",
+    "    x0=max(0,x0-pad); y0=max(0,y0-pad); x1=min(w,x1+pad); y1=min(h,y1+pad)",
+    "    out.append([round(x0/scale),round(y0/scale),round((x1-x0)/scale),round((y1-y0)/scale)])",
+    "print(json.dumps(out))"
+  ].join("\n");
+  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify(masks)], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 120000,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  if (result.status !== 0) return [];
+  let boxes = [];
+  try { boxes = JSON.parse(String(result.stdout || "[]")); } catch { return []; }
+  return boxes.map((box, index) => ({
+    id: `detected_foreground_asset_${index + 1}`,
+    description: "Separate the complete visible foreground icon, badge, decorative mark, or illustration inside this source region. Preserve its exact visual identity. Do not include surrounding slide background, editable body text, or unrelated objects.",
+    target_asset_path: `assets/detected_foreground_asset_${index + 1}.png`,
+    source_box_px: box,
+    transparent_background: true,
+    asset_provenance: "asset-sheet-separated image edit for uncovered foreground visual"
+  }));
+}
+
 function collectMissingBrandBlockAssetJobs(spec, bundle = {}) {
   const assets = Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [];
+  const foregroundAssets = assets.filter((asset) => !isFullSlideBackgroundAsset(asset, bundle.pageRequest?.source_size_px));
+  const pageDir = bundle.pageDir || "";
   const represented = new Set([
-    ...(Array.isArray(spec.images) ? spec.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean),
+    ...(Array.isArray(spec.images) ? spec.images : [])
+      .map((image) => normalizeAssetPath(image.path || ""))
+      .filter((assetPath) => assetPath && pageDir && fsSync.existsSync(path.join(pageDir, assetPath))),
     ...assets.map((asset) => normalizeAssetPath(asset.path || "")).filter(Boolean)
   ]);
-  const textBoxes = Array.isArray(spec.text_boxes) ? spec.text_boxes : [];
-  const brandBoxes = textBoxes
-    .filter((box) => /benlai\.com|本来生活|sto|express|申通快递/i.test(String(box.text || "")))
-    .filter((box) => Array.isArray(box.box_px) && box.box_px.length === 4);
-  if (!brandBoxes.length) return [];
-  const clusters = clusterNearbyBrandTextBoxes(brandBoxes);
-  return clusters
-    .filter((cluster) => cluster.length >= 2 || /benlai\.com|express/i.test(cluster.map((box) => box.text || "").join(" ")))
-    .map((cluster, index) => {
+  const brandItems = collectBrandRegionCandidates(spec, bundle.pageRequest?.source_size_px);
+  return brandItems
+    .filter(({ item, box }) => !foregroundAssets.some((asset) => (
+      assetJobTextScore(asset, item) >= 2 || boxOverlapRatio(asset?.source_box_px, box) >= 0.5
+    )))
+    .map(({ item, box }, index) => {
       const id = `brand_logo_asset_${index + 1}`;
       const targetPath = path.join("assets", `${id}.png`).replace(/\\/g, "/");
       if (represented.has(targetPath)) return null;
-      const box = expandBox(unionBoxes(cluster.map((item) => item.box_px)), 36, bundle.pageRequest?.source_size_px);
-      const label = cluster.map((item) => item.text || "").filter(Boolean).join(" / ");
       return {
         id,
         description: [
-          `Separate the complete brand/logo block containing: ${label}.`,
-          "Keep the original typography, colors, background panel, shadows, and spacing as one source-faithful reusable PPT image asset.",
-          "Do not split the logo into editable text; this brand mark must be reused as an image asset."
+          `Separate this exact brand/logo/wordmark: ${cleanLooseText(item.description || item.type || "brand mark")}.`,
+          "Preserve the original typography, colors, proportions, internal spacing, strokes, and shadows.",
+          "Return only the mark itself on transparent pixels or a flat cyan chroma-key background. Do not include the surrounding slide background, a card, a panel, a border, or extra text."
         ].join(" "),
         target_asset_path: targetPath,
         source_box_px: box,
-        transparent_background: false,
+        transparent_background: true,
         asset_provenance: "asset-sheet-separated image edit for brand/logo block reuse"
       };
     })
     .filter(Boolean);
 }
 
-function ensureAvailableBrandAssetsRepresented(spec, bundle = {}) {
+function isFullSlideBackgroundAsset(asset = {}, sourceSize = {}) {
+  const text = cleanLooseText([
+    asset.id,
+    asset.path,
+    asset.source_type,
+    asset.provenance_note,
+    asset.prompt_excerpt
+  ].filter(Boolean).join(" "));
+  if (/^background_asset_|clean background|full-slide base visual layer/i.test(text)) return true;
+  const box = coerceBox(asset.source_box_px);
+  const width = Number(sourceSize?.width || 0);
+  const height = Number(sourceSize?.height || 0);
+  return Boolean(box && width > 0 && height > 0 && (box[2] * box[3]) / (width * height) > 0.65);
+}
+
+function collectBrandRegionCandidates(spec = {}, sourceSize = {}) {
+  const candidates = (Array.isArray(spec.visual_inventory) ? spec.visual_inventory : [])
+    .filter((item) => /logo|brand|wordmark|trademark/i.test(cleanLooseText([item?.type, item?.kind, item?.description, item?.decision].filter(Boolean).join(" "))))
+    .map((item) => ({ item, box: coerceBox(item?.source_box_px || item?.box_px || item?.bounds_px || item?.box) }))
+    .filter((entry) => entry.box);
+  const textBoxes = (Array.isArray(spec.text_boxes) ? spec.text_boxes : []).filter((box) => coerceBox(box?.box_px));
+  const domainBoxes = textBoxes.filter((box) => /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b/i.test(String(box?.text || "")));
+  for (const domain of domainBoxes) {
+    const domainBox = coerceBox(domain.box_px);
+    const neighbors = textBoxes.filter((candidate) => {
+      const box = coerceBox(candidate.box_px);
+      if (!box) return false;
+      const horizontalOverlap = Math.max(0, Math.min(domainBox[0] + domainBox[2], box[0] + box[2]) - Math.max(domainBox[0], box[0]));
+      const verticalGap = Math.max(0, Math.max(domainBox[1], box[1]) - Math.min(domainBox[1] + domainBox[3], box[1] + box[3]));
+      return horizontalOverlap >= Math.min(domainBox[2], box[2]) * 0.35 && verticalGap <= Math.max(48, domainBox[3] * 2.5);
+    });
+    const box = expandBox(unionBoxes(neighbors.map((item) => item.box_px)), 28, sourceSize);
+    if (!box) continue;
+    const item = {
+      type: "brand-wordmark",
+      description: `Brand wordmark cluster containing ${neighbors.map((item) => item.text || "").filter(Boolean).join(" / ")}`,
+      source_box_px: box,
+      decision: "needed-visual-asset"
+    };
+    if (!candidates.some((entry) => boxOverlapRatio(entry.box, box) >= 0.65)) candidates.push({ item, box });
+  }
+  return candidates;
+}
+
+function ensureAvailableComplexBackgroundAssetsRepresented(spec, bundle = {}, pageRequest = {}) {
   const assets = (Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [])
-    .filter((asset) => /^brand_logo_asset_/i.test(asset.id || "") && normalizeAssetPath(asset.path || "") && Array.isArray(asset.source_box_px));
+    .filter((asset) => /^background_asset_/i.test(asset.id || path.basename(asset.path || "", path.extname(asset.path || ""))))
+    .filter((asset) => normalizeAssetPath(asset.path || ""));
+  if (!assets.length) return;
+  if (!Array.isArray(spec.images)) spec.images = [];
+  if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
+  if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
+  const width = Number(pageRequest.source_size_px?.width || 1280);
+  const height = Number(pageRequest.source_size_px?.height || 720);
+  const imagePaths = new Set(spec.images.map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
+  const provenancePaths = new Set(spec.asset_provenance.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  for (const asset of assets.slice(0, 1)) {
+    const assetPath = normalizeAssetPath(asset.path || "");
+    const box = coerceBox(asset.source_box_px) || [0, 0, width, height];
+    const existingImage = spec.images.find((image) => normalizeAssetPath(image?.path || "") === assetPath);
+    if (existingImage) {
+      existingImage.id = existingImage.id || asset.id || "background_asset_1";
+      existingImage.type = existingImage.type || "image";
+      existingImage.description = existingImage.description || "Source-faithful clean background preserving complex gradients, glow, texture, and decorative geometry.";
+      existingImage.box_px = coerceBox(existingImage.box_px) || box;
+      existingImage.z_index = Number.isFinite(Number(existingImage.z_index)) ? Number(existingImage.z_index) : 0;
+    } else {
+      spec.images.push({
+        id: asset.id || "background_asset_1",
+        type: "image",
+        description: "Source-faithful clean background preserving complex gradients, glow, texture, and decorative geometry.",
+        path: assetPath,
+        box_px: box,
+        z_index: 0
+      });
+      imagePaths.add(assetPath);
+    }
+    spec.visual_inventory.push({
+      id: asset.id || "background_asset_1",
+      type: "image",
+      description: "Source-faithful clean background preserving complex gradients, glow, texture, and decorative geometry.",
+      path: assetPath,
+      box_px: box,
+      decision: "imagegen source-faithful clean background"
+    });
+    const existingProvenance = spec.asset_provenance.find((item) => normalizeAssetPath(item?.path || item?.source || "") === assetPath);
+    if (existingProvenance) {
+      existingProvenance.path = assetPath;
+      existingProvenance.source = existingProvenance.source || asset.source || assetPath;
+      existingProvenance.source_type = "imagegen";
+      existingProvenance.provenance_note = existingProvenance.provenance_note || asset.provenance_note || "imagegen source-faithful clean background for editable rebuild";
+    } else if (!provenancePaths.has(assetPath)) {
+      spec.asset_provenance.push({
+        path: assetPath,
+        source: asset.source || assetPath,
+        source_type: "imagegen",
+        provenance_note: asset.provenance_note || "imagegen source-faithful clean background for editable rebuild"
+      });
+      provenancePaths.add(assetPath);
+    }
+  }
+  spec.shapes = (Array.isArray(spec.shapes) ? spec.shapes : []).filter((shape) => {
+    const shapeText = cleanLooseText([shape.type, shape.description, shape.kind].filter(Boolean).join(" "));
+    const box = coerceBox(shape.box_px);
+    const areaRatio = box ? (Math.max(0, box[2]) * Math.max(0, box[3])) / Math.max(1, width * height) : 0;
+    return !(/gradient|glow|texture|orb|wave|complex background/i.test(shapeText) && areaRatio >= 0.5);
+  });
+}
+
+function ensureAvailableBrandAssetsRepresented(spec, bundle = {}, pageRequest = {}) {
+  const brandVisualBoxes = collectBrandRegionCandidates(spec, pageRequest.source_size_px).map((entry) => entry.box);
+  const fallbackBox = brandVisualBoxes[0] || null;
+  const assets = (Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [])
+    .filter((asset) => /^brand_logo_asset_/i.test(asset.id || "") && normalizeAssetPath(asset.path || ""));
   if (!assets.length) return;
   if (!Array.isArray(spec.images)) spec.images = [];
   if (!Array.isArray(spec.asset_provenance)) spec.asset_provenance = [];
   if (!Array.isArray(spec.visual_inventory)) spec.visual_inventory = [];
   const imagePaths = new Set(spec.images.map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
   const provenancePaths = new Set(spec.asset_provenance.map((item) => normalizeAssetPath(item.path || "")).filter(Boolean));
+  const representedIds = new Set(spec.images.map((image) => cleanAssetId(image?.id || "")).filter(Boolean));
+  const processedAssetIds = new Set();
   for (const asset of assets) {
     const assetPath = normalizeAssetPath(asset.path || "");
-    if (!assetPath || imagePaths.has(assetPath)) continue;
+    const box = coerceBox(asset.source_box_px) || fallbackBox;
+    const assetId = cleanAssetId(asset.id || path.basename(assetPath, path.extname(assetPath)));
+    if (processedAssetIds.has(assetId)) continue;
+    processedAssetIds.add(assetId);
+    if (isTextOnlyBrandRegion(box, spec.text_boxes)) {
+      spec.images = spec.images.filter((image) => normalizeAssetPath(image?.path || "") !== assetPath && cleanAssetId(image?.id || "") !== assetId);
+      spec.asset_provenance = spec.asset_provenance.filter((item) => normalizeAssetPath(item?.path || item?.source || "") !== assetPath);
+      spec.visual_inventory = spec.visual_inventory.filter((item) => {
+        const itemId = cleanAssetId(item?.id || item?.asset_id || "");
+        const itemPath = normalizeAssetPath(item?.path || item?.asset_provenance?.path || "");
+        return itemId !== assetId && itemPath !== assetPath;
+      });
+      imagePaths.delete(assetPath);
+      representedIds.delete(assetId);
+      continue;
+    }
+    if (!assetPath || !box) continue;
+    const existingImage = spec.images.find((image) => normalizeAssetPath(image?.path || "") === assetPath || cleanAssetId(image?.id || "") === assetId);
+    if (existingImage) {
+      existingImage.id = existingImage.id || asset.id;
+      existingImage.type = existingImage.type || "image";
+      existingImage.description = existingImage.description || "Source-faithful brand/logo block separated from the slide image.";
+      existingImage.path = assetPath;
+      existingImage.box_px = coerceBox(existingImage.box_px) || box;
+      existingImage.z_index = Number.isFinite(Number(existingImage.z_index)) ? Number(existingImage.z_index) : 80;
+      imagePaths.add(assetPath);
+      representedIds.add(assetId);
+      continue;
+    }
+    if (imagePaths.has(assetPath) || representedIds.has(assetId)) continue;
     spec.images.push({
       id: asset.id,
       type: "image",
       description: "Source-faithful brand/logo block separated from the slide image.",
       path: assetPath,
-      box_px: asset.source_box_px,
+      box_px: box,
       z_index: 80
     });
     spec.visual_inventory.push({
@@ -1421,7 +2209,7 @@ function ensureAvailableBrandAssetsRepresented(spec, bundle = {}) {
       type: "image",
       description: "Source-faithful brand/logo block separated from the slide image.",
       path: assetPath,
-      box_px: asset.source_box_px,
+      box_px: box,
       decision: "asset-sheet-separated image edit for brand/logo block reuse"
     });
     if (!provenancePaths.has(assetPath)) {
@@ -1434,7 +2222,24 @@ function ensureAvailableBrandAssetsRepresented(spec, bundle = {}) {
       provenancePaths.add(assetPath);
     }
     imagePaths.add(assetPath);
+    representedIds.add(assetId);
   }
+}
+
+function isTextOnlyBrandRegion(box = [], textBoxes = []) {
+  const brandBox = coerceBox(box);
+  if (!brandBox) return false;
+  const inside = (Array.isArray(textBoxes) ? textBoxes : []).filter((item) => {
+    const textBox = coerceBox(item?.box_px);
+    if (!textBox) return false;
+    const centerX = textBox[0] + textBox[2] / 2;
+    const centerY = textBox[1] + textBox[3] / 2;
+    return centerX >= brandBox[0] && centerX <= brandBox[0] + brandBox[2]
+      && centerY >= brandBox[1] && centerY <= brandBox[1] + brandBox[3];
+  });
+  if (inside.length < 2) return false;
+  const text = inside.map((item) => cleanLooseText(item?.text || "")).filter(Boolean).join(" ");
+  return /(?:https?:\/\/|www\.|[a-z0-9-]+\.(?:com|cn|net|org|io|co))(?:\b|\/)/i.test(text);
 }
 
 function ensureAvailableForegroundAssetsRepresented(spec, bundle = {}) {
@@ -1493,6 +2298,8 @@ function ensureAvailableForegroundAssetsRepresented(spec, bundle = {}) {
 
 function selectAvailableForegroundAssets(bundle = {}) {
   const assets = Array.isArray(bundle.availableAssets) ? bundle.availableAssets : [];
+  const pageWidth = Number(bundle?.pageRequest?.source_size_px?.width || 0);
+  const pageHeight = Number(bundle?.pageRequest?.source_size_px?.height || 0);
   const seen = new Set();
   return assets
     .filter((asset) => {
@@ -1500,6 +2307,8 @@ function selectAvailableForegroundAssets(bundle = {}) {
       const id = cleanAssetId(asset?.id || path.basename(assetPath, path.extname(assetPath)));
       const box = coerceBox(asset?.source_box_px);
       if (!assetPath || !id || !box?.length || /^brand_logo_asset_/i.test(id)) return false;
+      if (pageWidth && pageHeight && (box[2] * box[3]) / (pageWidth * pageHeight) > 0.65) return false;
+      if (isExcludedAssetCandidate(asset)) return false;
       if (!/^assets\//i.test(assetPath)) return false;
       if (seen.has(id)) return false;
       seen.add(id);
@@ -1592,7 +2401,8 @@ function normalizeImageAssetReferences(spec, bundle = {}) {
     return {
       ...image,
       id: imageId,
-      path: imagePath
+      path: imagePath,
+      box_px: coerceBox(image.box_px) || coerceBox(asset?.source_box_px) || image.box_px
     };
   });
   spec.asset_provenance = nextProvenance;
@@ -1629,7 +2439,7 @@ function buildVisualAssetSpec(neededJobs) {
           "Return only the requested visual object/panel, cleanly separated for reuse in an editable PowerPoint rebuild.",
           job.transparent_background === false
             ? "Keep the original rectangular/panel background."
-            : "Use real transparent pixels outside the requested object; do not render a gray-white checkerboard, transparency grid, or placeholder background. If true transparency is unavailable, use one flat high-saturation chroma-key color that does not appear in the object."
+            : "Return only the requested object with no surrounding slide background, card, panel, border, or unrelated text. Use real transparent pixels outside it; if true transparency is unavailable, use one flat #00FFFF chroma-key background. Do not render a checkerboard or placeholder background."
         ].join(" "),
         out,
         dest: targetPath,
@@ -1645,6 +2455,7 @@ function listAvailableAssets(pageDir) {
   const assetsDir = path.join(pageDir, "assets");
   if (!fsSync.existsSync(assetsDir)) return [];
   const assetJobByDest = readVisualAssetJobIndex(pageDir);
+  const recordedJobByDest = readVerifiedRecordedAssetIndex(pageDir);
   const results = [];
   const stack = [assetsDir];
   while (stack.length) {
@@ -1655,14 +2466,19 @@ function listAvailableAssets(pageDir) {
         stack.push(full);
       } else if (/\.(png|jpe?g|webp)$/i.test(entry.name)) {
         const relativePath = path.relative(pageDir, full).replace(/\\/g, "/");
-        const job = assetJobByDest.get(relativePath) || {};
+        const recordedJob = recordedJobByDest.get(relativePath) || null;
+        const job = recordedJob || assetJobByDest.get(relativePath) || {};
+        const id = cleanAssetId(path.basename(entry.name, path.extname(entry.name)));
+        const cleanBackground = /^background_asset_/i.test(id) || /clean background/i.test(cleanLooseText([job.note, job.prompt_excerpt].filter(Boolean).join(" ")));
+        if (cleanBackground && !recordedJob) continue;
         results.push({
-          id: cleanAssetId(path.basename(entry.name, path.extname(entry.name))),
+          id,
           path: relativePath,
           bytes: fsSync.statSync(full).size,
           source: relativePath,
-          source_type: /user_approved|raster/i.test(entry.name) ? "user-approved-rasterization" : "asset-sheet-separated",
+          source_type: /user_approved|raster/i.test(entry.name) ? "user-approved-rasterization" : cleanBackground ? "imagegen" : "asset-sheet-separated",
           provenance_note: job.note || "Available page asset discovered after visual asset generation/import.",
+          verified_sha256: recordedJob?.output_sha256 || "",
           ...(readAssetPromptExcerpt(pageDir, entry.name) ? { prompt_excerpt: readAssetPromptExcerpt(pageDir, entry.name) } : {}),
           ...(Array.isArray(job.source_box_px) ? { source_box_px: job.source_box_px } : {})
         });
@@ -1670,6 +2486,51 @@ function listAvailableAssets(pageDir) {
     }
   }
   return results.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function readVerifiedRecordedAssetIndex(pageDir = "") {
+  const result = new Map();
+  const currentIndex = path.join(pageDir, "imagegen-jobs.json");
+  const sourcePath = path.join(pageDir, "source.png");
+  const sourceModifiedAt = fsSync.existsSync(sourcePath) ? fsSync.statSync(sourcePath).mtimeMs : 0;
+  const archiveRoot = path.join(pageDir, ".retry-archive");
+  const archivedIndexes = fsSync.existsSync(archiveRoot)
+    ? fsSync.readdirSync(archiveRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(archiveRoot, entry.name, "imagegen-jobs.json"))
+      .filter((entry) => fsSync.existsSync(entry))
+      .sort((left, right) => fsSync.statSync(right).mtimeMs - fsSync.statSync(left).mtimeMs)
+    : [];
+  for (const indexPath of [currentIndex, ...archivedIndexes]) {
+    let index;
+    try {
+      index = JSON.parse(fsSync.readFileSync(indexPath, "utf8").replace(/^\uFEFF/, ""));
+    } catch {
+      continue;
+    }
+    for (const record of Array.isArray(index.jobs) ? index.jobs : []) {
+      const id = cleanAssetId(record.job_id || record.id || "");
+      const expectedSha256 = String(record.output_sha256 || "").trim().toLowerCase();
+      if (!id || !expectedSha256) continue;
+      const recordedAt = Date.parse(String(record.recorded_at || record.recordedAt || ""));
+      if (sourceModifiedAt && (!Number.isFinite(recordedAt) || recordedAt + 1000 < sourceModifiedAt)) continue;
+      const fileName = path.basename(normalizeAssetPath(record.output || `${id}.png`));
+      for (const relativePath of [`assets/${fileName}`, `assets/generated/${fileName}`]) {
+        if (result.has(relativePath)) continue;
+        const fullPath = path.join(pageDir, relativePath);
+        if (!fsSync.existsSync(fullPath)) continue;
+        const actualSha256 = crypto.createHash("sha256").update(fsSync.readFileSync(fullPath)).digest("hex");
+        if (actualSha256 !== expectedSha256) continue;
+        result.set(relativePath, {
+          ...record,
+          id,
+          dest: relativePath,
+          prompt_excerpt: record.prompt_excerpt || ""
+        });
+      }
+    }
+  }
+  return result;
 }
 
 function readAssetPromptExcerpt(pageDir, fileName = "") {
@@ -2204,6 +3065,32 @@ function collectVisualCoverageIssues(spec = {}) {
   }
   if (preservationClaim && images.length === 0 && meaningfulShapes < 3 && visualInventory.length < 3) {
     issues.push("background_strategy claims preserved or matched source visuals but the rebuild has too few meaningful shapes/images.");
+  }
+  const renderables = [...shapes, ...images];
+  for (const item of visualInventory) {
+    if (!item || typeof item !== "object" || /text/i.test(String(item.type || item.decision || ""))) continue;
+    const itemId = cleanAssetId(item.id || item.asset_id || item.assetId || "");
+    const itemText = cleanLooseText([item.type, item.kind, item.description, item.decision].filter(Boolean).join(" "));
+    const itemBox = item.source_box_px || item.box_px || item.bounds_px || item.box;
+    if (/gradient|glow|texture|layered transparency|overlapping|orb|wave|complex background/i.test(itemText)) {
+      const representedByImage = images.some((renderable) => {
+        const renderableId = cleanAssetId(renderable?.id || renderable?.asset_id || renderable?.assetId || "");
+        if (itemId && renderableId && itemId === renderableId) return true;
+        return boxOverlapRatio(itemBox, renderable?.box_px) >= 0.65 || assetJobTextScore(renderable, item) >= 2;
+      });
+      if (!representedByImage) {
+        issues.push(`complex background visual ${item.id || item.description || "unnamed"} must use a source-faithful image asset, not only native shapes.`);
+        continue;
+      }
+    }
+    const represented = renderables.some((renderable) => {
+      const renderableId = cleanAssetId(renderable?.id || renderable?.asset_id || renderable?.assetId || "");
+      if (itemId && renderableId && itemId === renderableId) return true;
+      return boxOverlapRatio(itemBox, renderable?.box_px) >= 0.65 || assetJobTextScore(renderable, item) >= 2;
+    });
+    if (!represented) {
+      issues.push(`visual_inventory item ${item.id || item.description || "unnamed"} has no matching positioned shape or image.`);
+    }
   }
   return issues;
 }

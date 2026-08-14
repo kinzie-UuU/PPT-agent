@@ -42,7 +42,7 @@ export async function listWorkflowArtifactLinks(id) {
       makeLink(job, "image-deck", "图片型 PPT", artifacts.imageDeck?.path, { download: true }),
       makeLink(job, "visual-quality", "视觉质量报告", artifacts.visualQuality?.path),
       ...artifactArrayLinks(job, "rendered-page", "源稿页面图", artifacts.renderedPages),
-      ...artifactArrayLinks(job, "visual-page", "视觉页面图", artifacts.visualImages),
+      ...artifactArrayLinks(job, "visual-page", "视觉页面图", currentVisualImages(artifacts)),
       ...artifactArrayLinks(job, "rebuild-preview", "重建预览图", reviewArtifacts.previews),
       ...artifactArrayLinks(job, "asset-contact-sheet", "资产分离总览图", reviewArtifacts.contactSheets),
       ...artifactArrayLinks(job, "final-compare", "最终对比图", getFinalCompareArtifacts(job)),
@@ -154,7 +154,7 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
     filePath = page?.path || "";
     fileName = path.basename(filePath || `${cleanPageId(pageId)}.png`);
   } else if (normalizedKey === "visual-page") {
-    const page = findPageArtifact(artifacts.visualImages, pageId);
+    const page = findPageArtifact(currentVisualImages(artifacts), pageId);
     filePath = page?.path || "";
     fileName = path.basename(filePath || `${cleanPageId(pageId)}.png`);
   } else if (normalizedKey === "rebuild-preview") {
@@ -193,6 +193,11 @@ export async function resolveWorkflowArtifact(id, key, pageId = "") {
     inline,
     contentType: contentTypeForFile(resolved)
   };
+}
+
+function currentVisualImages(artifacts = {}) {
+  return (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
 }
 
 export function isFinalPptxProductReady(finalGate = {}) {

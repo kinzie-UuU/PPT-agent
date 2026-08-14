@@ -256,6 +256,8 @@ export function useWorkflowWorkerConsole({ job, promptCount, onRefresh, onRunSte
       const bundle = await api.workflowWorkerTaskAction(job.id, pageId, "reset", {
         reason: "前端手动重试",
         agentId: selectedTask?.agentId || agentId.trim() || "",
+        attemptId: selectedTask?.attemptId || "",
+        leaseToken: selectedTask?.leaseToken || "",
         confirmLost: selectedTask?.status === "running" || selectedTask?.status === "claimed"
       });
       setWorkerTaskBundle(bundle);

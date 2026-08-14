@@ -9,6 +9,7 @@ import { rootDir } from "./store.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { analyzeGeneratedImage } from "./imageQa.js";
 import { appendEvent, artifactRecord, getRenderedPages, markStage } from "./workflowVisuals.js";
+import { inferDeckPageRole } from "./workflowDeckDesignSystem.js";
 
 const ARTIFACT_STEM = "information_asset_map";
 const execFileAsync = promisify(execFile);
@@ -137,7 +138,7 @@ async function buildPageAssetRecord(page = {}, totalPages = 0, fidelityAssetDir 
     error: error.message || "image analysis failed"
   }));
   const pageId = page.pageId || `page_${String(page.pageNumber || 1).padStart(3, "0")}`;
-  const role = inferPageRole(page, totalPages);
+  const role = inferDeckPageRole(page, { totalPages });
   const risks = inferRisks(page, qa);
   const reusableAssets = await buildReusableAssets({ page, pageId, dimensions, risks, fidelityAssetDir });
   const preserve = [
@@ -394,17 +395,6 @@ function inferRisks(page = {}, qa = {}) {
   }
   if (!risks.size) risks.add("general-fidelity");
   return [...risks];
-}
-
-function inferPageRole(page = {}, totalPages = 0) {
-  const n = Number(page.pageNumber || 0);
-  const text = [page.outlineTitle, page.outlinePurpose, page.sourceSlideType].filter(Boolean).join(" ");
-  if (n === 1 || /cover|封面/i.test(text)) return "cover";
-  if (totalPages > 1 && n === totalPages) return "closing";
-  if (/timeline|roadmap|时间|流程|路径/i.test(text)) return "timeline";
-  if (/chart|table|data|图表|表格|数据/i.test(text)) return "data";
-  if (/compare|对比|竞品/i.test(text)) return "comparison";
-  return "content";
 }
 
 function inferTextDensity(page = {}) {

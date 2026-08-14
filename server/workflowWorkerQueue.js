@@ -2,6 +2,8 @@ import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { dispatchWorkflowEditablePage, listWorkflowEditableWorkerPrompts, recordWorkflowEditablePage, resetWorkflowEditablePage } from "./workflowEditable.js";
 import fsSync from "fs";
 import path from "path";
+import crypto from "crypto";
+import { withWorkflowJobLock } from "./workflowJobLock.js";
 
 const TASK_STATUSES = ["ready", "claimed", "running", "recorded", "failed"];
 const REQUIRED_PAGE_RESULT = {
@@ -33,8 +35,13 @@ const REQUIRED_QUALITY_CHECKS = [
   "background_strategy_checked",
   "shape_corner_geometry_checked"
 ];
+const RESET_TRANSACTION_FILE = ".ppt-agent-reset-transaction.json";
 
 export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
+  return withWorkflowJobLock(`editable-task:${jobId}`, () => syncWorkflowEditableWorkerTasksUnlocked(jobId, options));
+}
+
+async function syncWorkflowEditableWorkerTasksUnlocked(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const promptBundle = await listWorkflowEditableWorkerPrompts(jobId, options);
   const existingTasks = Array.isArray(job.artifacts?.editableWorkerTasks) ? job.artifacts.editableWorkerTasks : [];
@@ -47,13 +54,10 @@ export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
     const dispatch = lastByPage(dispatches, prompt.pageId);
     const record = lastByPage(records, prompt.pageId);
     const evidence = inspectPageEvidence(prompt.pageDir);
-    const generated = Boolean(evidence.pagePptxExists || evidence.previewExists || evidence.manifestExists || evidence.pageResultExists);
     const recordCurrent = record && evidence.validationPassed && evidence.outputContractOk && !isResetAfterRecord(existing, record);
-    let existingStatus = existing.status === "recorded" && !recordCurrent ? "" : existing.status;
-    if (["claimed", "running"].includes(existingStatus) && !generated && !isRecentTaskActivity(existing)) {
-      existingStatus = "";
-    }
-    const status = recordCurrent ? "recorded" : existingStatus || "ready";
+    const existingStatus = existing.status === "recorded" && !recordCurrent ? "" : existing.status;
+    const leaseExpired = ["claimed", "running"].includes(existingStatus) && !isRecentTaskActivity(existing);
+    const status = recordCurrent ? "recorded" : leaseExpired ? "failed" : existingStatus || "ready";
     return normalizeTask({
       ...existing,
       pageId: prompt.pageId,
@@ -61,6 +65,10 @@ export async function syncWorkflowEditableWorkerTasks(jobId, options = {}) {
       pageDir: prompt.pageDir,
       relativePath: prompt.relativePath,
       status,
+      error: leaseExpired ? existing.error || "Worker heartbeat expired; inspect the old process and reset this page before retrying." : existing.error || "",
+      message: leaseExpired ? "Worker lease expired. Manual reset is required before rerun." : existing.message || "",
+      failedAt: leaseExpired ? existing.failedAt || now : existing.failedAt || "",
+      failureKind: leaseExpired ? "worker-lease-expired" : existing.failureKind || "",
       agentId: recordCurrent ? existing.agentId || dispatch?.agentId || "" : existing.agentId || "",
       dispatchAt: recordCurrent ? existing.dispatchAt || dispatch?.createdAt || "" : existing.dispatchAt || "",
       recordedAt: recordCurrent ? existing.recordedAt || record?.createdAt || "" : existing.recordedAt || "",
@@ -102,14 +110,24 @@ export async function listWorkflowEditableWorkerTasks(jobId, options = {}) {
 }
 
 export async function claimWorkflowEditableWorkerTask(jobId, pageId, options = {}) {
+  return withWorkflowJobLock(`editable-task:${jobId}`, () => claimWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options));
+}
+
+async function claimWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options = {}) {
   const agentId = cleanString(options.agentId || "");
   if (!agentId) throw new Error("agentId is required");
   const taskBundle = await ensureTasks(jobId, options);
   const pageTask = findTask(taskBundle.tasks, pageId);
   if (!pageTask) throw new Error(`Worker task not found: ${pageId}`);
   if (pageTask.status === "recorded") throw new Error(`Worker task already recorded: ${pageTask.pageId}`);
+  if (pageTask.status !== "ready") {
+    throw new Error(`Worker task is ${pageTask.status}: ${pageTask.pageId}. Reset a failed task before retrying it.`);
+  }
   const prompt = taskBundle.prompts.find((item) => item.pageId === pageTask.pageId);
   if (!prompt) throw new Error(`Worker prompt not found: ${pageTask.pageId}`);
+  const localMode = Boolean(options.localRebuild || options.localMode || taskBundle.next?.stage === "rebuild_page_locally");
+  const attemptId = `attempt_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+  const leaseToken = crypto.randomBytes(18).toString("hex");
 
   const dispatched = await dispatchWorkflowEditablePage(jobId, {
     pageId: pageTask.pageId,
@@ -118,17 +136,20 @@ export async function claimWorkflowEditableWorkerTask(jobId, pageId, options = {
     confirmSpawned: true,
     acceptOfflineTextHints: options.acceptOfflineTextHints || options.confirmOfflineTextHints || options.paddleOcrDeclined,
     offlineTextHintsReason: options.offlineTextHintsReason || "",
-    agentNickname: options.agentNickname || options.workerName || ""
+    agentNickname: options.agentNickname || options.workerName || "",
+    localRebuild: localMode
   });
   const now = new Date().toISOString();
   const tasks = updateTask(dispatched, pageTask.pageId, {
     status: "running",
     agentId,
-    workerName: cleanString(options.workerName || options.agentNickname || ""),
+    workerName: cleanString(options.workerName || options.agentNickname || (localMode ? "main-agent" : "")),
     claimedAt: pageTask.claimedAt || now,
     dispatchAt: now,
     heartbeatAt: now,
     attempts: Number(pageTask.attempts || 0) + 1,
+    attemptId,
+    leaseToken,
     error: ""
   });
   dispatched.artifacts = {
@@ -137,20 +158,27 @@ export async function claimWorkflowEditableWorkerTask(jobId, pageId, options = {
   };
   dispatched.events = appendEvent(dispatched.events, "editable.worker_task_claimed", `Worker claimed ${pageTask.pageId}`, {
     pageId: pageTask.pageId,
-    agentId
+    agentId,
+    attemptId
   });
   const saved = await saveWorkflowJob(dispatched);
   return listWorkflowEditableWorkerTasks(saved.id, options);
 }
 
 export async function heartbeatWorkflowEditableWorkerTask(jobId, pageId, options = {}) {
+  return withWorkflowJobLock(`editable-task:${jobId}`, () => heartbeatWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options));
+}
+
+async function heartbeatWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options = {}) {
   const agentId = cleanString(options.agentId || "");
   const job = await readWorkflowJob(jobId);
   const pageTask = findTask(job.artifacts?.editableWorkerTasks || [], pageId);
   if (!pageTask) throw new Error(`Worker task not found: ${pageId}`);
   if (agentId && pageTask.agentId && agentId !== pageTask.agentId) throw new Error(`Task belongs to another agent: ${pageTask.agentId}`);
+  assertCurrentAttempt(pageTask, options);
+  if (!["claimed", "running"].includes(pageTask.status)) throw new Error(`Worker task is not running: ${pageTask.pageId}`);
   const tasks = updateTask(job, pageTask.pageId, {
-    status: pageTask.status === "ready" ? "claimed" : pageTask.status,
+    status: pageTask.status,
     agentId: pageTask.agentId || agentId,
     heartbeatAt: new Date().toISOString(),
     message: cleanString(options.message || pageTask.message || "")
@@ -164,12 +192,18 @@ export async function heartbeatWorkflowEditableWorkerTask(jobId, pageId, options
 }
 
 export async function completeWorkflowEditableWorkerTask(jobId, pageId, options = {}) {
+  return withWorkflowJobLock(`editable-task:${jobId}`, () => completeWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options));
+}
+
+async function completeWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options = {}) {
   const agentId = cleanString(options.agentId || "");
   if (!agentId) throw new Error("agentId is required");
   const job = await readWorkflowJob(jobId);
   const pageTask = findTask(job.artifacts?.editableWorkerTasks || [], pageId);
   if (!pageTask) throw new Error(`Worker task not found: ${pageId}`);
   if (pageTask.agentId && pageTask.agentId !== agentId) throw new Error(`Task belongs to another agent: ${pageTask.agentId}`);
+  assertCurrentAttempt(pageTask, options);
+  if (!["claimed", "running"].includes(pageTask.status)) throw new Error(`Worker task is not running: ${pageTask.pageId}`);
   try {
     const evidence = inspectPageEvidence(pageTask.pageDir);
     if (evidence.validationPassed !== true || evidence.outputContractOk !== true) {
@@ -224,56 +258,217 @@ export async function completeWorkflowEditableWorkerTask(jobId, pageId, options 
 }
 
 export async function resetWorkflowEditableWorkerTask(jobId, pageId, options = {}) {
+  return withWorkflowJobLock(`editable-task:${jobId}`, () => resetWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options));
+}
+
+async function resetWorkflowEditableWorkerTaskUnlocked(jobId, pageId, options = {}) {
   const taskBundle = await ensureTasks(jobId, options);
   const pageTask = findTask(taskBundle.tasks, pageId);
   if (!pageTask) throw new Error(`Worker task not found: ${pageId}`);
+  const failureRelease = Boolean(options.failureRelease || options.releaseAfterFailure || options.automaticFailureRelease);
+  if (failureRelease) assertCurrentAttempt(pageTask, options);
+  if (["running", "claimed"].includes(pageTask.status)) {
+    if (!Boolean(options.confirmLost || options.confirm_lost)) {
+      const error = new Error(`Active worker must be explicitly confirmed lost before reset: ${pageTask.pageId}`);
+      error.code = "EDITABLE_WORKER_CONFIRM_LOST_REQUIRED";
+      throw error;
+    }
+    assertCurrentAttempt(pageTask, options);
+  }
+  if (pageTask.status === "failed" && (pageTask.attemptId || pageTask.leaseToken)) {
+    if (!Boolean(options.confirmLost || options.confirm_lost)) {
+      const error = new Error(`Failed worker attempt must be explicitly confirmed stopped before reset: ${pageTask.pageId}`);
+      error.code = "EDITABLE_WORKER_CONFIRM_LOST_REQUIRED";
+      throw error;
+    }
+    assertCurrentAttempt(pageTask, options);
+  }
   if (pageTask.status === "recorded" && !options.forceRecorded) {
     throw new Error(`Recorded task cannot be reset without force: ${pageTask.pageId}`);
   }
   let job = await readWorkflowJob(jobId);
   let editpptReset = null;
-  if (pageTask.status !== "ready" || options.forceEditpptReset) {
-    try {
+  let resetTransaction = beginResetTransaction(pageTask, options);
+  try {
+    const editpptAlreadyReset = ["editppt-reset", "artifacts-archived", "state-committed", "complete"].includes(resetTransaction.stage);
+    if (!editpptAlreadyReset && (pageTask.status !== "ready" || options.forceEditpptReset)) {
       job = await resetWorkflowEditablePage(jobId, {
         ...options,
         pageId: pageTask.pageId,
         agentId: options.agentId || pageTask.agentId || "",
-        confirmLost: Boolean(options.confirmLost || options.confirm_lost || pageTask.status === "running" || pageTask.status === "claimed")
+        resetTransactionId: resetTransaction.id,
+        confirmLost: Boolean(options.confirmLost || options.confirm_lost)
       });
       editpptReset = { ok: true };
-    } catch (error) {
-      if (!options.allowQueueOnlyReset) throw error;
-      editpptReset = { ok: false, error: error.message || "editppt reset failed" };
-      job = await readWorkflowJob(jobId);
+      resetTransaction = advanceResetTransaction(resetTransaction, "editppt-reset", { editpptReset });
+    } else {
+      editpptReset = resetTransaction.editpptReset || { ok: true, skipped: true };
     }
+    const failureReason = cleanString(options.failureReason || options.reason || pageTask.error || "worker execution failed");
+    const shouldArchiveArtifacts = Boolean(
+      options.clearGeneratedArtifacts
+      || options.archiveGeneratedArtifacts
+      || failureRelease
+      || pageTask.status === "failed"
+    );
+    const archiveAlreadyComplete = ["artifacts-archived", "state-committed", "complete"].includes(resetTransaction.stage);
+    const archivedArtifacts = archiveAlreadyComplete
+      ? resetTransaction.archivedArtifacts || null
+      : shouldArchiveArtifacts
+        ? archiveGeneratedPageArtifacts(pageTask.pageDir, {
+          reason: failureReason,
+          transactionId: resetTransaction.id,
+          preserveGeneratedAssets: options.preserveGeneratedAssets === true
+        })
+        : null;
+    if (!archiveAlreadyComplete) resetTransaction = advanceResetTransaction(resetTransaction, "artifacts-archived", { archivedArtifacts });
+    const now = new Date().toISOString();
+    const failureKind = failureRelease ? classifyEditableWorkerFailure(failureReason) : cleanString(pageTask.failureKind || "");
+    const tasks = updateTask(job, pageTask.pageId, {
+      status: failureRelease ? "failed" : "ready",
+      agentId: "",
+      workerName: "",
+      claimedAt: "",
+      dispatchAt: "",
+      heartbeatAt: "",
+      recordedAt: "",
+      error: failureRelease ? failureReason : "",
+      message: failureRelease ? "页面执行失败，需先查看原因并重置后才能重跑。" : cleanString(options.reason || "reset for retry"),
+      failedAt: failureRelease ? now : cleanString(pageTask.failedAt || ""),
+      failureKind,
+      failureCount: failureRelease ? Number(pageTask.failureCount || 0) + 1 : Number(pageTask.failureCount || 0),
+      retryPreparedAt: failureRelease ? cleanString(pageTask.retryPreparedAt || "") : now,
+      retryReason: failureRelease ? cleanString(pageTask.retryReason || "") : cleanString(options.reason || "manual reset after diagnosis"),
+      attemptId: failureRelease ? cleanString(pageTask.attemptId || "") : "",
+      leaseToken: failureRelease ? cleanString(pageTask.leaseToken || "") : ""
+    });
+    job.artifacts = {
+      ...(job.artifacts || {}),
+      editableWorkerTasks: tasks
+    };
+    job.events = appendEvent(job.events, "editable.worker_task_reset", `Worker task reset ${pageTask.pageId}`, {
+      pageId: pageTask.pageId,
+      previousStatus: pageTask.status,
+      nextStatus: failureRelease ? "failed" : "ready",
+      reason: failureReason,
+      failureKind,
+      editpptReset,
+      archivedArtifacts,
+      resetTransactionId: resetTransaction.id
+    });
+    const saved = await saveWorkflowJob(job);
+    resetTransaction = advanceResetTransaction(resetTransaction, "state-committed", { savedJobUpdatedAt: saved.updatedAt || "" });
+    advanceResetTransaction(resetTransaction, "complete", { completedAt: new Date().toISOString() });
+    return listWorkflowEditableWorkerTasks(saved.id, options);
+  } catch (error) {
+    failResetTransaction(resetTransaction, error);
+    await markResetRecoveryRequired(jobId, pageTask, resetTransaction, error).catch(() => {});
+    throw error;
   }
-  const archivedArtifacts = options.clearGeneratedArtifacts || options.archiveGeneratedArtifacts
-    ? archiveGeneratedPageArtifacts(pageTask.pageDir, { reason: options.reason || "" })
-    : null;
+}
+
+async function markResetRecoveryRequired(jobId, pageTask, transaction, error) {
+  const job = await readWorkflowJob(jobId);
+  const current = findTask(job.artifacts?.editableWorkerTasks || [], pageTask.pageId);
+  if (!current || current.status === "ready") return;
   const tasks = updateTask(job, pageTask.pageId, {
-    status: "ready",
-    agentId: "",
-    workerName: "",
-    claimedAt: "",
-    dispatchAt: "",
-    heartbeatAt: "",
-    recordedAt: "",
-    error: "",
-    message: cleanString(options.reason || "reset for retry")
+    status: "failed",
+    error: error?.message || "reset transaction interrupted",
+    message: "页面重置在中途被打断；再次执行重置会从已保存的检查点继续。",
+    failureKind: "reset-transaction-interrupted",
+    failedAt: new Date().toISOString(),
+    attemptId: cleanString(pageTask.attemptId || ""),
+    leaseToken: cleanString(pageTask.leaseToken || "")
   });
-  job.artifacts = {
-    ...(job.artifacts || {}),
-    editableWorkerTasks: tasks
-  };
-  job.events = appendEvent(job.events, "editable.worker_task_reset", `Worker task reset ${pageTask.pageId}`, {
+  job.artifacts = { ...(job.artifacts || {}), editableWorkerTasks: tasks };
+  job.events = appendEvent(job.events, "editable.worker_task_reset_interrupted", `Reset interrupted ${pageTask.pageId}`, {
+    pageId: pageTask.pageId,
+    resetTransactionId: transaction.id,
+    checkpoint: transaction.stage,
+    error: error?.message || "reset transaction interrupted"
+  });
+  await saveWorkflowJob(job);
+}
+
+function beginResetTransaction(pageTask, options = {}) {
+  const file = resetTransactionPath(pageTask.pageDir);
+  const existing = readResetTransaction(file);
+  const sameAttempt = existing
+    && cleanString(existing.attemptId || "") === cleanString(pageTask.attemptId || "")
+    && cleanString(existing.leaseToken || "") === cleanString(pageTask.leaseToken || "");
+  if (existing && existing.pageId === pageTask.pageId && sameAttempt && existing.status !== "complete") {
+    return { ...existing, file, resumedAt: new Date().toISOString() };
+  }
+  const transaction = {
+    id: crypto.randomUUID(),
     pageId: pageTask.pageId,
     previousStatus: pageTask.status,
-    reason: cleanString(options.reason || ""),
-    editpptReset,
-    archivedArtifacts
-  });
-  const saved = await saveWorkflowJob(job);
-  return listWorkflowEditableWorkerTasks(saved.id, options);
+    attemptId: cleanString(pageTask.attemptId || ""),
+    leaseToken: cleanString(pageTask.leaseToken || ""),
+    stage: "prepared",
+    status: "running",
+    reason: cleanString(options.failureReason || options.reason || pageTask.error || "reset for retry"),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    file
+  };
+  writeResetTransaction(transaction);
+  return transaction;
+}
+
+function advanceResetTransaction(transaction, stage, details = {}) {
+  const next = {
+    ...transaction,
+    ...details,
+    stage,
+    status: stage === "complete" ? "complete" : "running",
+    updatedAt: new Date().toISOString()
+  };
+  writeResetTransaction(next);
+  return next;
+}
+
+function failResetTransaction(transaction, error) {
+  try {
+    writeResetTransaction({
+      ...transaction,
+      status: "failed",
+      error: error?.message || "reset transaction failed",
+      failedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+  } catch {
+    // Preserve the original reset error; the last durable checkpoint remains resumable.
+  }
+}
+
+function resetTransactionPath(pageDir = "") {
+  const root = path.resolve(String(pageDir || ""));
+  if (!root || !fsSync.existsSync(root)) throw new Error("Reset transaction page directory not found");
+  return path.join(root, RESET_TRANSACTION_FILE);
+}
+
+function readResetTransaction(file = "") {
+  try {
+    return JSON.parse(fsSync.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeResetTransaction(transaction = {}) {
+  const file = transaction.file;
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  const payload = { ...transaction };
+  delete payload.file;
+  try {
+    fsSync.writeFileSync(temp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    renameWithRetrySync(temp, file);
+  } finally {
+    if (fsSync.existsSync(temp)) {
+      try { fsSync.unlinkSync(temp); } catch {}
+    }
+  }
 }
 
 function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
@@ -281,6 +476,7 @@ function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
   if (!root || !fsSync.existsSync(root) || !fsSync.statSync(root).isDirectory()) {
     return { ok: false, archived: 0, reason: "page directory not found" };
   }
+  const preserveGeneratedAssets = options.preserveGeneratedAssets === true;
   const names = [
     "manifest.json",
     "imagegen-jobs.json",
@@ -291,46 +487,80 @@ function archiveGeneratedPageArtifacts(pageDir = "", options = {}) {
     "page_result.json",
     "page-rebuild-spec.json",
     "page-spec-fallback.json",
-    "visual-asset-jobs.json",
+    ...(preserveGeneratedAssets ? [] : ["visual-asset-jobs.json"]),
     "model-page-spec-prompt.json",
     "model-page-spec-response.json",
     "model-page-spec-source-preview.jpg"
   ];
-  const directories = [
-    "assets",
-    path.join("prompts", "image-assets")
-  ];
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const archiveDir = path.join(root, ".retry-archive", stamp);
+  const directories = preserveGeneratedAssets
+    ? []
+    : ["assets", path.join("prompts", "image-assets")];
+  const transactionId = cleanString(options.transactionId || new Date().toISOString().replace(/[:.]/g, "-"))
+    .replace(/[^A-Za-z0-9._-]/g, "-");
+  const archiveDir = path.join(root, ".retry-archive", transactionId);
   const moved = [];
   fsSync.mkdirSync(archiveDir, { recursive: true });
-  for (const name of names) {
-    const source = path.join(root, name);
-    if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
-    const target = path.join(archiveDir, name);
-    fsSync.mkdirSync(path.dirname(target), { recursive: true });
-    fsSync.renameSync(source, target);
-    moved.push(name);
+  try {
+    for (const name of [...names, ...directories]) {
+      const source = path.join(root, name);
+      if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
+      const target = path.join(archiveDir, name);
+      fsSync.mkdirSync(path.dirname(target), { recursive: true });
+      renameWithRetrySync(source, target);
+      moved.push(name);
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    for (const name of [...moved].reverse()) {
+      const source = path.join(root, name);
+      const target = path.join(archiveDir, name);
+      try {
+        if (fsSync.existsSync(target) && !fsSync.existsSync(source)) {
+          fsSync.mkdirSync(path.dirname(source), { recursive: true });
+          renameWithRetrySync(target, source);
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(`${name}: ${rollbackError.message || rollbackError}`);
+      }
+    }
+    if (rollbackErrors.length) error.message = `${error.message}; rollback incomplete: ${rollbackErrors.join(" | ")}`;
+    throw error;
   }
-  for (const name of directories) {
-    const source = path.join(root, name);
-    if (!isInsidePath(source, root) || !fsSync.existsSync(source)) continue;
-    const target = path.join(archiveDir, name);
-    fsSync.mkdirSync(path.dirname(target), { recursive: true });
-    fsSync.renameSync(source, target);
-    moved.push(name);
-  }
-  if (!moved.length) {
+  const archivedEntries = listArchivedEntries(archiveDir);
+  if (!archivedEntries.length) {
     try { fsSync.rmdirSync(archiveDir); } catch {}
-  } else {
+  } else if (!fsSync.existsSync(path.join(archiveDir, "archive_reason.txt"))) {
     fsSync.writeFileSync(path.join(archiveDir, "archive_reason.txt"), cleanString(options.reason || "reset for retry"), "utf8");
   }
   return {
     ok: true,
-    archived: moved.length,
-    archiveDir: moved.length ? archiveDir : "",
-    files: moved
+    archived: archivedEntries.length,
+    archiveDir: archivedEntries.length ? archiveDir : "",
+    files: archivedEntries,
+    preservedGeneratedAssets: preserveGeneratedAssets
   };
+}
+
+function listArchivedEntries(archiveDir = "") {
+  if (!archiveDir || !fsSync.existsSync(archiveDir)) return [];
+  return fsSync.readdirSync(archiveDir, { withFileTypes: true })
+    .filter((entry) => entry.name !== "archive_reason.txt")
+    .map((entry) => entry.name);
+}
+
+function renameWithRetrySync(source, target, attempts = 4) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      fsSync.renameSync(source, target);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!["EBUSY", "EPERM", "EACCES"].includes(error?.code) || attempt === attempts - 1) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function isInsidePath(candidate, parent) {
@@ -341,7 +571,7 @@ function isInsidePath(candidate, parent) {
 async function ensureTasks(jobId, options = {}) {
   const current = await listWorkflowEditableWorkerTasks(jobId, options);
   if (current.tasks.length) return current;
-  return syncWorkflowEditableWorkerTasks(jobId, options);
+  return syncWorkflowEditableWorkerTasksUnlocked(jobId, options);
 }
 
 function toTaskBundle(job, promptBundle, tasks) {
@@ -395,11 +625,44 @@ function normalizeTask(task = {}) {
     dispatchAt: cleanString(task.dispatchAt || ""),
     heartbeatAt: cleanString(task.heartbeatAt || ""),
     recordedAt: cleanString(task.recordedAt || ""),
+    attemptId: cleanString(task.attemptId || ""),
+    leaseToken: cleanString(task.leaseToken || ""),
     error: cleanString(task.error || ""),
     message: cleanString(task.message || ""),
+    failedAt: cleanString(task.failedAt || ""),
+    failureKind: cleanString(task.failureKind || ""),
+    failureCount: Number.isFinite(Number(task.failureCount)) ? Number(task.failureCount) : 0,
+    retryPreparedAt: cleanString(task.retryPreparedAt || ""),
+    retryReason: cleanString(task.retryReason || ""),
     createdAt: cleanString(task.createdAt || new Date().toISOString()),
     updatedAt: cleanString(task.updatedAt || task.createdAt || new Date().toISOString())
   };
+}
+
+function classifyEditableWorkerFailure(value = "") {
+  const text = String(value || "");
+  if (/visual similarity|visual fidelity|preview-structure-loss|视觉.*(?:差异|匹配)/i.test(text)) return "visual-fidelity-failed";
+  if (/Output already exists|already exists.*overwrite/i.test(text)) return "stale-generated-artifacts";
+  if (/timeout|timed out|HTTP 524/i.test(text)) return "provider-timeout";
+  if (/quota|credit|billing|insufficient/i.test(text)) return "provider-quota-exhausted";
+  if (/401|403|authentication|unauthorized|API key/i.test(text)) return "provider-auth-failed";
+  if (/parsed JSON|parseable JSON|JSON.*(?:invalid|parse)/i.test(text)) return "page-spec-json-invalid";
+  if (/required assets are missing|needed_visual_asset_jobs/i.test(text)) return "required-assets-missing";
+  if (/validation|recordable|contract/i.test(text)) return "page-validation-failed";
+  return "worker-execution-failed";
+}
+
+function assertCurrentAttempt(task = {}, options = {}) {
+  const attemptId = cleanString(options.attemptId || options.attempt_id || "");
+  const leaseToken = cleanString(options.leaseToken || options.lease_token || "");
+  if (!task.attemptId || !task.leaseToken) {
+    throw new Error(`Worker task has no active attempt lease: ${task.pageId}`);
+  }
+  if (attemptId !== task.attemptId || leaseToken !== task.leaseToken) {
+    const error = new Error(`Worker attempt is stale for ${task.pageId}. Refresh the task before sending heartbeat or completion.`);
+    error.code = "EDITABLE_WORKER_ATTEMPT_STALE";
+    throw error;
+  }
 }
 
 function enrichTaskEvidence(task = {}) {

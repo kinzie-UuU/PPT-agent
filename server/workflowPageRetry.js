@@ -8,6 +8,15 @@ import { getWorkflowEditableWorkerBatchPreflight } from "./workflowWorkerBatchRu
 import { listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask } from "./workflowWorkerQueue.js";
 import { scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
 
+const EDITABLE_VISUAL_RETRY_ISSUES = new Set([
+  "editable-preview-missing",
+  "preview-too-small-simplified",
+  "preview-aspect-ratio-mismatch",
+  "preview-visual-similarity-low",
+  "preview-structure-loss",
+  "asset-checkerboard-background"
+]);
+
 export async function retryWorkflowPage(jobId, pageId, options = {}) {
   const normalizedPageId = normalizePageId(pageId);
   if (!normalizedPageId) throw new Error("A valid page id is required");
@@ -86,7 +95,13 @@ export async function getVisualQualityRetryPreflight(jobId, options = {}) {
     };
   });
   const resettablePages = candidateDetails.filter((page) => page.codexTask?.resettable).map((page) => page.pageId);
-  const authorization = getExternalImageAuthorizationStatus(job, { scope: "full-deck", imageCalls: resettablePages.length });
+  const resettablePageNumbers = resettablePages.map((pageId) => Number(pageId.match(/\d+/)?.[0] || 0)).filter(Boolean);
+  const authorization = getExternalImageAuthorizationStatus(job, {
+    scope: "full-deck",
+    imageCalls: resettablePages.length,
+    pages: resettablePageNumbers,
+    pageSelection: resettablePages.join(",")
+  });
   const blockingIssues = [];
   const warnings = [];
   if (!reportPath || !fsSync.existsSync(reportPath)) blockingIssues.push("Visual quality report is missing.");
@@ -145,14 +160,19 @@ export async function getFinalVisualQaRetryPreflight(jobId, options = {}) {
   const pages = Array.isArray(visualQa.pages) ? visualQa.pages : [];
   const requestedPages = parsePageList(options.pages || options.pageIds || options.pageId || options.page || "");
   const candidates = pages
-    .filter((page) => Array.isArray(page.issues) && page.issues.length)
+    .map((page) => ({
+      ...page,
+      retryIssues: (Array.isArray(page.issues) ? page.issues : []).filter((issue) => EDITABLE_VISUAL_RETRY_ISSUES.has(String(issue || "")))
+    }))
+    .filter((page) => page.retryIssues.length)
     .filter((page) => !requestedPages.length || requestedPages.includes(normalizePageId(page.pageId)))
     .map((page) => ({
       pageId: normalizePageId(page.pageId),
-      issues: Array.isArray(page.issues) ? page.issues : [],
+      issues: page.retryIssues,
       targetSize: Number(page.targetSize || 0),
       previewSize: Number(page.previewSize || 0),
       previewToTargetBytes: Number(page.previewToTargetBytes || 0),
+      visualSimilarity: page.visualSimilarity || null,
       targetPath: page.targetPath || "",
       previewPath: page.previewPath || ""
     }))
@@ -458,7 +478,9 @@ async function buildStaleEvidenceWorkerBatchPreview(jobId, candidates = [], opti
   const externalImageRequired = selectedPageIds.length > 0;
   const authorization = getExternalImageAuthorizationStatus(job, {
     scope: "editable-workers",
-    imageCalls: selectedPageIds.length
+    imageCalls: selectedPageIds.length,
+    pages: selectedPageIds,
+    pageSelection: selectedPageIds.join(",")
   });
   const offlineHintsAccepted = Boolean(
     options.acceptOfflineTextHints
@@ -607,6 +629,8 @@ async function retryEditableTask(jobId, pageId, options = {}) {
     reason: options.reason || "product page retry",
     allowQueueOnlyReset: true,
     confirmLost: true,
+    attemptId: task.attemptId || "",
+    leaseToken: task.leaseToken || "",
     clearGeneratedArtifacts: Boolean(options.clearGeneratedArtifacts || isFailedEditableRetryCandidate(task))
   });
   return {

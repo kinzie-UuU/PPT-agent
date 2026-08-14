@@ -29,7 +29,7 @@ async function main() {
   const runDir = path.resolve(runPointer.runDir || state.artifacts?.editableRun?.path || "");
   if (!fsSync.existsSync(runDir)) throw new Error(`Editable run not found: ${runDir}`);
 
-  const textHintsPath = state.artifacts?.ocrTextHints?.path || "";
+  const textHintsPath = state.artifacts?.visualOcrTextHints?.path || state.artifacts?.ocrTextHints?.path || "";
   const textHints = textHintsPath && fsSync.existsSync(textHintsPath) ? await readJson(textHintsPath) : null;
   const promptRecords = Array.isArray(state.artifacts?.editableWorkerPrompts) ? state.artifacts.editableWorkerPrompts : [];
   const taskRecords = Array.isArray(state.artifacts?.editableWorkerTasks) ? state.artifacts.editableWorkerTasks : [];

@@ -5,11 +5,19 @@ import crypto from "crypto";
 import zlib from "zlib";
 import { rootDir } from "./store.js";
 import { editImageWithProvider, generateImageWithProvider, getProviderConfig } from "./providers.js";
-import { CODEX_PPT_VISUAL_DECK_GATES, isCodexPptFullDeckApprovalCurrent } from "./workflowApprovals.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, getRenderedPages } from "./workflowVisuals.js";
+import { CODEX_PPT_VISUAL_DECK_GATES, isCodexPptFullDeckApprovalCurrent, isCodexPptSampleApprovalCurrent } from "./workflowApprovals.js";
+import {
+  artifactRecord,
+  assembleWorkflowImageDeck,
+  assertWorkflowVisualGenerationAllowed,
+  discoverVisualImages,
+  getRenderedPages,
+  markStage,
+  writeVisualQualityReport
+} from "./workflowVisuals.js";
 import { buildWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun } from "./workflowEditable.js";
 import { syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
-import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
+import { consumeExternalImageSpendAuthorization, getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
 import {
   claimWorkflowCodexPptSlideTask,
   completeWorkflowCodexPptSlideTask,
@@ -18,6 +26,7 @@ import {
   syncWorkflowCodexPptSlideTasks
 } from "./workflowCodexPptWorkerQueue.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { getWorkflowOcrCoverage, runWorkflowOcr } from "./workflowOcr.js";
 
 export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
   const synced = await syncWorkflowCodexPptSlideTasks(jobId, options);
@@ -32,7 +41,7 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
     ...options,
     confirmExternalImageSpend: Boolean(preflight.requiredConfirmations?.externalImageSpend?.confirmed)
   });
-  const job = await readWorkflowJob(jobId);
+  let job = await readWorkflowJob(jobId);
   const runId = makeRunId();
   const agentPrefix = cleanToken(options.agentPrefix || "product-codex-slide-batch");
   const selectedTasks = selectRunnableTasks(synced.tasks || [], options);
@@ -42,57 +51,89 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
   const startedAt = new Date().toISOString();
   const results = [];
   const errors = [];
+  if (preflight.requiredConfirmations?.externalImageSpend?.source === "authorization-ledger") {
+    const selectedPages = selectedTasks.map((task) => task.pageNumber).filter(Boolean);
+    job = (await consumeExternalImageSpendAuthorization(jobId, {
+      scope: "full-deck",
+      imageCalls: selectedTasks.length,
+      pages: selectedPages,
+      pageSelection: selectedPages.join(","),
+      runId,
+      consumedBy: options.requestedBy || "codex-ppt-slide-batch"
+    })).job;
+  }
   const confirmedExternalImageSpend = Boolean(
     preflight.requiredConfirmations?.externalImageSpend?.confirmed
     || options.confirmExternalImageSpend
     || options.confirmSpend
     || options.confirmImageApiSpend
   );
+  await recordBatchRun(jobId, {
+    id: runId,
+    kind: "codex_ppt_slide_batch_run",
+    status: "running",
+    nonProduct,
+    requested: selectedTasks.length,
+    recorded: 0,
+    failed: 0,
+    pages: cleanString(options.pages || ""),
+    maxPages: clampInteger(options.maxPages, 1, 200, selectedTasks.length || 20),
+    agentPrefix,
+    results: [],
+    errors: [],
+    runDir,
+    relativeRunDir: path.relative(rootDir, runDir),
+    startedAt,
+    finishedAt: ""
+  });
 
-  for (const task of selectedTasks) {
+  await runSequentialSlideTasks(selectedTasks, async (task) => {
     const agentId = `${agentPrefix}-${task.pageId}`;
-    try {
-      await claimWorkflowCodexPptSlideTask(jobId, task.pageId, {
-        agentId,
-        workerName: "product codex-ppt slide batch",
-        confirmSpawned: true,
-        spawned: true,
-        dispatchMode: "product-codex-slide-batch",
-        message: "claimed by product codex-ppt slide batch runner"
-      });
-      const promptPayload = await readPromptPayload(job, task);
-      const image = nonProduct
-        ? await writePlaceholderImage(runDir, task, promptPayload)
-        : await createCodexSlideImage(job, task, promptPayload);
-      const completed = await completeWorkflowCodexPptSlideTask(jobId, task.pageId, {
-        agentId,
-        imagePath: image.path,
-        confirmExternalImageSpend: confirmedExternalImageSpend,
-        provider: image.provider || (nonProduct ? "passthrough" : ""),
-        baseUrl: image.baseUrl || "",
-        model: image.model || "",
-        dryRun: Boolean(nonProduct),
-        passthrough: Boolean(nonProduct),
-        allowNonProductVisual: Boolean(nonProduct),
-        source: nonProduct ? "codex-slide-batch-placeholder" : "product-codex-slide-batch",
-        qaNote: nonProduct ? "Regression placeholder recorded by codex-ppt slide batch runner." : "Generated and recorded by product codex-ppt slide batch runner."
-      });
-      results.push({
-        pageId: task.pageId,
-        pageNumber: task.pageNumber,
-        status: "recorded",
-        imagePath: image.path,
-        provider: image.provider || (nonProduct ? "passthrough" : ""),
-        model: image.model || "",
-        summary: completed.summary || null
-      });
-    } catch (error) {
-      const message = error.message || "codex-ppt slide batch failed";
+    await claimWorkflowCodexPptSlideTask(jobId, task.pageId, {
+      agentId,
+      workerName: "product codex-ppt slide batch",
+      confirmSpawned: true,
+      spawned: true,
+      dispatchMode: "product-codex-slide-batch",
+      message: "claimed by product codex-ppt slide batch runner"
+    });
+    const promptPayload = await readPromptPayload(job, task);
+    const image = nonProduct
+      ? await writePlaceholderImage(runDir, task, promptPayload)
+      : await createCodexSlideImage(job, task, promptPayload);
+    const completed = await completeWorkflowCodexPptSlideTask(jobId, task.pageId, {
+      agentId,
+      imagePath: image.path,
+      confirmExternalImageSpend: confirmedExternalImageSpend,
+      provider: image.provider || (nonProduct ? "passthrough" : ""),
+      baseUrl: image.baseUrl || "",
+      model: image.model || "",
+      dryRun: Boolean(nonProduct),
+      passthrough: Boolean(nonProduct),
+      allowNonProductVisual: Boolean(nonProduct),
+      source: nonProduct ? "codex-slide-batch-placeholder" : "product-codex-slide-batch",
+      referenceImagePaths: image.referenceImagePaths || [],
+      approvedSampleSha256: resolveAppliedSampleSha256(job, image),
+      qaNote: nonProduct ? "Regression placeholder recorded by codex-ppt slide batch runner." : "Generated and recorded by product codex-ppt slide batch runner."
+    });
+    results.push({
+      pageId: task.pageId,
+      pageNumber: task.pageNumber,
+      status: "recorded",
+      imagePath: image.path,
+      provider: image.provider || (nonProduct ? "passthrough" : ""),
+      model: image.model || "",
+      summary: completed.summary || null
+    });
+  }, {
+    stopOnError: Boolean(options.stopOnError),
+    onError: async (error, task) => {
+      const message = sanitizeBatchError(error);
+      const agentId = `${agentPrefix}-${task.pageId}`;
       errors.push({ pageId: task.pageId, pageNumber: task.pageNumber, error: message });
       await markWorkflowCodexPptSlideTaskFailed(jobId, task.pageId, { agentId, error: message }).catch(() => null);
-      if (options.stopOnError) break;
     }
-  }
+  });
 
   const finalBundle = await listWorkflowCodexPptSlideTasks(jobId);
   let imageDeck = null;
@@ -101,12 +142,18 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
   let editablePrepareError = "";
   let editableWorkerTaskBundle = null;
   let editableWorkerPromptError = "";
+  let visualQuality = null;
+  let visualReviewRequired = false;
   const shouldAssembleImageDeck = Boolean(options.assembleImageDeck || options.autoAssembleImageDeck);
   const shouldPrepareEditable = Boolean(options.prepareEditable || options.autoPrepareEditable);
   const shouldBuildEditablePrompts = Boolean(options.buildEditablePrompts || options.autoBuildEditablePrompts || options.syncEditableWorkerTasks);
   const allRecorded = Number(finalBundle.summary?.total || 0) > 0
     && Number(finalBundle.summary?.recorded || 0) >= Number(finalBundle.summary?.total || 0)
     && Number(finalBundle.summary?.failed || 0) === 0;
+  const requestedOutputIncomplete = shouldAssembleImageDeck && !allRecorded;
+  if (errors.length === 0 && allRecorded) {
+    visualQuality = await refreshBatchVisualQuality(jobId);
+  }
   if (shouldAssembleImageDeck && errors.length === 0 && allRecorded) {
     try {
       const deckJob = await assembleWorkflowImageDeck(jobId, {
@@ -114,12 +161,13 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
       });
       imageDeck = deckJob.artifacts?.imageDeck || null;
     } catch (error) {
-      imageDeckError = error.message || "image deck assembly failed";
-      errors.push({ pageId: "", pageNumber: 0, error: imageDeckError });
+      imageDeckError = sanitizeBatchError(error || "image deck assembly failed");
+      if (isVisualReviewGateError(error)) visualReviewRequired = true;
+      else errors.push({ pageId: "", pageNumber: 0, error: imageDeckError });
     }
   }
   const imageDeckReady = !shouldAssembleImageDeck || Boolean(imageDeck?.path);
-  if (shouldPrepareEditable && errors.length === 0 && allRecorded && imageDeckReady) {
+  if (shouldPrepareEditable && errors.length === 0 && allRecorded && imageDeckReady && !visualReviewRequired) {
     try {
       const editableJob = await prepareWorkflowEditableRun(jobId, {
         force: options.forceEditablePrepare !== false,
@@ -135,7 +183,7 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
       });
       editableRun = editableJob.artifacts?.editableRun || null;
     } catch (error) {
-      editablePrepareError = error.message || "editable prepare failed";
+      editablePrepareError = sanitizeBatchError(error || "editable prepare failed");
       errors.push({ pageId: "", pageNumber: 0, stage: "editable/prepare", error: editablePrepareError });
     }
   }
@@ -147,14 +195,14 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
       });
       editableWorkerTaskBundle = await syncWorkflowEditableWorkerTasks(jobId, {});
     } catch (error) {
-      editableWorkerPromptError = error.message || "editable worker prompt build failed";
+      editableWorkerPromptError = sanitizeBatchError(error || "editable worker prompt build failed");
       errors.push({ pageId: "", pageNumber: 0, stage: "editable/prompts", error: editableWorkerPromptError });
     }
   }
   const run = {
     id: runId,
     kind: "codex_ppt_slide_batch_run",
-    status: errors.length ? "failed" : "complete",
+    status: errors.length ? "failed" : visualReviewRequired ? "review_required" : requestedOutputIncomplete ? "partial" : "complete",
     nonProduct,
     confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend || options.confirmSpend),
     requested: selectedTasks.length,
@@ -165,6 +213,9 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
     agentPrefix,
     results,
     errors,
+    visualQuality,
+    visualReviewRequired,
+    allRecorded,
     imageDeck,
     imageDeckError,
     editableRun,
@@ -178,7 +229,7 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
   };
   await recordBatchRun(jobId, run);
   return {
-    ok: errors.length === 0,
+    ok: run.status === "complete",
     jobId,
     run: publicRun(run),
     taskBundle: finalBundle,
@@ -187,6 +238,57 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
     editableWorkerTaskBundle,
     summary: finalBundle.summary
   };
+}
+
+async function refreshBatchVisualQuality(jobId) {
+  const job = await readWorkflowJob(jobId);
+  const visualImages = await discoverVisualImages(job.dirs.visualImages, job.artifacts?.visualManifest?.path || "");
+  const renderedPages = getRenderedPages(job);
+  const quality = await writeVisualQualityReport(job, visualImages, renderedPages);
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    visualImages,
+    visualQuality: artifactRecord("visual_quality_report", quality.path, quality.summary)
+  };
+  job.currentStage = "visual_generating";
+  job.status = "image_deck_review_required";
+  job.stageStatus = "complete";
+  job.stages.visual_generating = markStage(job.stages.visual_generating, "complete", "All visual pages are ready for full-deck review", {
+    visualImages: visualImages.length,
+    reviewCount: quality.summary?.reviewCount || 0,
+    styleDriftCount: quality.summary?.styleConsistency?.driftCount || 0
+  });
+  job.stages.image_deck_ready = markStage(job.stages.image_deck_ready, "pending", "Full-deck visual review is required before image deck assembly", {
+    visualImages: visualImages.length
+  });
+  job.events = appendEvent(job.events, "visual_quality.rebuilt", "Rebuilt full-deck visual quality after slide generation", {
+    pageCount: visualImages.length,
+    reviewCount: quality.summary?.reviewCount || 0,
+    styleDriftCount: quality.summary?.styleConsistency?.driftCount || 0
+  });
+  await saveWorkflowJob(job);
+  const visualOcrJob = await runWorkflowOcr(jobId, {
+    source: "visual",
+    pages: visualImages.map((image) => image.pageId || image.pageNumber).join(","),
+    maxPages: visualImages.length,
+    preserveWorkflowStage: true,
+    requestedBy: "codex-ppt-slide-batch-local-text-qa"
+  });
+  return visualOcrJob.artifacts.visualQuality;
+}
+
+function isVisualReviewGateError(error) {
+  return new Set([
+    "IMAGE_DECK_REVIEW_REQUIRED",
+    "IMAGE_DECK_REVIEW_INCOMPLETE",
+    "IMAGE_DECK_VISUAL_QUALITY_REQUIRED",
+    "IMAGE_DECK_VISUAL_QUALITY_INVALID",
+    "IMAGE_DECK_VISUAL_QUALITY_STALE",
+    "IMAGE_DECK_SOURCE_OCR_REQUIRED",
+    "IMAGE_DECK_TEXT_QUALITY_REQUIRED",
+    "IMAGE_DECK_SEMANTIC_QUALITY_BLOCKED",
+    "IMAGE_DECK_STYLE_DRIFT"
+  ]).has(String(error?.code || ""));
 }
 
 export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}) {
@@ -200,12 +302,22 @@ export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}
   const provider = providers.image || {};
   const backendRuntime = buildCodexSlideBackendRuntimeEvidence(providers, job.artifacts?.codexPptBackendDecision);
   const externalImageRequired = !nonProduct;
+  const selectedPageNumbers = selectedTasks.map((task) => task.pageNumber).filter(Boolean);
   const authorization = externalImageRequired
-    ? getExternalImageAuthorizationStatus(job, { scope: "full-deck", imageCalls: selectedTasks.length })
+    ? getExternalImageAuthorizationStatus(job, {
+      scope: "full-deck",
+      imageCalls: selectedTasks.length,
+      pages: selectedPageNumbers,
+      pageSelection: selectedPageNumbers.join(",")
+    })
     : null;
-  const externalImageConfirmed = Boolean(options.confirmExternalImageSpend || options.confirmSpend || authorization?.persisted);
+  const requestExternalImageConfirmed = Boolean(options.confirmExternalImageSpend || options.confirmSpend || options.confirmImageApiSpend);
+  const externalImageConfirmed = Boolean(requestExternalImageConfirmed || authorization?.persisted);
   const blockingIssues = [];
   const warnings = [];
+  const ocrCoverage = getWorkflowOcrCoverage(job, {
+    pages: selectedTasks.map((task) => task.pageId)
+  });
   if (!approvals.ready) {
     blockingIssues.push(`Missing codex-ppt approval gate(s): ${approvals.missing.join(", ")}`);
   }
@@ -213,6 +325,9 @@ export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}
     blockingIssues.push("No codex-ppt slide worker tasks are synced. Sync the slide queue after full-deck approval.");
   } else if (!selectedTasks.length) {
     blockingIssues.push("No ready or failed codex-ppt slide tasks are available for batch generation.");
+  }
+  if (!ocrCoverage.complete) {
+    blockingIssues.push(`Source-page OCR evidence is missing for ${ocrCoverage.missingPageIds.join(", ") || "the selected pages"}. Run local OCR before image generation.`);
   }
   if (externalImageRequired && (!provider.configured || provider.enabled === false)) {
     blockingIssues.push("External image API provider is not configured or enabled.");
@@ -235,6 +350,7 @@ export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}
     selectedPages: selectedTasks.map((task) => task.pageNumber).filter(Boolean),
     counts: taskBundle.summary || summarizeTasks(tasks),
     approvals,
+    ocrCoverage,
     provider: {
       configured: Boolean(provider.configured),
       enabled: provider.enabled !== false,
@@ -248,7 +364,7 @@ export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}
         required: externalImageRequired,
         confirmed: externalImageRequired ? externalImageConfirmed : false,
         persisted: Boolean(authorization?.persisted),
-        source: authorization?.persisted ? "authorization-ledger" : externalImageConfirmed ? "request-confirmation" : "missing"
+        source: requestExternalImageConfirmed ? "request-confirmation" : authorization?.persisted ? "authorization-ledger" : "missing"
       }
     },
     cost: {
@@ -308,6 +424,52 @@ function looksLikeDryRun(value = "") {
   return /\b(regression|dry[-_\s]?run|passthrough|source[-_\s]?page[-_\s]?passthrough)\b/i.test(String(value || ""));
 }
 
+export function isBatchInfrastructureError(error) {
+  if (String(error?.code || "") === "PROVIDER_CONNECTION_FAILED") return true;
+  const networkCodes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "ETIMEDOUT",
+    "ENETUNREACH",
+    "EAI_AGAIN",
+    "UND_ERR_CONNECT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_SOCKET"
+  ]);
+  let cause = error;
+  for (let depth = 0; cause && depth < 4; depth += 1) {
+    if (networkCodes.has(String(cause.code || "").toUpperCase())) return true;
+    cause = cause.cause;
+  }
+  const message = String(error?.message || error || "").trim();
+  return /^(fetch failed|provider connection failed\b|\u56fe\u7247\u670d\u52a1\s+\S+\s+\u8fde\u63a5\u5931\u8d25)/i.test(message);
+}
+
+export async function runSequentialSlideTasks(tasks = [], executeTask, options = {}) {
+  const attempted = [];
+  for (const task of tasks) {
+    attempted.push(task);
+    try {
+      await executeTask(task);
+    } catch (error) {
+      await options.onError?.(error, task);
+      if (options.stopOnError || isBatchInfrastructureError(error)) break;
+    }
+  }
+  return attempted;
+}
+
+export function sanitizeBatchError(error) {
+  const fallback = "codex-ppt slide batch failed";
+  return String(error?.message || error || fallback)
+    .replace(/sk-[a-zA-Z0-9_-]{8,}/g, "sk-***")
+    .replace(/Bearer\s+[a-zA-Z0-9._~+/=-]{8,}/gi, "Bearer ***")
+    .replace(/(api[-_ ]?key|authorization)(["'\s:=]+)[a-zA-Z0-9._~+/=-]{8,}/gi, "$1$2***")
+    .replace(/https?:\/\/[^\s/@:]+:[^\s/@]+@/gi, "https://***:***@")
+    .slice(0, 500);
+}
+
 function normalizeBaseUrl(value = "") {
   return String(value || "").trim().replace(/\/+$/, "");
 }
@@ -335,10 +497,28 @@ async function readPromptPayload(job = {}, task = {}) {
 async function createCodexSlideImage(job = {}, task = {}, promptPayload = {}) {
   const prompt = providerPrompt(promptPayload.prompt || `Create presentation slide ${task.pageNumber}.`);
   const sourceImagePath = findSourceImagePath(job, task, promptPayload);
+  const referenceImagePaths = resolveCodexStyleReferenceImages(job, promptPayload);
+  const approvedSamplePath = safeExistingFile(job.artifacts?.visualSample?.path || "");
+  const sampleReferenceRequired = Boolean(
+    approvedSamplePath
+    && job.artifacts?.visualSample?.sha256
+    && isCodexPptSampleApprovalCurrent(job)
+  );
+  if (sampleReferenceRequired && !referenceImagePaths.some((item) => path.resolve(item) === path.resolve(approvedSamplePath))) {
+    const error = new Error("The current approved sample image is required as an actual image-edit reference.");
+    error.code = "CODEX_PPT_APPROVED_SAMPLE_REFERENCE_REQUIRED";
+    throw error;
+  }
+  if (sampleReferenceRequired && (!sourceImagePath || promptPayload.useSourceImageReference === false)) {
+    const error = new Error("The current source page is required together with the approved sample for style-locked image editing.");
+    error.code = "CODEX_PPT_SOURCE_IMAGE_REFERENCE_REQUIRED";
+    throw error;
+  }
   if (sourceImagePath && promptPayload.useSourceImageReference !== false) {
     return editImageWithProvider({
       prompt,
       sourceImagePath,
+      referenceImagePaths,
       width: 1536,
       height: 864,
       prefix: `${job.id}_${task.pageId}`
@@ -350,6 +530,25 @@ async function createCodexSlideImage(job = {}, task = {}, promptPayload = {}) {
     height: 864,
     prefix: `${job.id}_${task.pageId}`
   });
+}
+
+export function resolveAppliedSampleSha256(job = {}, image = {}) {
+  const sample = job.artifacts?.visualSample || {};
+  const samplePath = safeExistingFile(sample.path || "");
+  if (!sample.sha256 || !samplePath || !isCodexPptSampleApprovalCurrent(job)) return "";
+  const references = (Array.isArray(image.referenceImagePaths) ? image.referenceImagePaths : [])
+    .map((item) => path.resolve(item || ""));
+  return references.includes(path.resolve(samplePath)) ? sample.sha256 : "";
+}
+
+export function resolveCodexStyleReferenceImages(job = {}, promptPayload = {}) {
+  const candidates = [
+    ...(Array.isArray(promptPayload.styleReferenceImages) ? promptPayload.styleReferenceImages : []),
+    ...(Array.isArray(promptPayload.styleLock?.referenceImages) ? promptPayload.styleLock.referenceImages : []),
+    promptPayload.styleLock?.approvedSample?.path,
+    job.artifacts?.visualSample?.path
+  ];
+  return [...new Set(candidates.map(safeExistingFile).filter(Boolean))].slice(0, 2);
 }
 
 function findSourceImagePath(job = {}, task = {}, promptPayload = {}) {
@@ -375,7 +574,7 @@ function safeExistingFile(filePath = "") {
 }
 
 function providerPrompt(value = "") {
-  return cleanString(value || "")
+  return String(value || "").trim().slice(0, 12000)
     .replace(/[A-Za-z]:\\[^\s。；，,;]+/g, "the uploaded source page image")
     .replace(/Approved outline evidence:\s*the uploaded source page image\.?/gi, "Approved outline evidence: the uploaded source page image.");
 }
@@ -401,7 +600,16 @@ async function recordBatchRun(jobId, run) {
     ...(job.artifacts || {}),
     codexPptSlideBatchRuns: [run, ...runs.filter((item) => item.id !== run.id)].slice(0, 25)
   };
-  job.events = appendEvent(job.events, run.status === "complete" ? "codex-ppt.slide_batch_complete" : "codex-ppt.slide_batch_failed", `${run.id} ${run.status}`, {
+  const eventType = run.status === "running"
+    ? "codex-ppt.slide_batch_running"
+    : run.status === "complete"
+    ? "codex-ppt.slide_batch_complete"
+    : run.status === "review_required"
+      ? "codex-ppt.slide_batch_review_required"
+      : run.status === "partial"
+        ? "codex-ppt.slide_batch_partial"
+        : "codex-ppt.slide_batch_failed";
+  job.events = appendEvent(job.events, eventType, `${run.id} ${run.status}`, {
     runId: run.id,
     recorded: run.recorded,
     failed: run.failed,
@@ -424,13 +632,16 @@ function publicRun(run = {}) {
     relativeRunDir: run.relativeRunDir || "",
     startedAt: run.startedAt || "",
     finishedAt: run.finishedAt || "",
-    errors: run.errors || [],
+    errors: (run.errors || []).map((item) => ({ ...item, error: sanitizeBatchError(item?.error || "") })),
+    allRecorded: Boolean(run.allRecorded),
+    visualReviewRequired: Boolean(run.visualReviewRequired),
+    visualQuality: run.visualQuality || null,
     imageDeck: run.imageDeck || null,
-    imageDeckError: run.imageDeckError || "",
+    imageDeckError: sanitizeBatchError(run.imageDeckError || ""),
     editableRun: run.editableRun || null,
-    editablePrepareError: run.editablePrepareError || "",
+    editablePrepareError: sanitizeBatchError(run.editablePrepareError || ""),
     editableWorkerTaskSummary: run.editableWorkerTaskSummary || null,
-    editableWorkerPromptError: run.editableWorkerPromptError || ""
+    editableWorkerPromptError: sanitizeBatchError(run.editableWorkerPromptError || "")
   };
 }
 

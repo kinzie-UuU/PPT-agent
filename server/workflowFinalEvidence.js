@@ -18,6 +18,22 @@ const FOREGROUND_TERMS = /\b(icon|photo|logo|screenshot|badge|sticker|stamp|devi
 const FOREGROUND_ASSET_TERMS = /(icon|photo|logo|screenshot|badge|sticker|stamp|device|illustration|mark|brand|visual object)/i;
 const ASSET_SEPARATION_TERMS = /asset-sheet separated|asset sheet separated|image edit|separated|user-approved|user approved|rasterization|imagegen|分离/i;
 const STRUCTURAL_TERMS = /native structural|结构|background|formula|divider|rule|grid|panel|card|pagination|native background/i;
+const VISUAL_FIDELITY_CACHE = new Map();
+const FILE_HASH_CACHE = new Map();
+const POWERPOINT_OPENABILITY_CACHE = new Map();
+const FILE_HASH_CACHE_MAX_ENTRIES = 200;
+export const EDITABLE_VISUAL_SIMILARITY_MINIMUM = 0.93;
+export const EDITABLE_VISUAL_SIMILARITY_CRITICAL = 0.82;
+const BLOCKING_EDITABLE_VISUAL_ISSUES = new Set([
+  "target-visual-missing",
+  "editable-preview-missing",
+  "preview-too-small-simplified",
+  "preview-aspect-ratio-mismatch",
+  "preview-visual-similarity-critical",
+  "preview-structure-loss",
+  "visual-comparison-unavailable",
+  "asset-checkerboard-background"
+]);
 
 export async function scanWorkflowFinalEvidence(jobOrId) {
   const job = typeof jobOrId === "string" ? await readWorkflowJob(jobOrId) : jobOrId;
@@ -80,23 +96,18 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
   const sourceOutputHash = sourceOutputFile.exists ? await hashFile(sourceOutputPath).catch(() => "") : "";
   const openableRepairOk = final.openableRepair?.ok === true;
   const rawHashesMatch = Boolean(finalHash && sourceOutputHash && finalHash === sourceOutputHash);
-  const hashesMatch = rawHashesMatch || Boolean(openableRepairOk && finalHash && sourceOutputHash);
+  const hashesMatch = rawHashesMatch;
   if (finalHash && sourceOutputHash && !hashesMatch) issues.push("final-copy-hash-mismatch");
-  if (finalFile.exists && sourceOutputFile.exists && finalFile.size !== sourceOutputFile.size && !openableRepairOk) issues.push("final-copy-size-mismatch");
-  const powerPointOpenability = isUsableCachedPowerPointOpenability(final.powerPointOpenability, finalFile, final)
-    ? final.powerPointOpenability
-    : (finalFile.exists
-    ? await inspectPowerPointOpenability(finalPath).catch((error) => ({
-        version: 1,
-        source: "powerpoint-com-open",
-        available: process.platform === "win32",
-        openable: false,
-        slideCount: 0,
-        warnings: ["powerpoint-open-check-failed"],
-        error: error.message || "PowerPoint open check failed"
-      }))
-    : null);
-  if (powerPointOpenability?.openable === false) issues.push("final-pptx-powerpoint-open-failed");
+  if (finalFile.exists && sourceOutputFile.exists && finalFile.size !== sourceOutputFile.size) issues.push("final-copy-size-mismatch");
+  const powerPointOpenability = await resolvePowerPointOpenability({
+    cached: final.powerPointOpenability,
+    final,
+    finalFile,
+    finalHash,
+    finalPath
+  });
+  if (powerPointOpenability?.available !== true) issues.push("final-pptx-powerpoint-check-unavailable");
+  else if (powerPointOpenability.openable !== true) issues.push("final-pptx-powerpoint-open-failed");
 
   const complete = Boolean(
     finalFile.exists
@@ -110,7 +121,8 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
     && (!expectedPages || validationSlides === expectedPages)
     && (!summaryPages || summaryPages === expectedPages)
     && (!editabilitySlides || editabilitySlides === expectedPages)
-    && powerPointOpenability?.openable !== false
+    && powerPointOpenability?.available === true
+    && powerPointOpenability?.openable === true
     && hashesMatch
     && issues.length === 0
   );
@@ -155,7 +167,8 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
   const artifacts = job.artifacts || {};
   const final = artifacts.editableFinal || {};
   const manualReviewCurrent = isManualReviewCurrent(artifacts.manualReview, final);
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
   const pageIds = collectVisualQaPageIds(visualImages, pageJobs);
   const pages = pageIds.map((pageId) => {
     const target = visualImages.find((image) => cleanPageId(image.pageId || image.page_id || image.pageNumber || image.page) === pageId) || {};
@@ -167,6 +180,9 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
     const contactSheetFile = statFile(contactSheetPath);
     const targetDimensions = readPngDimensions(targetPath);
     const previewDimensions = readPngDimensions(previewPath);
+    const visualSimilarity = targetFile.exists && previewFile.exists
+      ? comparePngVisualFidelity(targetPath, previewPath)
+      : { available: false };
     const assetQuality = inspectPageGeneratedAssetQuality(runDir, pageId);
     const previewToTargetBytes = targetFile.size && previewFile.size
       ? Number((previewFile.size / targetFile.size).toFixed(3))
@@ -183,36 +199,61 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
       const previewRatio = previewDimensions.width / Math.max(1, previewDimensions.height);
       if (Math.abs(targetRatio - previewRatio) > 0.03) issues.push("preview-aspect-ratio-mismatch");
     }
+    issues.push(...evaluateEditableVisualFidelity(visualSimilarity));
     if (assetQuality.checkerboardAssets.length) issues.push("asset-checkerboard-background");
-    return {
+    const pageRecord = {
       pageId,
       targetPath: target.path || "",
       previewPath,
       contactSheetPath,
       targetSize: targetFile.size,
       previewSize: previewFile.size,
+      targetModifiedAt: targetFile.mtimeMs,
+      previewModifiedAt: previewFile.mtimeMs,
       previewToTargetBytes,
       targetDimensions,
       previewDimensions,
+      minimumSimilarity: EDITABLE_VISUAL_SIMILARITY_MINIMUM,
+      visualSimilarity,
       assetQuality,
       contactSheetExists: contactSheetFile.exists,
       issues
     };
+    return {
+      ...pageRecord,
+      signature: buildEditableVisualQaSignature(pageRecord)
+    };
   });
   const pageIssueIds = pages.flatMap((page) => page.issues.map((issue) => `${page.pageId}:${issue}`));
+  const blockingPageIssueIds = pages.flatMap((page) => page.issues
+    .filter(isBlockingEditableVisualIssue)
+    .map((issue) => `${page.pageId}:${issue}`));
   const blockingIssues = [];
-  if (pageIds.length && !manualReviewCurrent) blockingIssues.push("final-visual-qa-needs-review");
-  if (pageIssueIds.some((issue) => /target-visual-missing|editable-preview-missing|preview-too-small-simplified|preview-aspect-ratio-mismatch/.test(issue))) {
+  const automatedVisualFailed = blockingPageIssueIds.some((issue) => !issue.endsWith(":asset-checkerboard-background"));
+  const automatedAssetFailed = blockingPageIssueIds.some((issue) => issue.endsWith(":asset-checkerboard-background"));
+  if (automatedVisualFailed) {
     blockingIssues.push("final-visual-qa-failed");
   }
-  if (pageIssueIds.some((issue) => /asset-checkerboard-background/.test(issue))) {
+  if (automatedAssetFailed) {
     blockingIssues.push("final-visual-asset-qa-failed");
   }
+  const automatedStatus = automatedVisualFailed || automatedAssetFailed
+    ? "failed"
+    : pageIds.length
+      ? "pass"
+      : "not_applicable";
+  const manualReviewStatus = !pageIds.length
+    ? "not_applicable"
+    : manualReviewCurrent
+      ? "pass"
+      : "pending";
   return {
-    status: blockingIssues.length ? "failed" : pageIds.length ? "pass" : "not_applicable",
+    status: automatedStatus === "failed" ? "failed" : manualReviewStatus === "pending" ? "review" : automatedStatus,
+    automatedStatus,
+    manualReviewStatus,
     manualReviewCurrent,
     pageCount: pageIds.length,
-    failedPageCount: pages.filter((page) => page.issues.length).length,
+    failedPageCount: pages.filter((page) => page.issues.some(isBlockingEditableVisualIssue)).length,
     blockingIssues: [...new Set(blockingIssues)],
     pageIssues: pageIssueIds,
     pages
@@ -385,6 +426,257 @@ function readPngPixels(filePath = "") {
   }
 }
 
+export function comparePngVisualFidelity(targetPath = "", previewPath = "") {
+  const cacheKey = buildVisualFidelityCacheKey(targetPath, previewPath);
+  if (cacheKey && VISUAL_FIDELITY_CACHE.has(cacheKey)) return VISUAL_FIDELITY_CACHE.get(cacheKey);
+  const target = readPngPixels(targetPath);
+  const preview = readPngPixels(previewPath);
+  if (!target || !preview) {
+    const unavailable = {
+      available: false,
+      score: 0,
+      pixelSimilarity: 0,
+      edgeSimilarity: 0,
+      edgeOverlap: 0,
+      edgeRetention: 0,
+      colorHistogramSimilarity: 0
+    };
+    rememberVisualFidelity(cacheKey, unavailable);
+    return unavailable;
+  }
+
+  const gridWidth = 96;
+  const gridHeight = 54;
+  const targetSamples = sampleNormalizedRgb(target, gridWidth, gridHeight);
+  const previewSamples = sampleNormalizedRgb(preview, gridWidth, gridHeight);
+  const targetEdges = buildEdgeMap(targetSamples, gridWidth, gridHeight);
+  const previewEdges = buildEdgeMap(previewSamples, gridWidth, gridHeight);
+  let pixelDifference = 0;
+  let edgeDifference = 0;
+  let targetEdgeCount = 0;
+  let previewEdgeCount = 0;
+  let overlappingEdges = 0;
+
+  for (let index = 0; index < targetSamples.length; index += 3) {
+    pixelDifference += Math.abs(targetSamples[index] - previewSamples[index]);
+    pixelDifference += Math.abs(targetSamples[index + 1] - previewSamples[index + 1]);
+    pixelDifference += Math.abs(targetSamples[index + 2] - previewSamples[index + 2]);
+  }
+  for (let index = 0; index < targetEdges.length; index += 1) {
+    const targetEdge = targetEdges[index];
+    const previewEdge = previewEdges[index];
+    edgeDifference += Math.abs(targetEdge - previewEdge);
+    if (targetEdge >= 24) {
+      targetEdgeCount += 1;
+      if (previewEdge >= 14) overlappingEdges += 1;
+    }
+    if (previewEdge >= 24) previewEdgeCount += 1;
+  }
+
+  const pixelSimilarity = 1 - pixelDifference / Math.max(1, targetSamples.length * 255);
+  const edgeSimilarity = 1 - edgeDifference / Math.max(1, targetEdges.length * 255);
+  const edgeOverlap = targetEdgeCount ? overlappingEdges / targetEdgeCount : 1;
+  const edgeRetention = targetEdgeCount ? Math.min(1, previewEdgeCount / targetEdgeCount) : 1;
+  const colorHistogramSimilarity = compareColorHistograms(targetSamples, previewSamples);
+  const tileComparison = compareVisualTiles(targetSamples, previewSamples, targetEdges, previewEdges, gridWidth, gridHeight);
+  const score = (
+    pixelSimilarity * 0.45
+    + edgeSimilarity * 0.2
+    + edgeOverlap * 0.2
+    + colorHistogramSimilarity * 0.15
+  );
+
+  const result = {
+    available: true,
+    rawScore: score,
+    score: roundMetric(score),
+    pixelSimilarity: roundMetric(pixelSimilarity),
+    edgeSimilarity: roundMetric(edgeSimilarity),
+    edgeOverlap: roundMetric(edgeOverlap),
+    edgeRetention: roundMetric(edgeRetention),
+    colorHistogramSimilarity: roundMetric(colorHistogramSimilarity),
+    ...tileComparison,
+    targetEdgeCount,
+    previewEdgeCount,
+    grid: `${gridWidth}x${gridHeight}`
+  };
+  rememberVisualFidelity(cacheKey, result);
+  return result;
+}
+
+function compareVisualTiles(targetSamples, previewSamples, targetEdges, previewEdges, width, height) {
+  const tileColumns = 8;
+  const tileRows = 6;
+  const tileWidth = width / tileColumns;
+  const tileHeight = height / tileRows;
+  const contentTileScores = [];
+  let weakContentTiles = 0;
+  for (let tileY = 0; tileY < tileRows; tileY += 1) {
+    for (let tileX = 0; tileX < tileColumns; tileX += 1) {
+      let pixelDifference = 0;
+      let edgeDifference = 0;
+      let sampleCount = 0;
+      let targetEdgeCount = 0;
+      let previewEdgeCount = 0;
+      let overlappingEdges = 0;
+      const startX = Math.floor(tileX * tileWidth);
+      const endX = Math.floor((tileX + 1) * tileWidth);
+      const startY = Math.floor(tileY * tileHeight);
+      const endY = Math.floor((tileY + 1) * tileHeight);
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = startX; x < endX; x += 1) {
+          const pixelIndex = (y * width + x) * 3;
+          const edgeIndex = y * width + x;
+          pixelDifference += Math.abs(targetSamples[pixelIndex] - previewSamples[pixelIndex]);
+          pixelDifference += Math.abs(targetSamples[pixelIndex + 1] - previewSamples[pixelIndex + 1]);
+          pixelDifference += Math.abs(targetSamples[pixelIndex + 2] - previewSamples[pixelIndex + 2]);
+          edgeDifference += Math.abs(targetEdges[edgeIndex] - previewEdges[edgeIndex]);
+          sampleCount += 1;
+          if (targetEdges[edgeIndex] >= 24) {
+            targetEdgeCount += 1;
+            if (previewEdges[edgeIndex] >= 14) overlappingEdges += 1;
+          }
+          if (previewEdges[edgeIndex] >= 24) previewEdgeCount += 1;
+        }
+      }
+      if (targetEdgeCount < 5) continue;
+      const pixelSimilarity = 1 - pixelDifference / Math.max(1, sampleCount * 3 * 255);
+      const edgeSimilarity = 1 - edgeDifference / Math.max(1, sampleCount * 255);
+      const edgeOverlap = overlappingEdges / targetEdgeCount;
+      const edgeRetention = Math.min(1, previewEdgeCount / targetEdgeCount);
+      const score = pixelSimilarity * 0.45 + edgeSimilarity * 0.2 + edgeOverlap * 0.35;
+      contentTileScores.push(score);
+      if (score < 0.68 || (edgeOverlap < 0.3 && edgeRetention < 0.55)) weakContentTiles += 1;
+    }
+  }
+  const sortedScores = contentTileScores.sort((left, right) => left - right);
+  const percentileIndex = Math.min(sortedScores.length - 1, Math.floor(sortedScores.length * 0.15));
+  return {
+    contentTileCount: sortedScores.length,
+    weakContentTileRatio: roundMetric(sortedScores.length ? weakContentTiles / sortedScores.length : 0),
+    worstContentTileScore: roundMetric(sortedScores[0] ?? 1),
+    lowContentTileScore: roundMetric(sortedScores[percentileIndex] ?? 1),
+    tileGrid: `${tileColumns}x${tileRows}`
+  };
+}
+
+export function evaluateEditableVisualFidelity(comparison = {}) {
+  if (comparison?.available !== true) return ["visual-comparison-unavailable"];
+  const issues = [];
+  const similarityScore = Number.isFinite(Number(comparison.rawScore))
+    ? Number(comparison.rawScore)
+    : Number(comparison.score || 0);
+  if (similarityScore < EDITABLE_VISUAL_SIMILARITY_MINIMUM) issues.push("preview-visual-similarity-low");
+  if (similarityScore < EDITABLE_VISUAL_SIMILARITY_CRITICAL) issues.push("preview-visual-similarity-critical");
+  if (
+    Number(comparison.targetEdgeCount || 0) >= 120
+    && Number(comparison.edgeOverlap || 0) < 0.4
+    && Number(comparison.edgeRetention || 0) < 0.6
+  ) {
+    issues.push("preview-structure-loss");
+  }
+  if (
+    Number(comparison.contentTileCount || 0) >= 8
+    && Number(comparison.weakContentTileRatio || 0) >= 0.15
+    && Number(comparison.lowContentTileScore || 1) < 0.7
+  ) {
+    issues.push("preview-structure-loss");
+  }
+  return [...new Set(issues)];
+}
+
+export function isBlockingEditableVisualIssue(issue = "") {
+  return BLOCKING_EDITABLE_VISUAL_ISSUES.has(String(issue || ""));
+}
+
+export function buildEditableVisualQaSignature(page = {}) {
+  return [
+    page.pageId || "",
+    Number(page.targetSize || 0),
+    Number(page.previewSize || 0),
+    Number(page.targetModifiedAt || 0),
+    Number(page.previewModifiedAt || 0),
+    Number(page.minimumSimilarity || EDITABLE_VISUAL_SIMILARITY_MINIMUM),
+    Number(page.visualSimilarity?.rawScore || 0),
+    Number(page.visualSimilarity?.score || 0),
+    Number(page.visualSimilarity?.edgeOverlap || 0),
+    Number(page.visualSimilarity?.weakContentTileRatio || 0)
+  ].join(":");
+}
+
+function buildVisualFidelityCacheKey(targetPath = "", previewPath = "") {
+  const target = statFile(targetPath);
+  const preview = statFile(previewPath);
+  if (!target.exists || !preview.exists) return "";
+  return [path.resolve(targetPath), target.size, target.mtimeMs, path.resolve(previewPath), preview.size, preview.mtimeMs].join("|");
+}
+
+function rememberVisualFidelity(cacheKey, result) {
+  if (!cacheKey) return;
+  VISUAL_FIDELITY_CACHE.set(cacheKey, result);
+  while (VISUAL_FIDELITY_CACHE.size > 200) {
+    VISUAL_FIDELITY_CACHE.delete(VISUAL_FIDELITY_CACHE.keys().next().value);
+  }
+}
+
+function sampleNormalizedRgb(image, gridWidth, gridHeight) {
+  const samples = new Uint8Array(gridWidth * gridHeight * 3);
+  for (let gridY = 0; gridY < gridHeight; gridY += 1) {
+    const sourceY = Math.min(image.height - 1, Math.floor(((gridY + 0.5) / gridHeight) * image.height));
+    for (let gridX = 0; gridX < gridWidth; gridX += 1) {
+      const sourceX = Math.min(image.width - 1, Math.floor(((gridX + 0.5) / gridWidth) * image.width));
+      const sourceOffset = (sourceY * image.width + sourceX) * 4;
+      const sampleOffset = (gridY * gridWidth + gridX) * 3;
+      samples[sampleOffset] = image.data[sourceOffset];
+      samples[sampleOffset + 1] = image.data[sourceOffset + 1];
+      samples[sampleOffset + 2] = image.data[sourceOffset + 2];
+    }
+  }
+  return samples;
+}
+
+function buildEdgeMap(samples, width, height) {
+  const edges = new Uint8Array(width * height);
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const left = (y * width + x - 1) * 3;
+      const right = (y * width + x + 1) * 3;
+      const up = ((y - 1) * width + x) * 3;
+      const down = ((y + 1) * width + x) * 3;
+      let gradient = 0;
+      for (let channel = 0; channel < 3; channel += 1) {
+        gradient += Math.abs(samples[right + channel] - samples[left + channel]);
+        gradient += Math.abs(samples[down + channel] - samples[up + channel]);
+      }
+      edges[y * width + x] = Math.min(255, Math.round(gradient / 6));
+    }
+  }
+  return edges;
+}
+
+function compareColorHistograms(targetSamples, previewSamples) {
+  const targetHistogram = new Uint32Array(64);
+  const previewHistogram = new Uint32Array(64);
+  for (let index = 0; index < targetSamples.length; index += 3) {
+    targetHistogram[colorBin(targetSamples, index)] += 1;
+    previewHistogram[colorBin(previewSamples, index)] += 1;
+  }
+  let intersection = 0;
+  const total = targetSamples.length / 3;
+  for (let index = 0; index < targetHistogram.length; index += 1) {
+    intersection += Math.min(targetHistogram[index], previewHistogram[index]);
+  }
+  return total ? intersection / total : 0;
+}
+
+function colorBin(samples, offset) {
+  return (samples[offset] >> 6) * 16 + (samples[offset + 1] >> 6) * 4 + (samples[offset + 2] >> 6);
+}
+
+function roundMetric(value) {
+  return Number(Math.max(0, Math.min(1, value)).toFixed(3));
+}
+
 function unfilterPngRow(row, prev, filter, bytesPerPixel) {
   for (let i = 0; i < row.length; i += 1) {
     const left = i >= bytesPerPixel ? row[i - bytesPerPixel] : 0;
@@ -433,7 +725,7 @@ function collectVisualQaPageIds(visualImages = [], pageJobs = {}) {
   if (jobPageIds.length) return [...new Set(jobPageIds)].sort();
 
   const ids = new Set();
-  for (const image of visualImages) {
+  for (const image of visualImages.filter((item) => item?.staleStyleReference !== true)) {
     const pageId = cleanPageId(image?.pageId || image?.page_id || image?.pageNumber || image?.page || "");
     if (pageId) ids.add(pageId);
   }
@@ -442,9 +734,12 @@ function collectVisualQaPageIds(visualImages = [], pageJobs = {}) {
 
 function readPngDimensions(filePath = "") {
   if (!filePath || !fsSync.existsSync(filePath)) return null;
+  let fileHandle = null;
   try {
-    const buffer = fsSync.readFileSync(filePath);
-    const isPng = buffer.length >= 24
+    fileHandle = fsSync.openSync(filePath, "r");
+    const buffer = Buffer.alloc(24);
+    const bytesRead = fsSync.readSync(fileHandle, buffer, 0, buffer.length, 0);
+    const isPng = bytesRead >= 24
       && buffer[0] === 0x89
       && buffer.toString("ascii", 1, 4) === "PNG";
     if (!isPng) return null;
@@ -454,15 +749,50 @@ function readPngDimensions(filePath = "") {
     };
   } catch {
     return null;
+  } finally {
+    if (fileHandle !== null) {
+      try { fsSync.closeSync(fileHandle); } catch { /* Ignore close errors after a best-effort dimension read. */ }
+    }
   }
 }
 
-function isUsableCachedPowerPointOpenability(cached = {}, finalFile = {}, final = {}) {
+export function isUsableCachedPowerPointOpenability(cached = {}, finalFile = {}, final = {}, finalHash = "") {
   if (!cached || typeof cached !== "object") return false;
+  if (cached.available !== true) return false;
   if (cached.openable !== true && cached.openable !== false) return false;
   if (!finalFile.exists) return false;
   if (Number(final.size || 0) && Number(final.size || 0) !== Number(finalFile.size || 0)) return false;
+  if (!finalHash || !final.sha256 || final.sha256 !== finalHash) return false;
+  if (!cached.finalSha256 || cached.finalSha256 !== finalHash) return false;
   return true;
+}
+
+async function resolvePowerPointOpenability({ cached = {}, final = {}, finalFile = {}, finalHash = "", finalPath = "" } = {}) {
+  if (isUsableCachedPowerPointOpenability(cached, finalFile, final, finalHash)) return cached;
+  if (!finalFile.exists) return null;
+  const cacheKey = finalHash ? `${path.resolve(finalPath)}|${finalHash}` : "";
+  if (cacheKey && POWERPOINT_OPENABILITY_CACHE.has(cacheKey)) return POWERPOINT_OPENABILITY_CACHE.get(cacheKey);
+  const inspected = await inspectPowerPointOpenability(finalPath).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-open",
+    available: process.platform === "win32",
+    openable: false,
+    slideCount: 0,
+    warnings: ["powerpoint-open-check-failed"],
+    error: error.message || "PowerPoint open check failed"
+  }));
+  const bound = {
+    ...inspected,
+    finalSha256: finalHash,
+    finalSize: Number(finalFile.size || 0)
+  };
+  if (cacheKey) {
+    POWERPOINT_OPENABILITY_CACHE.set(cacheKey, bound);
+    if (POWERPOINT_OPENABILITY_CACHE.size > FILE_HASH_CACHE_MAX_ENTRIES) {
+      POWERPOINT_OPENABILITY_CACHE.delete(POWERPOINT_OPENABILITY_CACHE.keys().next().value);
+    }
+  }
+  return bound;
 }
 
 function isManualReviewCurrent(manualReview = {}, final = {}) {
@@ -470,6 +800,8 @@ function isManualReviewCurrent(manualReview = {}, final = {}) {
   return manualReview?.status === "approved"
     && manualReview.finalPath === final.path
     && Number(manualReview.finalSize || 0) === Number(final.size || 0)
+    && Boolean(final.sha256)
+    && manualReview.finalSha256 === final.sha256
     && String(manualReview.finalCreatedAt || "") === String(final.createdAt || "");
 }
 
@@ -511,19 +843,23 @@ function listPageDirs(runDir = "") {
     }));
 }
 
-function collectMissingForegroundAssets(manifest = {}) {
-  const imageIds = new Set((Array.isArray(manifest.images) ? manifest.images : []).map((image) => cleanToken(image.id || "")).filter(Boolean));
-  const imagePaths = new Set((Array.isArray(manifest.images) ? manifest.images : []).map((image) => normalizeAssetPath(image.path || "")).filter(Boolean));
-  const provenanceText = JSON.stringify(manifest.asset_provenance || []);
+export function collectMissingForegroundAssets(manifest = {}) {
+  const images = Array.isArray(manifest.images) ? manifest.images : [];
+  const provenance = Array.isArray(manifest.asset_provenance) ? manifest.asset_provenance : [];
   return (Array.isArray(manifest.visual_inventory) ? manifest.visual_inventory : [])
     .filter((item) => item && typeof item === "object" && !Array.isArray(item))
     .filter((item) => requiresForegroundAsset(item))
     .map((item) => {
       const id = cleanToken(item.id || "");
       const pathValue = normalizeAssetPath(item.path || item.asset_provenance?.path || item.asset_provenance?.source || "");
-      const hasImage = (id && imageIds.has(id)) || (pathValue && imagePaths.has(pathValue));
-      const hasProvenance = ASSET_SEPARATION_TERMS.test(provenanceText) && ((id && provenanceText.includes(id)) || (pathValue && provenanceText.includes(pathValue)));
-      return hasImage && hasProvenance ? "" : (id || item.kind || "foreground_asset");
+      const matches = images.filter((image) => foregroundImageMatches(item, image));
+      const pathMatch = pathValue
+        ? images.filter((image) => normalizeAssetPath(image.path || "") === pathValue)
+        : [];
+      const matchedImages = matches.length ? matches : pathMatch;
+      const hasProvenance = matchedImages.length > 0
+        && matchedImages.every((image) => provenance.some((entry) => provenanceMatchesImage(entry, image)));
+      return hasProvenance ? "" : (id || item.kind || "foreground_asset");
     })
     .filter(Boolean);
 }
@@ -531,10 +867,42 @@ function collectMissingForegroundAssets(manifest = {}) {
 function requiresForegroundAsset(item = {}) {
   const text = JSON.stringify(item);
   if (/no foreground asset separation required/i.test(text)) return false;
+  if (/native structural/i.test(text) && STRUCTURAL_TERMS.test(text)) return false;
   if (/^shape$/i.test(String(item.type || "")) && STRUCTURAL_TERMS.test(text)) return false;
   if (!FOREGROUND_TERMS.test(text) && !FOREGROUND_ASSET_TERMS.test(text)) return false;
   if (STRUCTURAL_TERMS.test(text) && !FOREGROUND_TERMS.test(text)) return false;
   return true;
+}
+
+function foregroundImageMatches(item = {}, image = {}) {
+  const itemId = cleanToken(item.id || "");
+  const imageId = cleanToken(image.id || "");
+  if (!itemId || !imageId) return false;
+  if (itemId === imageId) return true;
+  const groupToken = singularToken(itemId.split("_").at(-1) || "");
+  return Boolean(groupToken && imageId.split("_").map(singularToken).includes(groupToken));
+}
+
+function provenanceMatchesImage(entry = {}, image = {}) {
+  const text = JSON.stringify(entry);
+  if (!ASSET_SEPARATION_TERMS.test(text)) return false;
+  const normalizedText = cleanToken(text);
+  const imageId = cleanToken(image.id || "");
+  const imagePath = normalizeAssetPath(image.path || "");
+  const imagePathToken = cleanToken(imagePath);
+  const imageBaseToken = cleanToken(path.basename(imagePath || "", path.extname(imagePath || "")));
+  const entryPath = normalizeAssetPath(entry.path || "");
+  return Boolean(
+    (imageId && normalizedText.includes(imageId))
+    || (imagePathToken && normalizedText.includes(imagePathToken))
+    || (imageBaseToken && normalizedText.includes(imageBaseToken))
+    || (imagePath && entryPath === imagePath)
+  );
+}
+
+function singularToken(value = "") {
+  const token = cleanToken(value);
+  return token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token;
 }
 
 function normalizeAssetPath(value = "") {
@@ -544,10 +912,10 @@ function normalizeAssetPath(value = "") {
 }
 
 function statFile(filePath = "") {
-  if (!filePath) return { exists: false, size: 0 };
-  if (!fsSync.existsSync(filePath)) return { exists: false, size: 0 };
+  if (!filePath) return { exists: false, size: 0, mtimeMs: 0 };
+  if (!fsSync.existsSync(filePath)) return { exists: false, size: 0, mtimeMs: 0 };
   const stat = fsSync.statSync(filePath);
-  return stat.isFile() ? { exists: true, size: stat.size } : { exists: false, size: 0 };
+  return stat.isFile() ? { exists: true, size: stat.size, mtimeMs: stat.mtimeMs } : { exists: false, size: 0, mtimeMs: 0 };
 }
 
 async function readJsonIfFile(filePath = "") {
@@ -566,8 +934,22 @@ function resolveMaybe(value = "") {
 }
 
 async function hashFile(filePath) {
-  const buffer = await fs.readFile(filePath);
-  return crypto.createHash("sha256").update(buffer).digest("hex");
+  const resolved = path.resolve(filePath);
+  const stat = await fs.stat(resolved);
+  const cacheKey = `${resolved}|${stat.size}|${stat.mtimeMs}`;
+  const cached = FILE_HASH_CACHE.get(cacheKey);
+  if (cached) return cached;
+  const pending = fs.readFile(resolved)
+    .then((buffer) => crypto.createHash("sha256").update(buffer).digest("hex"))
+    .catch((error) => {
+      FILE_HASH_CACHE.delete(cacheKey);
+      throw error;
+    });
+  FILE_HASH_CACHE.set(cacheKey, pending);
+  while (FILE_HASH_CACHE.size > FILE_HASH_CACHE_MAX_ENTRIES) {
+    FILE_HASH_CACHE.delete(FILE_HASH_CACHE.keys().next().value);
+  }
+  return pending;
 }
 
 function isInsidePath(candidate, parent) {

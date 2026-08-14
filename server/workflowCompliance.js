@@ -13,7 +13,7 @@ export async function getWorkflowComplianceStatus(jobId) {
   const stages = job.stages || {};
   const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const sourcePages = numberOrZero(job.sourceMeta?.pageCount) || countArray(artifacts.renderedPages);
-  const visualPages = countArray(artifacts.visualImages);
+  const visualPages = currentVisualImages(artifacts).length;
   const imageDeckPages = numberOrZero(artifacts.imageDeck?.pageCount);
   const ocrPages = numberOrZero(artifacts.ocrTextHints?.pageCount);
   const promptPages = countArray(artifacts.editableWorkerPrompts);
@@ -440,7 +440,7 @@ function summarizeCodexPptSlideState(artifacts = {}) {
 
 function buildVisualBackendSummary(artifacts = {}, providers = {}) {
   const sample = artifacts.visualSample || {};
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const visualImages = currentVisualImages(artifacts);
   const approvedBackend = normalizeBackendRecord(artifacts.codexPptBackend || {});
   const backendRecords = [
     approvedBackend,
@@ -492,6 +492,11 @@ function buildVisualBackendSummary(artifacts = {}, providers = {}) {
   };
 }
 
+function currentVisualImages(artifacts = {}) {
+  return (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
+}
+
 function buildSkillFirstRunbook({
   sourcePages = 0,
   visualPages = 0,
@@ -521,13 +526,12 @@ function buildSkillFirstRunbook({
   const sampleComplete = Boolean(hasVisualSample && sampleApproved);
   const fullDeckReady = Boolean(firstThreeApproved && sampleComplete && gateStatus.get("fullDeck"));
   const codexSlidesComplete = Boolean(codexPptSlideState.complete);
-  const codexSlidesStarted = numberOrZero(codexPptSlideState.total) > 0;
-  const nextCodexDeckAction = visualPages || codexSlidesComplete
+  const visualCoverageComplete = Boolean(sourcePages > 0 && visualPages >= sourcePages);
+  const imageDeckAvailable = imageDeckPages > 0;
+  const hasImageDeck = Boolean(imageDeckAvailable && sourcePages > 0 && imageDeckPages >= sourcePages);
+  const nextCodexDeckAction = visualCoverageComplete
     ? "image-deck/assemble"
-    : codexSlidesStarted
-      ? "codex slide workers"
-      : "sync codex slide tasks";
-  const hasImageDeck = imageDeckPages > 0;
+    : "visual/generate";
   const hasEditableRun = Boolean(editableRun.path || editableRun.prepared);
   const hasFinal = Boolean(final.path);
   const expectedPages = sourcePages || imageDeckPages || pageEvidence.totalPages || 0;
@@ -568,6 +572,8 @@ function buildSkillFirstRunbook({
       title: "生成 codex-ppt 图片型 PPT",
       summary: hasImageDeck
         ? `${visualPages} 张视觉图，图片型 PPT 已组装`
+        : imageDeckAvailable
+          ? `当前只有 ${imageDeckPages}/${sourcePages || "?"} 页图片测试稿，请继续生成剩余页面`
         : codexSlidesComplete
           ? `${codexPptSlideState.recorded}/${codexPptSlideState.total} 张 codex-ppt 图片页已记录；请组装图片型 PPT`
         : fullDeckReady
@@ -581,7 +587,7 @@ function buildSkillFirstRunbook({
     makeRunbookStep({
       id: "editppt-prepare",
       title: "准备 image-to-editable-ppt 运行",
-      summary: hasEditableRun ? "editppt prepare 输出已存在" : hasImageDeck ? "基于图片型 PPT 运行 editppt prepare" : "等待 codex-ppt 图片型 PPT",
+      summary: hasEditableRun ? "editppt prepare 输出已存在" : hasImageDeck ? "基于完整图片型 PPT 运行 editppt prepare" : imageDeckAvailable ? `等待完整图片版，当前 ${imageDeckPages}/${sourcePages || "?"} 页` : "等待 codex-ppt 图片型 PPT",
       status: hasEditableRun ? "pass" : hasImageDeck ? "active" : "pending",
       action: hasEditableRun ? "" : hasImageDeck ? "editable/prepare" : ""
     }),

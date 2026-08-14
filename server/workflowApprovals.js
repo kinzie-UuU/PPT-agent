@@ -1,3 +1,7 @@
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import fsSync from "node:fs";
+import path from "node:path";
 import { getProviderConfig, normalizeBaseUrl } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 
@@ -13,6 +17,7 @@ export const CODEX_PPT_VISUAL_SAMPLE_GATES = ["outline", "style", "backend"];
 export const CODEX_PPT_VISUAL_TEST_GATES = ["outline", "style", "backend", "sample"];
 export const CODEX_PPT_VISUAL_DECK_GATES = ["outline", "style", "backend", "sample", "fullDeck"];
 const LEGACY_CODEX_PPT_STYLE_RE = /轻盈渐变风|东方自然风|黑白画册风|蓝白科技风|暗黑科技风|旧模板|旧版模板|模板包|template[-_\s]?pack/i;
+const SAMPLE_HASH_CACHE = new Map();
 
 export async function approveCodexPptGate(jobId, options = {}) {
   const gate = normalizeGate(options.gate);
@@ -32,6 +37,9 @@ export async function approveCodexPptGate(jobId, options = {}) {
   if (gate === "backend") {
     record.backend = buildBackendSnapshot(options.backend);
   }
+  if (gate === "sample") {
+    record.sampleSha256 = cleanString(job.artifacts?.visualSample?.sha256 || "");
+  }
   if (gate === "fullDeck" && !isNonProductApprovalAllowed(options)) {
     record.testDeck = buildFullDeckTestEvidence(job);
   }
@@ -41,13 +49,92 @@ export async function approveCodexPptGate(jobId, options = {}) {
     codexPptApprovals: approvals,
     ...(gate === "backend" ? { codexPptBackend: record.backend } : {})
   };
+  if (gate === "sample") {
+    await reconcileVisualArtifactsForApprovedSample(job, record, now);
+  }
   job.events = appendEvent(job.events, {
     type: "codex-ppt.approval.approved",
     message: `Approved ${record.label}`,
-    details: { gate, backend: record.backend || null },
+    details: { gate, backend: record.backend || null, sampleSha256: record.sampleSha256 || "" },
     createdAt: now
   });
   return saveWorkflowJob(job);
+}
+
+export async function reconcileVisualArtifactsForApprovedSample(job = {}, approval = {}, now = new Date().toISOString()) {
+  const sample = job.artifacts?.visualSample || {};
+  const samplePath = sample.path ? path.resolve(sample.path) : "";
+  const sampleSha256 = cleanString(approval.sampleSha256 || sample.sha256 || "");
+  const visualImages = (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : []).map((image) => {
+    const references = (Array.isArray(image.referenceImagePaths) ? image.referenceImagePaths : [])
+      .map((item) => path.resolve(item || ""));
+    const matches = Boolean(sampleSha256 && (
+      image.approvedSampleSha256 === sampleSha256
+      || (samplePath && references.includes(samplePath))
+    ));
+    return {
+      ...image,
+      staleStyleReference: !matches,
+      styleLockStatus: matches ? "current" : "stale",
+      currentApprovedSampleSha256: sampleSha256
+    };
+  });
+  const stalePageIds = visualImages.filter((image) => image.staleStyleReference).map((image) => image.pageId).filter(Boolean);
+  const artifacts = { ...(job.artifacts || {}), visualImages };
+  if (stalePageIds.length) {
+    for (const key of [
+      "imageDeck",
+      "imageDeckReview",
+      "visualQuality",
+      "visualQualityReview",
+      "editableRun",
+      "editableHints",
+      "editableNext",
+      "editableWorkerPrompts",
+      "editableWorkerTasks",
+      "editableDispatches",
+      "editableRecords",
+      "editableLocalRebuilds",
+      "editableWorkerBatchRuns",
+      "editableFinal",
+      "editableTextHintsAcknowledgement",
+      "workerBriefs"
+    ]) delete artifacts[key];
+  }
+  job.artifacts = artifacts;
+  const manifestPath = artifacts.visualManifest?.path || "";
+  if (manifestPath && visualImages.length) {
+    try {
+      const previous = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+      const manifest = {
+        ...(previous && !Array.isArray(previous) ? previous : {}),
+        version: Number(previous?.version || 1),
+        kind: previous?.kind || "workflow_visual_images_manifest",
+        updatedAt: now,
+        styleReconciledAt: now,
+        imageCount: visualImages.length,
+        images: visualImages
+      };
+      const body = JSON.stringify(manifest, null, 2);
+      await fs.writeFile(manifestPath, body, "utf8");
+      job.artifacts.visualManifest = {
+        ...artifacts.visualManifest,
+        size: Buffer.byteLength(body),
+        sha256: crypto.createHash("sha256").update(body).digest("hex"),
+        createdAt: now,
+        imageCount: visualImages.length,
+        currentImageCount: visualImages.length - stalePageIds.length
+      };
+    } catch {
+      // The job artifact remains authoritative; a later task sync will rebuild the manifest file.
+    }
+  }
+  job.events = appendEvent(job.events, {
+    type: "codex-ppt.sample_style_reconciled",
+    message: `Reconciled visual pages against approved sample ${sampleSha256}`,
+    details: { sampleSha256, stalePageIds, currentPages: visualImages.length - stalePageIds.length },
+    createdAt: now
+  });
 }
 
 export async function preflightCodexPptGate(jobId, options = {}) {
@@ -55,7 +142,9 @@ export async function preflightCodexPptGate(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const passed = gate === "fullDeck"
     ? isCodexPptFullDeckApprovalCurrent(job, options)
-    : getApprovals(job).some((item) => item?.status === "approved" && item.gate === gate);
+    : gate === "sample"
+      ? isCodexPptSampleApprovalCurrent(job, options)
+      : getApprovals(job).some((item) => item?.status === "approved" && item.gate === gate);
   if (passed) {
     return {
       ok: true,
@@ -123,6 +212,9 @@ export async function assertCodexPptApprovals(jobId, requiredGates = []) {
   if (required.includes("fullDeck") && !isCodexPptFullDeckApprovalCurrent(job)) {
     approved.delete("fullDeck");
   }
+  if (required.includes("sample") && !isCodexPptSampleApprovalCurrent(job)) {
+    approved.delete("sample");
+  }
   const missing = required.filter((gate) => !approved.has(gate));
   if (missing.length) {
     const error = new Error(`Missing codex-ppt approval gate(s): ${missing.map((gate) => CODEX_PPT_GATES.get(gate)).join(", ")}`);
@@ -152,6 +244,7 @@ function assertApprovalPreconditions(job = {}, gate = "", options = {}) {
   const approvals = new Set(getApprovals(job)
     .filter((item) => item?.status === "approved" && item.gate)
     .map((item) => item.gate));
+  if (!isCodexPptSampleApprovalCurrent(job, options)) approvals.delete("sample");
   if (gate === "outline" && !job.artifacts?.codexPptOutline?.path) {
     throwApprovalPrecondition(
       "CODEX_PPT_OUTLINE_REQUIRED",
@@ -255,6 +348,36 @@ export function isCodexPptFullDeckApprovalCurrent(job = {}, options = {}) {
   );
 }
 
+export function isCodexPptSampleApprovalCurrent(job = {}, options = {}) {
+  const record = getApprovals(job)
+    .filter((item) => item?.status === "approved" && item.gate === "sample")
+    .at(-1);
+  if (!record) return false;
+  if (isNonProductApprovalAllowed(options)) return true;
+  const sample = job.artifacts?.visualSample || {};
+  const sampleSha256 = cleanString(sample.sha256 || "");
+  const diskSha256 = hashCurrentSampleFile(sample.path || "");
+  return Boolean(
+    sampleSha256
+    && diskSha256
+    && diskSha256 === sampleSha256
+    && record.sampleSha256
+    && record.sampleSha256 === sampleSha256
+  );
+}
+
+function hashCurrentSampleFile(filePath = "") {
+  const resolved = path.resolve(cleanString(filePath));
+  if (!filePath || !fsSync.existsSync(resolved) || !fsSync.statSync(resolved).isFile()) return "";
+  const stat = fsSync.statSync(resolved);
+  const cacheKey = `${resolved}:${stat.size}:${stat.mtimeMs}`;
+  if (SAMPLE_HASH_CACHE.has(cacheKey)) return SAMPLE_HASH_CACHE.get(cacheKey);
+  const sha256 = crypto.createHash("sha256").update(fsSync.readFileSync(resolved)).digest("hex");
+  SAMPLE_HASH_CACHE.clear();
+  SAMPLE_HASH_CACHE.set(cacheKey, sha256);
+  return sha256;
+}
+
 export function getCodexPptFullDeckTestEvidence(job = {}) {
   const record = getApprovals(job)
     .filter((item) => item?.status === "approved" && item.gate === "fullDeck")
@@ -262,7 +385,7 @@ export function getCodexPptFullDeckTestEvidence(job = {}) {
   return isCodexPptFullDeckApprovalCurrent(job) ? record?.testDeck || null : null;
 }
 
-function buildFullDeckTestEvidence(job = {}) {
+export function buildFullDeckTestEvidence(job = {}) {
   const images = getVisualImages(job);
   const review = job.artifacts?.imageDeckReview || {};
   const summary = review.summary || {};
@@ -273,7 +396,12 @@ function buildFullDeckTestEvidence(job = {}) {
     pageNumber: Number(image.pageNumber || 0),
     sha256: cleanString(image.sha256 || ""),
     path: cleanString(image.relativePath || image.path || ""),
-    imageInputMode: cleanString(image.imageInputMode || "")
+    imageInputMode: cleanString(image.imageInputMode || ""),
+    styleAuthority: Boolean(
+      image.retainedApprovedSample === true
+      && sample.sha256
+      && cleanString(image.sha256 || "") === cleanString(sample.sha256)
+    )
   }));
   const everyPagePassed = pages.length === 2 && pages.every((page) => {
     const mark = marks[page.pageId] || {};
@@ -285,7 +413,9 @@ function buildFullDeckTestEvidence(job = {}) {
     );
   });
   const usesStyleReference = pages.length === 2
-    && pages.every((page) => page.imageInputMode === "source-page-edit-plus-style-reference");
+    && pages.every((page) => page.styleAuthority || page.imageInputMode === "source-page-edit-plus-style-reference")
+    && pages.some((page) => page.styleAuthority)
+    && pages.some((page) => page.imageInputMode === "source-page-edit-plus-style-reference");
   if (
     !sample.sha256
     || review.status !== "approved"
@@ -308,6 +438,7 @@ function buildFullDeckTestEvidence(job = {}) {
           pageCount: pages.length,
           reviewStatus: review.status || "",
           passCount: Number(summary.passCount || 0),
+          styleAuthorityPages: pages.filter((page) => page.styleAuthority).length,
           styleReferencePages: pages.filter((page) => page.imageInputMode === "source-page-edit-plus-style-reference").length
         }
       }
@@ -368,8 +499,7 @@ function throwApprovalPrecondition(code, message, details = {}) {
 }
 
 function isNonProductApprovalAllowed(options = {}) {
-  const actor = `${options.approvedBy || ""} ${options.note || ""}`;
-  return Boolean(options.allowNonProductBackend) || /regression|smoke|test/i.test(actor);
+  return options.allowNonProductBackend === true;
 }
 
 function getApprovedImageBackend(job = {}) {

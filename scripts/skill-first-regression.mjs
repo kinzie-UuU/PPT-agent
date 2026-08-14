@@ -10,8 +10,10 @@ async function main() {
     checkReadme(files),
     checkProductGoalCurrent(files),
     checkFrontendMainFlow(files),
+    checkFrontendV2Workspace(files),
     checkFrontendButtonContracts(files),
     checkApiSurface(files),
+    checkSkillRuntimeRoots(files),
     checkDeliveryGate(files),
     checkFinalEvidence(files),
     checkMojibakeAuditScope(files)
@@ -34,31 +36,68 @@ async function readProjectFiles() {
   return {
     readme: await readText("README.md"),
     productGoal: await readText("docs/product-goal.md"),
+    upstreamSkillContract: await readText("docs/upstream-skill-contract.md"),
     currentAgentPlan: await readText("docs/current-agent-plan.md"),
     frontend: await readText("src/main.jsx"),
     styles: await readText("src/styles.css"),
+    uiV2: await readText("src/ui-v2/PptAgentWorkspace.jsx"),
+    uiV2Styles: await readText("src/ui-v2/PptAgentWorkspace.module.css"),
     apiClient: await readText("src/api/client.js"),
     serverIndex: await readText("server/index.js"),
+    doctor: await readText("server/doctor.js"),
     pptxEditability: await readText("server/pptxEditability.js"),
     workflowDelivery: await readText("server/workflowDelivery.js"),
     workflowNextAction: await readText("server/workflowNextAction.js"),
     workflowEditable: await readText("server/workflowEditable.js"),
+    workflowImageDeckReview: await readText("server/workflowImageDeckReview.js"),
     workflowManualReview: await readText("server/workflowManualReview.js"),
     workflowCodexPptSlideBatchRunner: await readText("server/workflowCodexPptSlideBatchRunner.js"),
+    workflowCodexPptRunState: await readText("server/workflowCodexPptRunState.js"),
     workflowVisuals: await readText("server/workflowVisuals.js"),
+    workflowStyleConsistency: await readText("server/workflowStyleConsistency.js"),
     workflowProductVisualReadinessRunner: await readText("server/workflowProductVisualReadinessRunner.js"),
     workflowApprovals: await readText("server/workflowApprovals.js"),
     workflowV1Readiness: await readText("server/workflowV1Readiness.js"),
     workflowWorkerBatchRunner: await readText("server/workflowWorkerBatchRunner.js"),
     workflowFinalEvidence: await readText("server/workflowFinalEvidence.js"),
     workflowPageEvidence: await readText("server/workflowPageEvidence.js"),
+    workflowJobs: await readText("server/workflowJobs.js"),
+    workflowVisibility: await readText("shared/workflowVisibility.js"),
+    workflowSelectionGuard: await readText("src/workflow/workflowSelectionGuard.js"),
     workflowArtifacts: await readText("server/workflowArtifacts.js"),
     workflowCostEstimate: await readText("server/workflowCostEstimate.js"),
     providers: await readText("server/providers.js"),
     pageRebuildAssembler: await readText("scripts/page-rebuild-assembler.mjs"),
+    visualAssetHelper: await readText("scripts/visual-asset-helper.mjs"),
     modelPageSpecWorker: await readText("scripts/model-page-spec-worker.mjs"),
+    strictUiPlaywright: await readText("scripts/strict-ui-e2e.playwright.js"),
     auditMojibake: await readText("scripts/audit-mojibake.mjs")
   };
+}
+
+function checkSkillRuntimeRoots(files) {
+  return named("Editable runtime prefers the canonical .agents skill", () => {
+    mustInclude(files.upstreamSkillContract, "PPT Agent 以以下两个官方仓库为核心实现基础");
+    mustInclude(files.upstreamSkillContract, "不得复制一套本地生成逻辑替代");
+    mustInclude(files.upstreamSkillContract, "v0.5.5");
+    mustInclude(files.upstreamSkillContract, "v0.3.2");
+    mustInclude(files.readme, ".agents\\skills\\image-to-editable-ppt");
+    mustInclude(files.workflowEditable, '".agents", "skills", "image-to-editable-ppt"');
+    mustInclude(files.workflowEditable, '"v0.3.2-compatible"');
+    mustInclude(files.workflowEditable, "jobScopedAssetSheets");
+    mustInclude(files.serverIndex, "/api/doctor");
+    mustInclude(files.doctor, '"codex-ppt-contract"');
+    mustInclude(files.doctor, '"v0.5.5-compatible"');
+    mustInclude(files.pageRebuildAssembler, '".agents", "skills", "image-to-editable-ppt"');
+    mustInclude(files.visualAssetHelper, '".agents", "skills", "image-to-editable-ppt"');
+    mustInclude(files.visualAssetHelper, "runEditpptImageJobs");
+    mustInclude(files.visualAssetHelper, "detectEditpptImageBackend");
+    mustInclude(files.visualAssetHelper, "refusing to guess provenance");
+    mustInclude(files.visualAssetHelper, "has no producing-backend provenance");
+    mustNotInclude(files.visualAssetHelper, "editImageWithProvider");
+    mustNotInclude(files.visualAssetHelper, "generateImageWithProvider");
+    mustNotInclude(files.visualAssetHelper, ".editppt-api-backend-only");
+  });
 }
 
 async function readText(relativePath) {
@@ -200,15 +239,113 @@ function checkFrontendMainFlow(files) {
   });
 }
 
+function checkFrontendV2Workspace(files) {
+  return named("Frontend exposes the V2 Agent workspace", () => {
+    mustInclude(files.frontend, "PptAgentWorkspace");
+    mustInclude(files.frontend, "outlinePlan = null");
+    mustInclude(files.frontend, "outlinePlan={outlinePlan}");
+    mustInclude(files.frontend, 'setPreviewMode("visual")');
+    mustInclude(files.frontend, 'import { isInternalWorkflowJob } from "../shared/workflowVisibility.js"');
+    mustNotInclude(files.frontend, "function isInternalWorkflowJob(job = {})");
+    mustInclude(files.workflowVisibility, 'if (visibility === "public") return false;');
+    mustInclude(files.workflowVisibility, "INTERNAL_WORKFLOW_PATTERN.test(text)");
+    mustInclude(files.frontend, "api.workflowDeliveryStatus(id, controller.signal)");
+    mustInclude(files.frontend, "projectName: getEffectiveProjectName(form, files)");
+    mustInclude(files.frontend, "function workflowTaskTitle(job = null)");
+    mustInclude(files.frontend, "|| job?.input?.projectName");
+    mustInclude(files.strictUiPlaywright, "await readySearch.fill(readyTitle)");
+    mustInclude(files.frontend, "onLoadMoreJobs={loadMoreWorkflowJobs}");
+    mustInclude(files.frontend, "buildDualRouteState(job, deliveryBundle)");
+    mustInclude(files.frontend, "deliveryBundle?.jobId === job?.id ? deliveryBundle : null");
+    mustInclude(files.frontend, 'state.routeB.deliverableReady\n    ? "complete"');
+    mustInclude(files.frontend, 'deliverableReady\n    ? "可编辑 PPT 已通过交付门禁，可直接下载。"');
+    mustInclude(files.serverIndex, "projectName: req.body?.projectName || \"\"");
+    mustInclude(files.workflowJobs, "projectName: cleanString(input.projectName || \"\")");
+    mustInclude(files.workflowJobs, "WORKFLOW_LIST_CACHE_TTL_MS");
+    mustInclude(files.workflowJobs, 'visibility: cleanString(input.visibility || "")');
+    mustInclude(files.serverIndex, "const pagedSummaries = jobs.slice(offset, offset + limit)");
+    mustInclude(files.serverIndex, "readWorkflowJobsByIds(pagedSummaries.map((job) => job.id))");
+    mustInclude(files.workflowJobs, "export async function listWorkflowJobSummaries");
+    mustInclude(files.workflowJobs, "WORKFLOW_LIST_READ_CONCURRENCY");
+    mustInclude(files.workflowJobs, "refreshWorkflowListCacheSingleFlight");
+    mustInclude(files.workflowJobs, "startedRevision === workflowListCacheRevision");
+    mustInclude(files.workflowJobs, "cached?.fingerprint === fingerprint");
+    mustInclude(files.serverIndex, 'import { isInternalWorkflowJob } from "../shared/workflowVisibility.js"');
+    mustNotInclude(files.serverIndex, "function isInternalWorkflowJob(job = {})");
+    mustInclude(files.workflowSelectionGuard, "export function mergeWorkflowJobPage");
+    mustInclude(files.frontend, "activeJob: activeCandidate && isUserWorkflowJob(activeCandidate) ? activeCandidate : null");
+    mustInclude(files.workflowFinalEvidence, "!cached.finalSha256 || cached.finalSha256 !== finalHash");
+    mustInclude(files.frontend, "onPlanOutline={() => planOutline(null, { stayInWorkspace: true })}\n              onOpenDelivery={openDeliveryReviewPanel}\n              onOpenEditableReview={openEditableReviewPanel}");
+    mustInclude(files.frontend, 'React.lazy(() => import("./ui-v2/PptAgentWorkspace.jsx")');
+    mustInclude(files.frontend, "<React.Suspense");
+    mustNotInclude(files.frontend, 'import { PptAgentWorkspace } from "./ui-v2/PptAgentWorkspace.jsx"');
+    mustInclude(files.frontend, 'get("ui") === "legacy"');
+    mustInclude(files.frontend, "<AgentFlowPanel");
+    mustInclude(files.frontend, "<AgentPreviewPanel");
+    mustInclude(files.frontend, 'className="outline-sequence-summary"');
+    mustInclude(files.frontend, "outlineEditingIndex === index");
+    mustInclude(files.frontend, "invalidateOutlineDraft()");
+    mustInclude(files.frontend, "openOutlineStep(index)");
+    mustInclude(files.frontend, "outlineBusy || workflowBusy");
+    mustInclude(files.frontend, "intakeRevisionRef.current");
+    mustInclude(files.frontend, "stayInWorkspace: true");
+    mustInclude(files.frontend, "editableWorkerRunBundle?.jobId === job?.id");
+    mustInclude(files.frontend, "expectedPages > 0 && finalPages === expectedPages");
+    mustInclude(files.frontend, "先看整套内容是否顺畅");
+    mustNotInclude(files.frontend, 'className="outline-card-item"');
+    mustInclude(files.frontend, "errorMessage: error");
+    mustInclude(files.frontend, "statusMessage: status");
+    mustInclude(files.frontend, 'itemBucket === "failed" ? "失败"');
+    mustInclude(files.uiV2, 'data-ui-version="2"');
+    mustInclude(files.uiV2, "ppt-agent-v2");
+    mustInclude(files.uiV2, "PPT 页面预览");
+    mustInclude(files.uiV2, "Agent 工作流");
+    mustInclude(files.uiV2, "高级详情");
+    mustInclude(files.uiV2, 'role="alert"');
+    mustInclude(files.uiV2, 'loading="lazy"');
+    mustInclude(files.uiV2, "create.inputLocked");
+    mustInclude(files.uiV2, 'aria-label="大纲摘要"');
+    mustInclude(files.uiV2Styles, "@media (max-width: 1280px)");
+    mustInclude(files.uiV2Styles, "@media (max-width: 560px)");
+    mustInclude(files.uiV2Styles, ".taskList { display: flex; }");
+    mustInclude(files.styles, ".workspace-shell:has(.ppt-agent-v2)");
+  });
+}
+
 function checkFrontendButtonContracts(files) {
   return named("Frontend buttons keep actionable contracts", () => {
     mustInclude(files.frontend, "setTaskFilter(id)");
     mustInclude(files.frontend, "setTaskSearch(event.target.value)");
     mustInclude(files.frontend, "setCreateOpen(true)");
     mustInclude(files.frontend, "handleArchiveTask(event, item)");
+    const uploadFlow = files.frontend.slice(
+      files.frontend.indexOf("async function uploadFiles(event)"),
+      files.frontend.indexOf("async function removeUploadedFile(file)")
+    );
+    mustNotInclude(uploadFlow, "currentJob");
     mustInclude(files.frontend, "const routeBStarted = Boolean(");
     mustInclude(files.frontend, 'if (routeBStarted && state.routeB.status !== "ready") return "running";');
     mustInclude(files.frontend, "onConfirm={askUserConfirm}");
+    mustInclude(files.frontend, 'return "准备 1 页样张"');
+    mustInclude(files.frontend, '"等待方案确认"');
+    mustNotInclude(files.frontend, 'requestedBy: "frontend-route-a-source-text"');
+    mustInclude(files.serverIndex, 'requestedBy: "visual-sample-source-ocr"');
+    mustInclude(files.serverIndex, "const sampleOptions = { ...body, pageNumber: samplePageNumber }");
+    mustInclude(files.uiV2, 'preview.emptyTitle || "页面将在这里生成"');
+    mustInclude(files.uiV2, "disabled={taskList.busy}");
+    const routeAFlow = files.frontend.slice(
+      files.frontend.indexOf("async function runRouteAAction()"),
+      files.frontend.indexOf("async function runRouteBAction()")
+    );
+    const assetStep = routeAFlow.indexOf("recordCodexPptInformationAssets");
+    const sampleConfirm = routeAFlow.indexOf('title: "生成 1 页样张"');
+    const sampleCall = routeAFlow.indexOf('workflowAction(currentJob.id, "visual/sample"');
+    if (!(assetStep >= 0 && assetStep < sampleConfirm && sampleConfirm < sampleCall)) {
+      throw new Error("sample preparation must run asset analysis before user confirmation and the visual API call");
+    }
+    if (routeAFlow.slice(assetStep, sampleConfirm).includes("return;")) {
+      throw new Error("sample preparation must not stop between free asset analysis and the sample confirmation");
+    }
     mustInclude(files.frontend, "onArchiveJob={toggleWorkflowArchive}");
     mustInclude(files.frontend, "onArchivedVisibilityChange={setWorkflowArchiveVisibility}");
     mustInclude(files.frontend, "onRouteAAction={runRouteAAction}");
@@ -217,6 +354,15 @@ function checkFrontendButtonContracts(files) {
     mustInclude(files.frontend, "confirmRouteBStartIfNeeded");
     mustInclude(files.frontend, "needsRouteBConfirmation");
     mustInclude(files.frontend, "workflowNextActionPreflight(workflowJob.id, body)");
+    mustInclude(files.frontend, "frontend-route-b-local-setup");
+    mustInclude(files.frontend, "api.syncWorkflowWorkerTasks(workflowJob.id)");
+    mustInclude(files.frontend, "api.buildWorkflowWorkerBriefs(workflowJob.id");
+    mustInclude(files.frontend, "api.probeWorkflowPageSpecProvider(workflowJob.id");
+    mustInclude(files.frontend, "workflowJob?.artifacts?.editableWorkerBatchRuns");
+    mustInclude(files.frontend, 'run?.status === "running"');
+    mustInclude(files.frontend, "api.workflowWorkerBatchPreflight(workflowJob.id");
+    mustInclude(files.frontend, "api.startWorkflowWorkerBatch(workflowJob.id");
+    mustInclude(files.frontend, "开始生成 ${state.routeB.readyEditablePages} 页可编辑 PPT");
     mustInclude(files.frontend, "confirmRouteB: true");
     mustInclude(files.frontend, "job?.artifacts?.editableWorkerTasks?.tasks");
     mustInclude(files.frontend, "job?.artifacts?.editableWorkerTasks");
@@ -233,11 +379,26 @@ function checkFrontendButtonContracts(files) {
     mustInclude(files.frontend, "onOpenSampleReview={openSampleReviewPanel}");
     mustInclude(files.frontend, "onOpenImageDeckReview={openImageDeckReviewPanel}");
     mustInclude(files.frontend, "onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode })");
+    mustInclude(files.frontend, "onRemoveFile={removeUploadedFile}");
+    mustInclude(files.frontend, "return { ok: false, error: message }");
+    mustInclude(files.frontend, 'const uploadDeleteBusyRef = useRef("")');
+    mustInclude(files.frontend, 'removingFileId: uploadDeleteBusyId');
+    mustInclude(files.frontend, "if (!canRunWhileUploadsStable()) return;");
+    mustInclude(files.frontend, "workflowBusy || outlineBusy || generationProgress.active || Boolean(uploadDeleteBusyId)");
+    mustInclude(files.frontend, 'error: "任务正在处理源文件，完成后才能删除。"');
+    mustInclude(files.uiV2, "create.removalDisabled");
+    mustInclude(files.uiV2, "create.onRemoveFile(file)");
+    mustInclude(files.uiV2, "删除已上传文件");
+    mustInclude(files.uiV2, "!create.canSubmit || Boolean(removingFileId)");
+    mustInclude(files.uiV2, 'className={styles.createError} role="alert"');
   });
 }
 
 function checkApiSurface(files) {
   return named("API exposes product workflow controls", () => {
+    mustInclude(files.workflowVisuals, "Keep the generated visual intact");
+    mustNotInclude(files.workflowVisuals, "applyFidelityOverlayToVisualImage");
+    mustNotInclude(files.workflowVisuals, "applyProgramTextOverlayToVisualImage");
     mustInclude(files.apiClient, "workflowDeliveryStatus");
     mustInclude(files.apiClient, "workflowCostEstimate");
     mustInclude(files.apiClient, "latestV1Acceptance");
@@ -266,6 +427,18 @@ function checkApiSurface(files) {
     mustInclude(files.workflowNextAction, "Route B requires explicit user confirmation before starting editable PPT rebuild.");
     mustInclude(files.workflowNextAction, "isImageDeckReviewApproved");
     mustInclude(files.workflowNextAction, "Route B requires image deck review approval before editable prepare.");
+    mustInclude(files.workflowNextAction, "const preparedJob = await runStage(jobId, \"editable_prepared\"");
+    mustInclude(files.workflowNextAction, "{ job: preparedJob }");
+    mustNotInclude(files.workflowEditable, "approvedAt >= qualityCreatedAt");
+    mustInclude(files.workflowImageDeckReview, 'source: "image-deck-review"');
+    mustInclude(files.frontend, ".slice(0, 2)");
+    mustInclude(files.frontend, "confirmLlmProviderRecovered: true");
+    mustInclude(files.frontend, "result.run?.id");
+    mustInclude(files.visualAssetHelper, "runEditpptImageJobs");
+    mustNotInclude(files.visualAssetHelper, "editImageWithProvider");
+    mustInclude(files.visualAssetHelper, "visual-asset-force-progress.json");
+    mustInclude(files.visualAssetHelper, "plannedItem?.actualBackend");
+    mustNotInclude(files.visualAssetHelper, '["image", "batch"');
     if ((files.workflowNextAction.match(/Route B requires image deck review approval before editable prepare\./g) || []).length < 2) {
       throw new Error("Route B image deck review gate must protect both execution and preflight paths");
     }
@@ -341,12 +514,18 @@ function checkApiSurface(files) {
     mustInclude(files.workflowCodexPptSlideBatchRunner, "confirmExternalImageSpend: confirmedExternalImageSpend");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "editImageWithProvider");
     mustInclude(files.workflowCodexPptSlideBatchRunner, "sourceImagePath");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "referenceImagePaths");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "resolveCodexStyleReferenceImages");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "review_required");
+    mustInclude(files.workflowCodexPptSlideBatchRunner, "refreshBatchVisualQuality");
+    mustInclude(files.workflowCodexPptRunState, "existing-visual-manifest");
+    mustInclude(files.workflowCodexPptRunState, "accepted-sample");
     mustInclude(files.workflowVisuals, "buildCodexPptStyleLock");
     mustInclude(files.workflowVisuals, "STYLE LOCK: all slides must share one visual identity.");
     mustInclude(files.workflowVisuals, "styleReferenceImages");
     mustInclude(files.workflowVisuals, "referenceImagePaths: styleLock.referenceImages");
     mustInclude(files.workflowVisuals, "buildDeckStyleConsistencyReport");
-    mustInclude(files.workflowVisuals, "Deck-level pixel consistency QA");
+    mustInclude(files.workflowStyleConsistency, "Deck-level pixel consistency QA");
     mustInclude(files.frontend, "风格一致性");
     mustInclude(files.workflowProductVisualReadinessRunner, "styleLock");
     mustInclude(files.workflowProductVisualReadinessRunner, "风格锁");
@@ -357,7 +536,13 @@ function checkApiSurface(files) {
     mustInclude(files.workflowApprovals, "CODEX_PPT_TWO_PAGE_TEST_REQUIRED");
     mustInclude(files.workflowApprovals, "source-page-edit-plus-style-reference");
     mustInclude(files.workflowApprovals, "isCodexPptFullDeckApprovalCurrent");
-    mustInclude(files.frontend, "开始 2 页测试");
+    mustInclude(files.frontend, "const testPageCount = Math.max(1, Number(routeState.routeA.twoPageTestTarget || 1))");
+    mustInclude(files.frontend, "workflowSelectionRef");
+    mustInclude(files.frontend, "claimWorkflowSelection");
+    mustInclude(files.frontend, "isWorkflowSelectionCurrent");
+    mustInclude(files.frontend, "applySelectedWorkflowJob");
+    mustInclude(files.frontend, "canApplyWorkflowJob(workflowSelectionRef, next?.id)");
+    mustInclude(files.frontend, "if (!isWorkflowSelectionCurrent(selection, polledJobId)) return;");
     mustInclude(files.frontend, "通过并开放全量");
     mustInclude(files.providers, "referenceImagePaths");
     mustInclude(files.providers, "source-page-edit-plus-style-reference");
@@ -389,10 +574,15 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowDelivery, "fullSourceCoverage");
     mustInclude(files.workflowDelivery, "isFullDeliveryCoverageCandidate");
     mustInclude(files.workflowDelivery, "skipPowerPointOpenability");
+    mustInclude(files.workflowDelivery, "storedWorkerTasks");
     mustInclude(files.workflowPageEvidence, "page-pptx-openability-skipped");
     mustInclude(files.workflowPageEvidence, "powerpoint-open-check-skipped-until-full-delivery");
+    mustInclude(files.workflowPageEvidence, "PAGE_EVIDENCE_HASH_CACHE");
     mustInclude(files.workflowDelivery, "不能作为完整产品交付");
     mustInclude(files.workflowDelivery, "final-visual-qa-needs-review");
+    mustInclude(files.workflowDelivery, "visualQaPassed");
+    mustInclude(files.workflowFinalEvidence, "automatedStatus");
+    mustInclude(files.workflowFinalEvidence, "manualReviewStatus");
     mustInclude(files.workflowV1Readiness, "suppressResolvedWorkerBatchFailure");
     mustInclude(files.workflowV1Readiness, "supersededByCurrentEvidence");
     mustInclude(files.workflowV1Readiness, "current-editable-evidence-complete");
@@ -432,6 +622,7 @@ function checkFinalEvidence(files) {
     mustInclude(files.workflowFinalEvidence, "previewToTargetBytes");
     mustInclude(files.workflowFinalEvidence, "foregroundAssetIssues");
     mustInclude(files.workflowFinalEvidence, "jobPageIds.length");
+    mustInclude(files.workflowFinalEvidence, "fsSync.readSync(fileHandle, buffer");
   });
 }
 

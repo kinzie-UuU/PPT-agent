@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
 import { rootDir } from "./store.js";
+import { isCodexPptSampleApprovalCurrent } from "./workflowApprovals.js";
 
 export async function prepareCodexPptSlideRun(job, { renderedPages = [], prompts = {}, selectedPages = [], options = {} } = {}) {
   const now = new Date().toISOString();
@@ -144,7 +145,86 @@ async function readPreservedSlides(job = {}) {
       qaNote: task.message || previous.qaNote || ""
     });
   }
+  for (const image of Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : []) {
+    const pageNumber = Number(image?.pageNumber || String(image?.pageId || "").match(/\d+/)?.[0] || 0);
+    const imagePath = cleanString(image?.path || "");
+    if (!pageNumber || !imagePath || !fsSync.existsSync(imagePath) || !visualImageMatchesCurrentSample(job, image)) continue;
+    const previous = byNumber.get(pageNumber) || {};
+    byNumber.set(pageNumber, {
+      ...previous,
+      status: "recorded",
+      imagePath,
+      imageSha256: cleanString(image.sha256 || previous.imageSha256 || await hashFile(imagePath)),
+      backend: compactBackend(image),
+      agentId: cleanString(image.agentId || previous.agentId || "existing-visual-manifest"),
+      dispatchMode: cleanString(image.dispatchMode || previous.dispatchMode || "manifest-recovery"),
+      recordedAt: cleanString(image.finishedAt || image.createdAt || previous.recordedAt || ""),
+      qaNote: cleanString(image.qaNote || previous.qaNote || "Recovered from the current visual image manifest.")
+    });
+  }
+  if (isCodexPptSampleApprovalCurrent(job)) {
+    const visualByNumber = new Map((Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
+      .map((image) => [Number(image?.pageNumber || String(image?.pageId || "").match(/\d+/)?.[0] || 0), image])
+      .filter(([pageNumber]) => pageNumber));
+    for (const [pageNumber, preserved] of byNumber.entries()) {
+      if (preserved.status !== "recorded") continue;
+      const image = visualByNumber.get(pageNumber);
+      if (!image || !visualImageMatchesCurrentSample(job, image)) byNumber.delete(pageNumber);
+    }
+  }
+  const approvedSample = await buildApprovedSampleSlide(job);
+  if (approvedSample) {
+    const previous = byNumber.get(approvedSample.pageNumber) || {};
+    byNumber.set(approvedSample.pageNumber, {
+      ...previous,
+      ...approvedSample,
+      status: "recorded"
+    });
+  }
   return byNumber;
+}
+
+function visualImageMatchesCurrentSample(job = {}, image = {}) {
+  if (image.staleStyleReference === true) return false;
+  const sample = job.artifacts?.visualSample || {};
+  if (!sample.sha256 || !sample.path || !isCodexPptSampleApprovalCurrent(job)) return true;
+  if (image.approvedSampleSha256 === sample.sha256) return true;
+  const samplePath = path.resolve(sample.path);
+  return (Array.isArray(image.referenceImagePaths) ? image.referenceImagePaths : [])
+    .some((item) => item && path.resolve(item) === samplePath);
+}
+
+async function buildApprovedSampleSlide(job = {}) {
+  const sample = job.artifacts?.visualSample || {};
+  const samplePath = cleanString(sample.path || "");
+  if (!samplePath || !fsSync.existsSync(samplePath) || !isCodexPptSampleApprovalCurrent(job)) return null;
+  const visualImages = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [];
+  const matchingImage = visualImages.find((image) => (
+    (sample.sha256 && image?.sha256 === sample.sha256)
+    || (image?.path && path.resolve(image.path) === path.resolve(samplePath))
+    || (sample.pageId && image?.pageId === sample.pageId)
+  ));
+  const pageNumber = Number(
+    sample.pageNumber
+    || String(sample.pageId || "").match(/\d+/)?.[0]
+    || matchingImage?.pageNumber
+    || String(matchingImage?.pageId || "").match(/\d+/)?.[0]
+    || 0
+  );
+  if (!pageNumber) return null;
+  const imagePath = cleanString(matchingImage?.path || samplePath);
+  if (!imagePath || !fsSync.existsSync(imagePath)) return null;
+  return {
+    pageNumber,
+    status: "recorded",
+    imagePath,
+    imageSha256: cleanString(matchingImage?.sha256 || sample.sha256 || await hashFile(imagePath)),
+    backend: compactBackend(matchingImage || sample),
+    agentId: "approved-visual-sample",
+    dispatchMode: "accepted-sample",
+    recordedAt: cleanString(sample.approvedAt || sample.createdAt || new Date().toISOString()),
+    qaNote: "Approved visual sample retained as the generated result for this page."
+  };
 }
 
 function buildPreparedSlide(prompt, backend, preserved = {}) {

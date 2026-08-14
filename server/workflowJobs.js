@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import crypto from "crypto";
 import { rootDir } from "./store.js";
+import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
 
 export const workflowRootDir = path.join(rootDir, "workspace", "jobs");
 
@@ -35,6 +36,13 @@ const WORKFLOW_DIRS = [
   "final",
   "logs"
 ];
+const WORKFLOW_LIST_CACHE_TTL_MS = 5000;
+const WORKFLOW_LIST_READ_CONCURRENCY = 32;
+const WORKFLOW_LIST_MAX_SCAN_ATTEMPTS = 3;
+const WORKFLOW_LIST_CHANGE_PATH = path.join(workflowRootDir, ".workflow-list-version");
+let workflowListCache = { summaries: null, entries: new Map(), expiresAt: 0, rootFingerprint: "" };
+let workflowListRefreshPromise = null;
+let workflowListCacheRevision = 0;
 
 export async function ensureWorkflowRoot() {
   await fs.mkdir(workflowRootDir, { recursive: true });
@@ -67,6 +75,7 @@ export async function createWorkflowJob(input = {}) {
     version: 1,
     id,
     kind: "ppt-rebuild-workflow",
+    visibility: cleanString(input.visibility || ""),
     internal: Boolean(input.internal),
     status: sourceArtifact ? "source_ready" : "created",
     currentStage: sourceArtifact ? "source_ready" : "created",
@@ -82,8 +91,10 @@ export async function createWorkflowJob(input = {}) {
       sourceSize: input.sourceUpload?.size || input.sourceSize || 0,
       sourceKind: sourceArtifact?.kind || "",
       sourceBrief: cleanString(input.sourceBrief || ""),
+      projectName: cleanString(input.projectName || ""),
       mode: cleanString(input.mode || "ppt-rebuild"),
       notes: cleanString(input.notes || ""),
+      visibility: cleanString(input.visibility || ""),
       internal: Boolean(input.internal)
     },
     artifacts: sourceArtifact ? { source: sourceArtifact } : {},
@@ -104,20 +115,191 @@ export async function createWorkflowJob(input = {}) {
   return job;
 }
 
-export async function listWorkflowJobs() {
+export async function listWorkflowJobs(options = {}) {
+  const summaries = await listWorkflowJobSummaries(options);
+  return readWorkflowJobsByIds(summaries.map((job) => job.id));
+}
+
+export async function listWorkflowJobSummaries(options = {}) {
   await ensureWorkflowRoot();
-  const entries = await fs.readdir(workflowRootDir, { withFileTypes: true }).catch(() => []);
-  const jobs = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const job = await readWorkflowJob(entry.name).catch(() => null);
-    if (job) jobs.push(job);
+  const now = Date.now();
+  const rootFingerprint = await getWorkflowListRootFingerprint();
+  let summaries = workflowListCache.summaries
+    && workflowListCache.expiresAt > now
+    && workflowListCache.rootFingerprint === rootFingerprint
+    ? workflowListCache.summaries
+    : null;
+  if (!summaries) {
+    summaries = await refreshWorkflowListCacheSingleFlight();
   }
-  return jobs.sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+  const limit = normalizeListLimit(options.limit);
+  return limit ? summaries.slice(0, limit) : [...summaries];
+}
+
+async function refreshWorkflowListCacheSingleFlight() {
+  if (workflowListRefreshPromise) return workflowListRefreshPromise;
+  const refresh = refreshWorkflowListCache();
+  workflowListRefreshPromise = refresh;
+  try {
+    return await refresh;
+  } finally {
+    if (workflowListRefreshPromise === refresh) workflowListRefreshPromise = null;
+  }
+}
+
+async function refreshWorkflowListCache() {
+  let lastScan = null;
+  for (let attempt = 0; attempt < WORKFLOW_LIST_MAX_SCAN_ATTEMPTS; attempt += 1) {
+    const startedRootFingerprint = await getWorkflowListRootFingerprint();
+    const startedRevision = workflowListCacheRevision;
+    const scan = await scanWorkflowList(workflowListCache.entries || new Map());
+    const finishedRootFingerprint = await getWorkflowListRootFingerprint();
+    const stable = startedRootFingerprint === finishedRootFingerprint
+      && startedRevision === workflowListCacheRevision;
+    lastScan = { ...scan, rootFingerprint: startedRootFingerprint };
+    if (!stable) continue;
+    workflowListCache = {
+      summaries: scan.summaries,
+      entries: scan.entries,
+      expiresAt: Date.now() + WORKFLOW_LIST_CACHE_TTL_MS,
+      rootFingerprint: finishedRootFingerprint
+    };
+    return scan.summaries;
+  }
+
+  if (workflowListCache.summaries) {
+    workflowListCache.expiresAt = 0;
+    return workflowListCache.summaries;
+  }
+  workflowListCache = {
+    summaries: lastScan?.summaries || [],
+    entries: lastScan?.entries || new Map(),
+    expiresAt: 0,
+    rootFingerprint: lastScan?.rootFingerprint || ""
+  };
+  return workflowListCache.summaries;
+}
+
+async function scanWorkflowList(previousEntries) {
+  const entries = await fs.readdir(workflowRootDir, { withFileTypes: true }).catch(() => []);
+  const directories = entries.filter((entry) => entry.isDirectory());
+  const nextEntries = new Map();
+  const summaries = (await mapWithConcurrency(directories, WORKFLOW_LIST_READ_CONCURRENCY, async (entry) => {
+    let statePath = "";
+    try {
+      statePath = getStatePath(entry.name);
+    } catch {
+      return null;
+    }
+    const stat = await fs.stat(statePath, { bigint: true }).catch(() => null);
+    if (!stat) return null;
+    const fingerprint = getWorkflowStateStatFingerprint(stat);
+    const cached = previousEntries.get(entry.name);
+    if (cached?.fingerprint === fingerprint) {
+      nextEntries.set(entry.name, cached);
+      return cached.summary;
+    }
+    const raw = await fs.readFile(statePath, "utf8").catch(() => "");
+    if (!raw) return null;
+    let summary = null;
+    try {
+      summary = buildWorkflowListSummary(normalizeWorkflowJob(JSON.parse(raw)));
+    } catch {
+      return null;
+    }
+    nextEntries.set(entry.name, { fingerprint, summary });
+    return summary;
+  }))
+    .filter(Boolean)
+    .sort(compareWorkflowJobsByRecency);
+  return { summaries, entries: nextEntries };
+}
+
+async function getWorkflowListRootFingerprint() {
+  const [rootStat, changeToken] = await Promise.all([
+    fs.stat(workflowRootDir, { bigint: true }).catch(() => null),
+    fs.readFile(WORKFLOW_LIST_CHANGE_PATH, "utf8").catch(() => "")
+  ]);
+  return `${getWorkflowStateStatFingerprint(rootStat)}|${changeToken.trim()}`;
+}
+
+function getWorkflowStateStatFingerprint(stat) {
+  if (!stat) return "missing";
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(":");
+}
+
+async function markWorkflowListChanged() {
+  const token = `${Date.now()}-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  await writeJsonAtomic(WORKFLOW_LIST_CHANGE_PATH, { token });
+}
+
+export async function readWorkflowJobsByIds(ids = []) {
+  return (await mapWithConcurrency([...new Set(ids.filter(Boolean))], WORKFLOW_LIST_READ_CONCURRENCY, (id) => (
+    readWorkflowJob(id).catch(() => null)
+  ))).filter(Boolean);
+}
+
+function compareWorkflowJobsByRecency(left = {}, right = {}) {
+  return String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || ""));
+}
+
+function normalizeListLimit(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.min(500, Math.max(1, Math.floor(number)));
+}
+
+function buildWorkflowListSummary(job = {}) {
+  const input = job.input || {};
+  const listSearchText = [
+    input.mode,
+    input.sourceOriginalName,
+    input.notes,
+    ...(Array.isArray(job.events) ? job.events.map((event) => `${event.type || ""} ${event.message || ""}`) : [])
+  ].filter(Boolean).join(" ");
+  return {
+    version: 1,
+    id: job.id,
+    kind: job.kind || "ppt-rebuild-workflow",
+    visibility: cleanString(job.visibility || input.visibility || ""),
+    internal: isInternalWorkflowJob(job),
+    status: job.status || "created",
+    currentStage: job.currentStage || "created",
+    stageStatus: job.stageStatus || "pending",
+    createdAt: job.createdAt || "",
+    updatedAt: job.updatedAt || job.createdAt || "",
+    input: {
+      sourceOriginalName: cleanString(input.sourceOriginalName || ""),
+      sourceBrief: cleanString(input.sourceBrief || ""),
+      projectName: cleanString(input.projectName || ""),
+      mode: cleanString(input.mode || ""),
+      notes: cleanString(input.notes || ""),
+      visibility: cleanString(input.visibility || ""),
+      internal: input.internal === true
+    },
+    lifecycle: job.lifecycle || {},
+    listSearchText
+  };
+}
+
+async function mapWithConcurrency(items = [], concurrency = 16, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workerCount = Math.min(Math.max(1, concurrency), Math.max(1, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }
 
 export async function previewWorkflowJobCleanup(options = {}) {
-  const allJobs = await listWorkflowJobs();
+  const allJobs = await listWorkflowJobSummaries();
   const candidates = allJobs
     .map((job) => toWorkflowCleanupCandidate(job, options))
     .filter(Boolean)
@@ -371,7 +553,7 @@ function toWorkflowCleanupCandidate(job = {}, options = {}) {
 
 function getWorkflowCleanupReasons(job = {}, options = {}) {
   const categories = getCleanupCategories(options);
-  const text = [
+  const text = job.listSearchText || [
     job.input?.mode,
     job.input?.sourceOriginalName,
     job.input?.notes,
@@ -425,8 +607,21 @@ function buildWorkflowCleanupSummary(candidates = [], allJobs = []) {
 }
 
 async function writeWorkflowState(job) {
+  const normalized = normalizeWorkflowJob(job);
   const statePath = path.join(job.rootDir, "state.json");
-  await writeJsonAtomic(statePath, normalizeWorkflowJob(job));
+  await writeJsonAtomic(statePath, normalized);
+  workflowListCacheRevision += 1;
+  await markWorkflowListChanged().catch(() => {});
+  if (workflowListRefreshPromise) await workflowListRefreshPromise.catch(() => {});
+  if (workflowListCache.summaries) {
+    const summary = buildWorkflowListSummary(normalized);
+    const stat = await fs.stat(statePath, { bigint: true }).catch(() => null);
+    workflowListCache.summaries = [summary, ...workflowListCache.summaries.filter((item) => item.id !== normalized.id)]
+      .sort(compareWorkflowJobsByRecency);
+    if (stat) workflowListCache.entries.set(normalized.id, { fingerprint: getWorkflowStateStatFingerprint(stat), summary });
+    workflowListCache.expiresAt = Date.now() + WORKFLOW_LIST_CACHE_TTL_MS;
+    workflowListCache.rootFingerprint = await getWorkflowListRootFingerprint();
+  }
 }
 
 async function writeWorkflowManifest(job) {
@@ -480,6 +675,7 @@ function normalizeWorkflowJob(job) {
     version: 1,
     id: job.id,
     kind: job.kind || "ppt-rebuild-workflow",
+    visibility: cleanString(job.visibility || job.input?.visibility || ""),
     internal: Boolean(job.internal || job.input?.internal),
     status: job.status || "created",
     currentStage: job.currentStage || "created",

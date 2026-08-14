@@ -2,6 +2,8 @@ import { getProviderConfig } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 
 const AUTHORIZATION_LIMIT = 50;
+const AUTHORIZATION_TTL_MS = 30 * 60 * 1000;
+const AUTHORIZATION_JOB_LOCKS = new Map();
 
 export async function listWorkflowAuthorizations(jobId) {
   const job = await readWorkflowJob(jobId);
@@ -21,6 +23,7 @@ export function getExternalImageAuthorizationStatus(job = {}, options = {}) {
   const requestedPageSelection = cleanString(options.pageSelection || options.pageIds || options.pages || options.pageNumbers || "");
   const provider = getProviderConfig().image || {};
   const records = getExternalImageAuthorizations(job)
+    .filter((record) => authorizationIsAvailable(record))
     .filter((record) => normalizeScope(record.scope) === scope)
     .filter((record) => normalizeImageCalls(record.imageCalls) >= requiredCalls)
     .filter((record) => authorizationCoversPages(record, requestedPages))
@@ -44,7 +47,61 @@ export function getExternalImageAuthorizationStatus(job = {}, options = {}) {
   };
 }
 
+export async function consumeExternalImageSpendAuthorization(jobId, options = {}) {
+  return withAuthorizationJobLock(jobId, () => consumeExternalImageSpendAuthorizationUnlocked(jobId, options));
+}
+
+async function consumeExternalImageSpendAuthorizationUnlocked(jobId, options = {}) {
+  const job = await readWorkflowJob(jobId);
+  const status = getExternalImageAuthorizationStatus(job, options);
+  const authorization = status.latest;
+  if (!authorization?.id) {
+    const error = new Error(status.warning || "No matching external image spend authorization is available.");
+    error.status = 409;
+    error.code = "EXTERNAL_IMAGE_AUTHORIZATION_REQUIRED";
+    throw error;
+  }
+  const consumedAt = new Date().toISOString();
+  const consumedBy = cleanString(options.consumedBy || options.requestedBy || options.runId || "workflow-run");
+  const externalImageSpend = getExternalImageAuthorizations(job).map((record) => (
+    record.id === authorization.id
+      ? {
+        ...record,
+        consumedAt,
+        consumedBy,
+        consumedRunId: cleanString(options.runId || ""),
+        consumedPageSelection: cleanString(options.pageSelection || options.pages || options.pageIds || ""),
+        consumedPages: normalizeAuthorizationPages(options.pages || options.pageNumbers || options.pageSelection || options.pageIds || ""),
+        consumedImageCalls: normalizeImageCalls(options.imageCalls || status.imageCalls)
+      }
+      : record
+  ));
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    externalImageSpendAuthorizations: externalImageSpend
+  };
+  job.events = appendEvent(job.events, {
+    type: "authorization.external_image_spend_consumed",
+    message: `Consumed ${status.imageCalls} external image API call authorization(s) for ${status.scope}`,
+    details: {
+      authorizationId: authorization.id,
+      scope: status.scope,
+      imageCalls: status.imageCalls,
+      pageSelection: cleanString(options.pageSelection || options.pages || options.pageIds || ""),
+      pages: status.pages,
+      consumedBy
+    },
+    createdAt: consumedAt
+  });
+  const saved = await saveWorkflowJob(job);
+  return { ok: true, job: saved, authorization: externalImageSpend.find((record) => record.id === authorization.id) };
+}
+
 export async function authorizeExternalImageSpend(jobId, options = {}) {
+  return withAuthorizationJobLock(jobId, () => authorizeExternalImageSpendUnlocked(jobId, options));
+}
+
+async function authorizeExternalImageSpendUnlocked(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const record = buildExternalImageSpendAuthorization(options);
   const externalImageSpend = [...getExternalImageAuthorizations(job), record].slice(-AUTHORIZATION_LIMIT);
@@ -80,6 +137,7 @@ export async function authorizeExternalImageSpend(jobId, options = {}) {
 function buildExternalImageSpendAuthorization(options = {}) {
   const provider = getProviderConfig().image || {};
   const scope = normalizeScope(options.scope || options.target || "visual-sample");
+  const confirmedAt = new Date().toISOString();
   return {
     id: `auth_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
     kind: "external_image_spend_authorization",
@@ -96,7 +154,11 @@ function buildExternalImageSpendAuthorization(options = {}) {
     enabled: Boolean(provider.enabled),
     confirmedBy: cleanString(options.confirmedBy || options.requestedBy || "local-user"),
     reason: cleanString(options.reason || ""),
-    confirmedAt: new Date().toISOString()
+    confirmedAt,
+    expiresAt: new Date(Date.parse(confirmedAt) + AUTHORIZATION_TTL_MS).toISOString(),
+    consumedAt: "",
+    consumedBy: "",
+    consumedRunId: ""
   };
 }
 
@@ -113,6 +175,13 @@ function summarizeExternalImageSpend(records = []) {
 function getExternalImageAuthorizations(job = {}) {
   const records = job.artifacts?.externalImageSpendAuthorizations;
   return Array.isArray(records) ? records : [];
+}
+
+function authorizationIsAvailable(record = {}) {
+  if (cleanString(record.consumedAt || "")) return false;
+  const confirmedAt = Date.parse(record.confirmedAt || "");
+  const expiresAt = Date.parse(record.expiresAt || "") || (Number.isFinite(confirmedAt) ? confirmedAt + AUTHORIZATION_TTL_MS : 0);
+  return Boolean(expiresAt && expiresAt > Date.now());
 }
 
 function normalizeScope(value = "") {
@@ -218,6 +287,21 @@ function appendEvent(events = [], event) {
     id: `evt_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
     ...event
   }].slice(-500);
+}
+
+async function withAuthorizationJobLock(jobId, operation) {
+  const key = cleanString(jobId);
+  const previous = AUTHORIZATION_JOB_LOCKS.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  AUTHORIZATION_JOB_LOCKS.set(key, current);
+  await previous.catch(() => null);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (AUTHORIZATION_JOB_LOCKS.get(key) === current) AUTHORIZATION_JOB_LOCKS.delete(key);
+  }
 }
 
 function cleanString(value = "") {

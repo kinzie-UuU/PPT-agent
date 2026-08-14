@@ -22,7 +22,8 @@ export async function getWorkflowV1Readiness(jobId) {
   const artifactLinks = await listWorkflowArtifactLinks(jobId).catch(() => ({ links: [] }));
   const artifacts = job.artifacts || {};
   const renderedPages = Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages : [];
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
   const editableTasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const approvals = Array.isArray(artifacts.codexPptApprovals) ? artifacts.codexPptApprovals : [];
   const approvedGates = new Set(approvals.filter((item) => item.status === "approved").map((item) => item.gate));
@@ -472,7 +473,7 @@ function buildCurrentEditableEvidence({ artifacts = {}, finalGate = {}, qualityE
 function suppressResolvedWorkerBatchFailure(preflight = {}, currentEditableEvidence = {}) {
   if (!currentEditableEvidence.suppressHistoricalProviderFailure) return preflight;
   const blockingIssues = Array.isArray(preflight.blockingIssues)
-    ? preflight.blockingIssues.filter((issue) => !/No ready or failed editable worker task matches this batch/i.test(String(issue || "")))
+    ? preflight.blockingIssues.filter((issue) => !/No ready(?: or failed)? editable worker task matches this batch/i.test(String(issue || "")))
     : [];
   const warnings = Array.isArray(preflight.warnings)
     ? preflight.warnings.filter((issue) => !/最近一次可编辑重建失败|provider-timeout|timed out|timeout|aborted/i.test(String(issue || "")))

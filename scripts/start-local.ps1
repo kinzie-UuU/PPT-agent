@@ -74,7 +74,7 @@ function Start-ServerProcess {
   }
   $env:PORT = [string]$Port
   try {
-    $process = Start-Process -FilePath $node -ArgumentList "server/index.js" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+    $process = Start-Process -FilePath $node -ArgumentList @("--use-env-proxy", "server/index.js") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
   } finally {
     if ($null -eq $previousPort) {
       Remove-Item Env:\PORT -ErrorAction SilentlyContinue

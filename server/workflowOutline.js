@@ -3,6 +3,7 @@ import path from "path";
 import crypto from "crypto";
 import { rootDir } from "./store.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { buildDeckStructureAudit, inferDeckPageRole } from "./workflowDeckDesignSystem.js";
 
 const OUTLINE_LAYOUTS = ["cover", "section", "visual", "cards", "timeline", "quote", "closing"];
 
@@ -15,9 +16,12 @@ export function buildSkillFirstOutlineDraft({ input = {}, materialBrief = {}, up
   const layoutSequence = hasSourcePages
     ? buildSourcePageOutline(sourcePages, requestedCount)
     : buildBriefOutline(input, materialBrief, requestedCount);
+  const structureAudit = hasSourcePages
+    ? buildDeckStructureAudit(layoutSequence, { sourceDeck: true })
+    : buildDeckStructureAudit(layoutSequence, { sourceDeck: false });
   return {
     kind: "skill_first_outline_plan",
-    version: 1,
+    version: 2,
     source: "workflow-outline-plan",
     title: cleanString(input.projectName || materialBrief.summary || "Skill-first PPT 工作流大纲"),
     targetSlides: layoutSequence.length,
@@ -30,6 +34,7 @@ export function buildSkillFirstOutlineDraft({ input = {}, materialBrief = {}, up
       "image-to-editable-ppt-rebuild-second"
     ],
     skillChain: ["codex-ppt", "image-to-editable-ppt"],
+    structureAudit,
     legacyTemplate: {
       used: false,
       reason: "legacy-template-pack-and-master-reuse-removed"
@@ -41,17 +46,20 @@ export function buildSkillFirstOutlineDraft({ input = {}, materialBrief = {}, up
 function buildSourcePageOutline(sourcePages = [], requestedCount = 1) {
   const pages = sourcePages.slice(0, requestedCount);
   return pages.map((page, index) => {
-    const last = index === pages.length - 1;
-    const layout = index === 0 ? "cover" : last && pages.length > 2 ? "closing" : inferLayoutFromPage(page, index);
+    const layout = inferDeckPageRole(page, {
+      pageNumber: page.page || index + 1,
+      totalPages: pages.length,
+      preferExplicitRole: false
+    });
     const title = cleanString(page.title) || `源稿第 ${index + 1} 页`;
     const textPreview = cleanString(page.textPreview || page.text || "").slice(0, 180);
     return normalizeOutlineStep({
       layout,
       title,
       purpose: `保留源稿第 ${page.page || index + 1} 页的信息目标，由 codex-ppt 重绘成视觉统一图片页。`,
-      storyRole: index === 0 ? "建立主题" : last && pages.length > 2 ? "收束交付" : "承接源稿内容",
+      storyRole: storyRoleForLayout(layout),
       evidence: textPreview || `source-page-${page.page || index + 1}`,
-      visualIntent: page.sourceSlideType ? `参考源页类型：${page.sourceSlideType}` : "重绘为统一视觉页",
+      visualIntent: `按${layout}页面角色重绘；保持整套设计系统一致。`,
       notes: "最终通过 image-to-editable-ppt/editppt 重建为可编辑 PPT。"
     }, index);
   });
@@ -94,16 +102,6 @@ function fitBriefSequence(base = [], requestedCount = 5) {
   return [base[0], ...middle, ...extra, base[base.length - 1]];
 }
 
-function inferLayoutFromPage(page = {}, index = 0) {
-  const text = [page.title, page.textPreview, ...(page.diagnosisProblems || [])].filter(Boolean).join(" ");
-  if (/price|pricing|价格|报价|费用|预算/i.test(text)) return "pricing";
-  if (/risk|风险|清单|checklist/i.test(text)) return "risk-checklist";
-  if (/timeline|roadmap|时间|流程|计划|路径/i.test(text)) return "timeline";
-  if (/compare|对比|竞品/i.test(text)) return "compare";
-  if (Number(page.imageCount || 0) > 0 && !Number(page.textChars || 0)) return "visual";
-  return index % 3 === 0 ? "visual" : index % 3 === 1 ? "cards" : "section";
-}
-
 function resolveDraftSlideCount(pageCount, sourcePageCount, materialBrief = {}, uploads = []) {
   const text = String(pageCount || "");
   const explicit = text.match(/\d{1,2}/);
@@ -124,12 +122,15 @@ export async function recordWorkflowCodexPptOutline(jobId, options = {}) {
   const markdownPath = path.join(outlineDir, "outline.md");
   const payload = {
     kind: "codex_ppt_outline",
-    version: 1,
+    version: 2,
     jobId: job.id,
     source: cleanString(options.source || "workflow-outline"),
     title: cleanString(options.title || outlinePlan.title || job.input?.sourceOriginalName || "Codex PPT outline"),
     slideCount: outlinePlan.layoutSequence.length,
     layoutSequence: outlinePlan.layoutSequence,
+    structureAudit: outlinePlan.structureAudit || buildDeckStructureAudit(outlinePlan.layoutSequence, {
+      sourceDeck: Boolean(job.artifacts?.renderedPages?.length)
+    }),
     notes: cleanString(options.notes || ""),
     recordedBy: cleanString(options.recordedBy || "local-user"),
     recordedAt: now
@@ -147,6 +148,7 @@ export async function recordWorkflowCodexPptOutline(jobId, options = {}) {
       relativePath: path.relative(rootDir, jsonPath),
       markdownRelativePath: path.relative(rootDir, markdownPath),
       slideCount: payload.slideCount,
+      structureAudit: payload.structureAudit,
       source: payload.source,
       title: payload.title,
       size: jsonStat.size,
@@ -185,18 +187,30 @@ function normalizeOutlinePlan(job = {}, options = {}) {
     title: cleanString(options.title || job.input?.sourceOriginalName || "Codex PPT outline"),
     layoutSequence: Array.from({ length: fallbackCount }, (_item, index) => {
       const page = renderedPages[index] || {};
-      const layout = index === 0 ? "cover" : index === fallbackCount - 1 && fallbackCount > 2 ? "closing" : "content";
+      const layout = inferDeckPageRole(page, { pageNumber: index + 1, totalPages: fallbackCount });
       return normalizeOutlineStep({
         layout,
-        title: page.title || (index === 0 ? "Opening" : index === fallbackCount - 1 && fallbackCount > 2 ? "Closing" : `Slide ${index + 1}`),
+        title: page.title || (layout === "cover" ? "主题封面" : `第 ${index + 1} 页`),
         purpose: page.path
           ? `Reframe source page ${index + 1} into the approved codex-ppt visual system.`
           : "Create a visually unified slide from the provided brief.",
-        storyRole: layout === "cover" ? "set context" : layout === "closing" ? "close with action" : "develop the narrative",
+        storyRole: storyRoleForLayout(layout),
         evidence: page.path || sourceBrief.slice(0, 180)
       }, index);
     }).filter(Boolean)
   };
+}
+
+function storyRoleForLayout(layout = "content") {
+  if (layout === "cover") return "建立主题";
+  if (layout === "agenda") return "说明结构";
+  if (layout === "section") return "切换章节";
+  if (layout === "summary") return "归纳结论";
+  if (layout === "closing") return "收束并推动行动";
+  if (layout === "table") return "呈现数据或明细";
+  if (layout === "comparison") return "建立对比";
+  if (layout === "process") return "说明路径";
+  return "承接并展开内容";
 }
 
 function normalizeOutlineStep(step = {}, index = 0) {

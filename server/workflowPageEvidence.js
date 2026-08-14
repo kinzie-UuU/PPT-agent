@@ -28,11 +28,15 @@ const REQUIRED_MANIFEST_KEYS = [
   "images",
   "asset_provenance"
 ];
+const PAGE_PPTX_OPENABILITY_CACHE = new Map();
+const PAGE_PPTX_OPENABILITY_SUCCESS_TTL_MS = 5 * 60 * 1000;
+const PAGE_PPTX_OPENABILITY_FAILURE_TTL_MS = 15 * 1000;
+const PAGE_EVIDENCE_HASH_CACHE = new Map();
+const PAGE_EVIDENCE_HASH_CACHE_MAX_ENTRIES = 1000;
 
 export async function scanWorkflowPageEvidence(jobOrId, options = {}) {
   const job = typeof jobOrId === "string" ? await readWorkflowJob(jobOrId) : jobOrId;
   const runDir = job?.artifacts?.editableRun?.path || "";
-  const openableRepairOk = job?.artifacts?.editableFinal?.openableRepair?.ok === true;
   if (!runDir || !fsSync.existsSync(runDir)) {
     return emptyEvidence({ runDir, issue: "Editable run directory is missing." });
   }
@@ -45,7 +49,6 @@ export async function scanWorkflowPageEvidence(jobOrId, options = {}) {
   const pageEvidence = [];
   for (const page of pages) {
     pageEvidence.push(await scanPageEvidence(runDir, page, {
-      openableRepairOk,
       skipPowerPointOpenability: options.skipPowerPointOpenability === true
     }));
   }
@@ -91,14 +94,14 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   if (!pageResultShapeOk) issues.push("page-result-shape-invalid");
 
   const pagePptxOpenability = outputEvidence.page_pptx.exists
-    ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path, {
+      ? await inspectPagePptxOpenability(outputEvidence.page_pptx.path, {
         page,
-        openableRepairOk: options.openableRepairOk,
         skipPowerPointOpenability: options.skipPowerPointOpenability
       })
     : null;
-  const pagePptxOpenable = pagePptxOpenability?.openable !== false;
-  if (pagePptxOpenability?.openable === false) issues.push("page-pptx-powerpoint-open-failed");
+  const pagePptxOpenable = pagePptxOpenability?.available === true && pagePptxOpenability?.openable === true;
+  if (pagePptxOpenability && pagePptxOpenability.available !== true) issues.push("page-pptx-powerpoint-check-unavailable");
+  else if (pagePptxOpenability?.openable !== true) issues.push("page-pptx-powerpoint-open-failed");
   if (pagePptxOpenability?.skipped === true) issues.push("page-pptx-openability-skipped");
 
   const manifest = await readJson(outputEvidence.page_manifest.path).catch(() => null);
@@ -106,19 +109,18 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   if (!manifestCheck.ok) issues.push(...manifestCheck.issues);
 
   const hashResults = await verifyOutputHashes(result?.hashes || {}, outputEvidence);
-  const effectiveHashResults = hashResults.map((hash) => ({
-    ...hash,
-    matched: hash.matched || Boolean(options.openableRepairOk && hash.key === "page_pptx" && pagePptxOpenable)
-  }));
+  const effectiveHashResults = hashResults;
   for (const hash of hashResults) {
     const effective = effectiveHashResults.find((item) => item.key === hash.key) || hash;
     outputEvidence[hash.key].hashMatched = effective.matched;
-    if (!effective.matched) issues.push(`hash-mismatch-${hash.key}`);
+    if (effective.missing) issues.push(`missing-recorded-hash-${hash.key}`);
+    else if (!effective.matched) issues.push(`hash-mismatch-${hash.key}`);
   }
-  const allHashesMatched = effectiveHashResults.length ? effectiveHashResults.every((item) => item.matched) : false;
-  if (!hashResults.length) issues.push("missing-recorded-hashes");
+  const allHashesMatched = effectiveHashResults.length === REQUIRED_PAGE_RESULT_KEYS.length
+    && effectiveHashResults.every((item) => item.matched);
+  if (effectiveHashResults.some((item) => item.missing)) issues.push("missing-recorded-hashes");
 
-  const resultOk = Boolean(result?.agent_id && result?.recorded_at && result?.record_mode === "dispatched-worker" && result?.validation_passed === true);
+  const resultOk = isPageResultEvidenceComplete({ dispatch, result });
   if (!resultOk) issues.push("missing-record-evidence");
 
   const requiredArtifactsOk = Object.values(outputEvidence).every((item) => item.exists);
@@ -144,19 +146,19 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
   };
 }
 
+export function isPageResultEvidenceComplete({ dispatch = {}, result = {} } = {}) {
+  const commonEvidence = Boolean(result?.agent_id && result?.recorded_at && result?.validation_passed === true);
+  if (!commonEvidence) return false;
+  if (result.record_mode === "dispatched-worker") return true;
+  return Boolean(
+    result.record_mode === "local-main-agent"
+    && dispatch?.execution_mode === "local"
+    && dispatch?.agent_id
+    && dispatch.agent_id === result.agent_id
+  );
+}
+
 async function inspectPagePptxOpenability(filePath, options = {}) {
-  const repair = options.page?.result?.openable_repair || null;
-  if (options.openableRepairOk && repair?.pagePptx) {
-    return {
-      version: 1,
-      source: "page-openable-repair-cache",
-      available: process.platform === "win32",
-      openable: true,
-      slideCount: 1,
-      warnings: [],
-      error: ""
-    };
-  }
   if (options.skipPowerPointOpenability) {
     return {
       version: 1,
@@ -169,6 +171,15 @@ async function inspectPagePptxOpenability(filePath, options = {}) {
       error: ""
     };
   }
+  const cacheKey = buildPagePptxOpenabilityCacheKey(filePath);
+  const cached = cacheKey ? PAGE_PPTX_OPENABILITY_CACHE.get(cacheKey) : null;
+  if (cached && cached.expiresAt > Date.now()) {
+    return {
+      ...cached.result,
+      cached: true
+    };
+  }
+  if (cacheKey && cached) PAGE_PPTX_OPENABILITY_CACHE.delete(cacheKey);
   const attempts = [];
   for (let index = 0; index < 3; index += 1) {
     const result = await inspectPowerPointOpenability(filePath).catch((error) => ({
@@ -181,20 +192,43 @@ async function inspectPagePptxOpenability(filePath, options = {}) {
       error: error.message || "PowerPoint open check failed"
     }));
     attempts.push(result);
-    if (result?.openable !== false) {
-      return index === 0 ? result : {
+    if (result?.available === true && result?.openable === true) {
+      return rememberPagePptxOpenability(cacheKey, index === 0 ? result : {
         ...result,
         warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), `powerpoint-open-succeeded-after-${index + 1}-attempts`],
         attempts: attempts.map(compactOpenabilityAttempt)
-      };
+      });
     }
     await sleep(250);
   }
   const last = attempts[attempts.length - 1] || {};
-  return {
+  return rememberPagePptxOpenability(cacheKey, {
     ...last,
     attempts: attempts.map(compactOpenabilityAttempt)
-  };
+  });
+}
+
+function buildPagePptxOpenabilityCacheKey(filePath = "") {
+  try {
+    const resolved = path.resolve(filePath);
+    const stat = fsSync.statSync(resolved);
+    return `${resolved}|${stat.size}|${stat.mtimeMs}`;
+  } catch {
+    return "";
+  }
+}
+
+function rememberPagePptxOpenability(cacheKey, result) {
+  if (!cacheKey) return result;
+  const successful = result?.available === true && result?.openable === true;
+  PAGE_PPTX_OPENABILITY_CACHE.set(cacheKey, {
+    result,
+    expiresAt: Date.now() + (successful ? PAGE_PPTX_OPENABILITY_SUCCESS_TTL_MS : PAGE_PPTX_OPENABILITY_FAILURE_TTL_MS)
+  });
+  while (PAGE_PPTX_OPENABILITY_CACHE.size > 300) {
+    PAGE_PPTX_OPENABILITY_CACHE.delete(PAGE_PPTX_OPENABILITY_CACHE.keys().next().value);
+  }
+  return result;
 }
 
 function compactOpenabilityAttempt(result = {}) {
@@ -229,14 +263,21 @@ function checkManifestContract(manifest) {
   return { ok: issues.length === 0, issues: [...new Set(issues)] };
 }
 
-async function verifyOutputHashes(hashes = {}, outputEvidence = {}) {
+export async function verifyOutputHashes(hashes = {}, outputEvidence = {}) {
   const results = [];
   for (const key of REQUIRED_PAGE_RESULT_KEYS) {
     const expected = String(hashes[key] || "").trim().toLowerCase();
     const filePath = outputEvidence[key]?.path || "";
-    if (!expected || !fileExists(filePath)) continue;
+    if (!expected) {
+      results.push({ key, expected: "", actual: "", matched: false, missing: true });
+      continue;
+    }
+    if (!fileExists(filePath)) {
+      results.push({ key, expected, actual: "", matched: false, missing: false });
+      continue;
+    }
     const actual = await hashFile(filePath).catch(() => "");
-    results.push({ key, expected, actual, matched: actual === expected });
+    results.push({ key, expected, actual, matched: actual === expected, missing: false });
   }
   return results;
 }
@@ -285,7 +326,12 @@ function fallbackOutputPath(pageId, key) {
 function resolveRunPath(runDir, value = "") {
   const raw = String(value || "");
   if (!raw) return "";
-  return path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(runDir, raw);
+  const root = path.resolve(runDir);
+  const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(root, raw);
+  const relative = path.relative(root, resolved);
+  return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative))
+    ? resolved
+    : "";
 }
 
 function fileExists(filePath = "") {
@@ -297,8 +343,22 @@ async function readJson(filePath) {
 }
 
 async function hashFile(filePath) {
-  const buffer = await fs.readFile(filePath);
-  return crypto.createHash("sha256").update(buffer).digest("hex");
+  const resolved = path.resolve(filePath);
+  const stat = await fs.stat(resolved);
+  const cacheKey = `${resolved}|${stat.size}|${stat.mtimeMs}`;
+  const cached = PAGE_EVIDENCE_HASH_CACHE.get(cacheKey);
+  if (cached) return cached;
+  const pending = fs.readFile(resolved)
+    .then((buffer) => crypto.createHash("sha256").update(buffer).digest("hex"))
+    .catch((error) => {
+      PAGE_EVIDENCE_HASH_CACHE.delete(cacheKey);
+      throw error;
+    });
+  PAGE_EVIDENCE_HASH_CACHE.set(cacheKey, pending);
+  while (PAGE_EVIDENCE_HASH_CACHE.size > PAGE_EVIDENCE_HASH_CACHE_MAX_ENTRIES) {
+    PAGE_EVIDENCE_HASH_CACHE.delete(PAGE_EVIDENCE_HASH_CACHE.keys().next().value);
+  }
+  return pending;
 }
 
 function isValidBox(value) {

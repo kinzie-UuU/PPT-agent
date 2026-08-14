@@ -7,10 +7,18 @@ import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 import { scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
 import { listWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { getExternalImageAuthorizationStatus } from "./workflowAuthorizations.js";
+import { isImageDeckReviewApproved } from "./workflowEditable.js";
 
 export async function getWorkflowDeliveryStatus(id) {
   const job = await readWorkflowJob(id);
-  const workerTaskBundle = await listWorkflowEditableWorkerTasks(job.id).catch(() => null);
+  const storedWorkerTasks = Array.isArray(job.artifacts?.editableWorkerTasks)
+    ? job.artifacts.editableWorkerTasks
+    : Array.isArray(job.artifacts?.editableWorkerTasks?.tasks)
+      ? job.artifacts.editableWorkerTasks.tasks
+      : null;
+  const workerTaskBundle = storedWorkerTasks
+    ? { tasks: storedWorkerTasks }
+    : await listWorkflowEditableWorkerTasks(job.id).catch(() => null);
   const sourceMeta = await readSafeArtifactJson(job, job.artifacts?.sourceMeta?.path);
   const finalValidation = await readSafeArtifactJson(job, job.artifacts?.editableFinal?.validation?.path);
   const artifacts = {
@@ -75,7 +83,7 @@ export async function getWorkflowDeliveryStatus(id) {
 function isFullDeliveryCoverageCandidate(coverage = {}) {
   const sourcePages = numberOrZero(coverage.sourcePages);
   const finalPages = numberOrZero(coverage.finalPages);
-  return Boolean(sourcePages && finalPages && finalPages >= sourcePages);
+  return Boolean(sourcePages && finalPages && finalPages === sourcePages);
 }
 
 export function alignDeliveryStatusWithFinalGate(status = {}, finalGate = {}, job = {}) {
@@ -242,6 +250,7 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   const visualFreshness = inspectVisualEditableFreshness(artifacts);
   const invalidatedFinal = inspectInvalidatedFinal(job, hasFinal);
   const manualReviewRecorded = isManualReviewCurrent(artifacts.manualReview, final);
+  const imageDeckReviewApproved = isImageDeckReviewApproved(artifacts);
   const reasons = [];
   const warnings = [];
   const failedTasks = tasks.filter(isFailedEditableWorkerTask);
@@ -258,10 +267,14 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   const localTextOnlyMultiPageEvidence = hasLocalTextOnlyMultiPageEvidence(job);
   const pageEvidenceComplete = Boolean(pageEvidence.complete);
   const finalEvidenceComplete = Boolean(finalEvidence.complete);
+  const visualQaStatus = String(finalEvidence.summary?.visualQa?.automatedStatus || finalEvidence.summary?.visualQa?.status || "");
+  const visualQaPassed = visualQaStatus === "pass";
   const codexPptEvidence = buildCodexPptDeliveryEvidence(job);
   const sourcePages = numberOrZero(job.sourceMeta?.pageCount) || countArray(artifacts.renderedPages);
   const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || job.finalValidation?.slides);
   const partialSourceCoverage = Boolean(hasFinal && sourcePages && finalPages && finalPages < sourcePages);
+  const sourceCoverageMatches = Boolean(hasFinal && sourcePages > 0 && finalPages === sourcePages);
+  const sourceCoverageOverflow = Boolean(hasFinal && sourcePages > 0 && finalPages > sourcePages);
 
   if (!hasFinal) warnings.push("最终可编辑 PPTX 尚未生成。");
   if (invalidatedFinal.exists) {
@@ -270,6 +283,9 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   if (failedTaskSummary) reasons.push(failedTaskSummary);
   if (hasFinal && !pageEvidenceComplete) {
     reasons.push(summarizePageEvidenceIssue(pageEvidence));
+  }
+  if (hasFinal && !imageDeckReviewApproved) {
+    reasons.push("Image deck review is missing, stale, or incomplete for the current generated pages.");
   }
   if (hasFinal && !finalEvidenceComplete) {
     reasons.push(summarizeFinalEvidenceIssue(finalEvidence));
@@ -280,25 +296,25 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   if (hasFinal && localTextOnlyMultiPageEvidence) {
     reasons.push("image-to-editable-ppt used a local text-only multi-page worker; run model page workers for product delivery.");
   }
-  if (hasFinal && !codexPptEvidence.approvalsComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.approvalsComplete) {
     reasons.push(`codex-ppt approval evidence is incomplete: missing ${codexPptEvidence.missingApprovals.join(", ")}.`);
   }
-  if (hasFinal && !codexPptEvidence.outlineEvidenceComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.outlineEvidenceComplete) {
     reasons.push("codex-ppt outline.md/json artifact evidence is missing.");
   }
-  if (hasFinal && !codexPptEvidence.styleEvidenceComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.styleEvidenceComplete) {
     reasons.push("codex-ppt style.md/json artifact evidence is missing.");
   }
-  if (hasFinal && !codexPptEvidence.backendDecisionComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.backendDecisionComplete) {
     reasons.push("codex-ppt backend.md/json artifact evidence is missing.");
   }
-  if (hasFinal && !codexPptEvidence.sampleEvidenceComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.sampleEvidenceComplete) {
     reasons.push("codex-ppt sample artifact evidence is missing.");
   }
-  if (hasFinal && !codexPptEvidence.backendFixed) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.backendFixed) {
     reasons.push(codexPptEvidence.backendIssue || "codex-ppt fixed image backend evidence is incomplete.");
   }
-  if (hasFinal && !codexPptEvidence.slideRunComplete) {
+  if (hasFinal && !partialSourceCoverage && !codexPptEvidence.slideRunComplete) {
     reasons.push("codex-ppt slide job state is incomplete: deck_spec, prompt jobs, dispatch, or recorded image results are missing.");
   }
   if (!final.validation?.path) warnings.push("最终校验 JSON 尚未生成。");
@@ -309,10 +325,10 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   if (rasterOnlySlides) {
     warnings.push(`检测到 ${rasterOnlySlides} 个整页栅格图风险。`);
   }
-  if (rasterBackgroundSlides) {
+  if (rasterBackgroundSlides && !manualReviewRecorded) {
     warnings.push(`检测到 ${rasterBackgroundSlides} 个全页背景图，请人工复核它不是整页截图。`);
   }
-  if (editabilityWarnings.length) {
+  if (editabilityWarnings.length && !manualReviewRecorded) {
     warnings.push(...editabilityWarnings.map((item) => `可编辑性警告：${item}`));
   }
   if (hasExperimentalEvidence) {
@@ -326,6 +342,12 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   }
   if (partialSourceCoverage) {
     warnings.push(`当前最终 PPT 只覆盖 ${finalPages}/${sourcePages} 个源页面；可作为当前测试范围下载，但不能作为完整产品交付。`);
+  }
+  if (sourceCoverageOverflow) {
+    reasons.push(`Final PPT page count does not match the source: ${finalPages}/${sourcePages}. Remove duplicated or unexpected pages, then finalize again.`);
+  }
+  if (hasFinal && (!sourcePages || !finalPages)) {
+    reasons.push("Final PPT page coverage cannot be verified because the source or final page count is missing.");
   }
 
   const level = !hasFinal
@@ -344,7 +366,7 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
     label: gateLabel(level),
     title: gateTitle(level),
     summary: gateSummary(level),
-    productReady: level === "ready" && !partialSourceCoverage,
+    productReady: level === "ready" && sourceCoverageMatches,
     downloadable: hasFinal && level !== "blocked",
     reasons,
     warnings: uniqueStrings(warnings),
@@ -356,9 +378,13 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
       noExperimentalEvidence: !hasExperimentalEvidence,
       noLocalTextOnlyMultiPageEvidence: !localTextOnlyMultiPageEvidence,
       manualReviewRecorded,
+      imageDeckReviewApproved,
       pageEvidenceComplete,
       finalEvidenceComplete,
-      fullSourceCoverage: !partialSourceCoverage,
+      visualQaPassed,
+      visualQaStatus,
+      fullSourceCoverage: sourceCoverageMatches,
+      sourceCoverageOverflow,
       sourcePages,
       finalPages,
       editableMatchesCurrentVisuals: !visualFreshness.stale,
@@ -407,12 +433,13 @@ function summarizeFailedEditableWorkerTasks(tasks = []) {
 }
 
 function inspectVisualEditableFreshness(artifacts = {}) {
-  const visualTimes = [
-    artifacts.imageDeck?.createdAt,
-    artifacts.visualManifest?.createdAt,
-    artifacts.visualQuality?.createdAt,
-    ...(Array.isArray(artifacts.visualImages) ? artifacts.visualImages.map((image) => image?.createdAt) : [])
-  ].map(toTime).filter((time) => time > 0);
+  const currentImageTimes = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.staleStyleReference !== true)
+    .map((image) => toTime(image?.createdAt))
+    .filter((time) => time > 0);
+  const visualTimes = currentImageTimes.length
+    ? currentImageTimes
+    : [artifacts.imageDeck?.createdAt].map(toTime).filter((time) => time > 0);
   const latestVisualAt = visualTimes.length ? Math.max(...visualTimes) : 0;
   const editableTimes = [
     artifacts.editableRun?.createdAt,
@@ -453,21 +480,24 @@ function gateSummary(level) {
 }
 
 function inspectInvalidatedFinal(job = {}, hasFinal = false) {
-  const finalPath = path.join(job.dirs?.final || "", "editable-final.pptx");
+  const finalDir = String(job.dirs?.final || "").trim();
+  const finalPath = finalDir ? path.join(finalDir, "editable-final.pptx") : "";
   const invalidationEvent = (Array.isArray(job.events) ? job.events : [])
     .slice()
     .reverse()
     .find((event) => event?.type === "editable.fresh_run_invalidated"
       && Array.isArray(event.details?.invalidated)
       && event.details.invalidated.includes("editableFinal"));
-  const exists = Boolean(!hasFinal && finalPath && fsSync.existsSync(finalPath) && invalidationEvent);
+  const exists = Boolean(!hasFinal && finalPath && fsSync.existsSync(finalPath));
   return {
     exists,
     path: exists ? finalPath : "",
-    invalidatedAt: exists ? invalidationEvent.createdAt || "" : "",
-    invalidatedReason: exists ? cleanBackendToken(invalidationEvent.details?.reason || "") : "",
+    invalidatedAt: exists ? invalidationEvent?.createdAt || "" : "",
+    invalidatedReason: exists ? cleanBackendToken(invalidationEvent?.details?.reason || "") : "",
     reason: exists
-      ? "检测到旧 editable-final.pptx 文件仍在磁盘上，但它已被 fresh editppt 运行作废；不能把这个旧文件当作最终交付。"
+      ? invalidationEvent
+        ? "检测到旧 editable-final.pptx 文件仍在磁盘上，但它已被 fresh editppt 运行作废；不能把这个旧文件当作最终交付。"
+        : "检测到磁盘上存在未被当前工作流登记的 editable-final.pptx；它可能是旧草稿，不能作为最终交付。"
       : ""
   };
 }
@@ -492,7 +522,7 @@ function buildCoverage(job) {
   return {
     sourcePages: numberOrZero(job.sourceMeta?.pageCount) || countArray(artifacts.renderedPages),
     renderedPages: countArray(artifacts.renderedPages),
-    visualPages: countArray(artifacts.visualImages),
+    visualPages: (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : []).filter((image) => image?.path && image.staleStyleReference !== true).length,
     imageDeckPages: numberOrZero(artifacts.imageDeck?.pageCount),
     ocrPages: numberOrZero(artifacts.ocrTextHints?.pageCount),
     workerBriefPages: numberOrZero(artifacts.workerBriefs?.pageCount),
@@ -671,6 +701,11 @@ function formatVisualQaIssue(issue = "") {
     "editable-preview-missing": "缺少可编辑预览图",
     "asset-contact-sheet-missing": "缺少资产分离总览图",
     "preview-too-small-simplified": "重建预览明显过度简化",
+    "preview-visual-similarity-low": "可编辑页与图片版整体差异过大",
+    "preview-structure-loss": "可编辑页丢失了较多版式或视觉结构",
+    "visual-comparison-unavailable": "可编辑页视觉比较不可用",
+    "preview-aspect-ratio-mismatch": "可编辑页宽高比不一致",
+    "asset-checkerboard-background": "分离图片带有棋盘格假透明背景",
     "target-image-missing": "缺少图片版页面",
     "visual-page-missing": "缺少视觉页",
     "preview-size-mismatch": "预览尺寸异常",
@@ -684,6 +719,8 @@ function isManualReviewCurrent(manualReview = {}, final = {}) {
   return manualReview?.status === "approved"
     && manualReview.finalPath === final.path
     && Number(manualReview.finalSize || 0) === Number(final.size || 0)
+    && Boolean(final.sha256)
+    && manualReview.finalSha256 === final.sha256
     && String(manualReview.finalCreatedAt || "") === String(final.createdAt || "");
 }
 
@@ -708,8 +745,17 @@ function buildCodexPptDeliveryEvidence(job = {}) {
   const style = artifacts.codexPptStyle || {};
   const backendDecision = artifacts.codexPptBackendDecision || {};
   const sample = artifacts.visualSample || {};
-  const slideRun = summarizeCodexPptSlideRun(artifacts);
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const rawSlideRun = summarizeCodexPptSlideRun(artifacts);
+  const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
+  const sourcePages = numberOrZero(job.sourceMeta?.pageCount) || (Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0);
+  const slideRun = {
+    ...rawSlideRun,
+    sourcePages,
+    visualPages: visualImages.length,
+    coverageComplete: Boolean(sourcePages > 0 && visualImages.length >= sourcePages),
+    complete: Boolean(rawSlideRun.complete && sourcePages > 0 && visualImages.length >= sourcePages)
+  };
   const backendKey = backendRecordKey(backend);
   const visualBackendKeys = [...new Set(visualImages.map(backendRecordKey).filter(Boolean))];
   const passthrough = isPassthroughBackend(backend) || visualImages.some(isPassthroughBackend);

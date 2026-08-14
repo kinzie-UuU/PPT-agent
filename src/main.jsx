@@ -1,8 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { ArrowDown, ArrowUp, CheckCircle2, ChevronDown, Copy, FileText, PencilLine, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { api, getErrorMessage, isConnectionError } from "./api/client.js";
-import { deriveWorkflowDeliveryStatus } from "./workflow/deliveryStatus.js";
+import { deriveWorkflowDeliveryStatus, isWorkflowImageDeckReviewReady } from "./workflow/deliveryStatus.js";
+import { canApplyWorkflowJob, claimWorkflowSelection as claimSelection, isWorkflowSelectionCurrent as isSelectionCurrent, mergeWorkflowJobPage } from "./workflow/workflowSelectionGuard.js";
+import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
 import "./styles.css";
+
+const PptAgentWorkspace = React.lazy(() => import("./ui-v2/PptAgentWorkspace.jsx").then((module) => ({
+  default: module.PptAgentWorkspace
+})));
+
+const VISUAL_FULL_DECK_BATCH_SIZE = 3;
 
 const SKILL_FIRST_RULES = {
   "codex-ppt": [
@@ -91,6 +100,8 @@ const FIRST_USE_GUIDE = [
   "有参考 PPT、截图或 PDF 时，先分析风格，再生成新 PPT。"
 ];
 const CODEX_PPT_OUTPUTS = ["大纲文件", "每页高清图片", "演讲备注", "最终 PPT"];
+const EDITABLE_WORKER_BATCH_SIZE = 2;
+const WORKFLOW_JOB_LIST_PAGE_SIZE = 120;
 
 function getApprovedCodexPptGateSet(job = {}) {
   return new Set((Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
@@ -116,6 +127,15 @@ function getCurrentFullDeckTestEvidence(job = {}) {
     && evidence.pages.every((page) => page.pageId && page.sha256 && images.get(page.pageId)?.sha256 === page.sha256)
   );
   return current ? evidence : null;
+}
+
+function isFrontendSampleApprovalCurrent(job = {}) {
+  const artifacts = job?.artifacts || {};
+  const approval = (Array.isArray(artifacts.codexPptApprovals) ? artifacts.codexPptApprovals : [])
+    .filter((item) => item?.status === "approved" && item.gate === "sample")
+    .at(-1);
+  const sampleSha256 = artifacts.visualSample?.sha256 || "";
+  return Boolean(sampleSha256 && approval?.sampleSha256 === sampleSha256);
 }
 
 function getNoCostCodexApprovalSummary(job = {}) {
@@ -332,12 +352,16 @@ function App() {
   });
   const [fileIds, setFileIds] = useState([]);
   const [files, setFiles] = useState([]);
+  const intakeRevisionRef = useRef(0);
+  const uploadDeleteBusyRef = useRef("");
+  const [uploadDeleteBusyId, setUploadDeleteBusyId] = useState("");
   const [job, setJob] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [selectedSlide, setSelectedSlide] = useState(0);
   const [revision, setRevision] = useState("");
   const [deckRevision, setDeckRevision] = useState("");
   const [outlinePlan, setOutlinePlan] = useState(null);
+  const [outlineEditingIndex, setOutlineEditingIndex] = useState(null);
   const [outlineBusy, setOutlineBusy] = useState(false);
   const [outlineBrief, setOutlineBrief] = useState(null);
   const [outlineInsertLayout, setOutlineInsertLayout] = useState("section");
@@ -380,8 +404,11 @@ function App() {
   const [draggedSlide, setDraggedSlide] = useState(null);
   const [dropTargetSlide, setDropTargetSlide] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
-  const [workflowJob, setWorkflowJob] = useState(null);
+  const [workflowJob, setWorkflowJobState] = useState(null);
   const [workflowJobs, setWorkflowJobs] = useState([]);
+  const [workflowJobListPage, setWorkflowJobListPage] = useState({ hasMore: false, nextOffset: 0, includeArchived: false });
+  const [workflowDeliveryBundle, setWorkflowDeliveryBundle] = useState(null);
+  const workflowSelectionRef = useRef({ epoch: 0, id: "" });
   const [primaryWorkflow, setPrimaryWorkflow] = useState(null);
   const [workflowShowArchived, setWorkflowShowArchived] = useState(false);
   const [workflowBusy, setWorkflowBusy] = useState(false);
@@ -389,7 +416,35 @@ function App() {
   const [confirmRequest, setConfirmRequest] = useState(null);
   const [sampleReviewOpen, setSampleReviewOpen] = useState(false);
   const [imageDeckReviewOpen, setImageDeckReviewOpen] = useState(false);
+  const [deliveryReviewAutoOpen, setDeliveryReviewAutoOpen] = useState(false);
   const confirmResolverRef = useRef(null);
+
+  function setWorkflowJob(update) {
+    setWorkflowJobState((current) => {
+      const next = typeof update === "function" ? update(current) : update;
+      return canApplyWorkflowJob(workflowSelectionRef, next?.id) ? next : current;
+    });
+  }
+
+  function claimWorkflowSelection(id = "") {
+    return claimSelection(workflowSelectionRef, id);
+  }
+
+  function isWorkflowSelectionCurrent(selection, id = selection?.id || "") {
+    return isSelectionCurrent(workflowSelectionRef, selection, id);
+  }
+
+  function applySelectedWorkflowJob(next, selection = null) {
+    if (!next?.id) return false;
+    if (selection && !isWorkflowSelectionCurrent(selection, next.id)) return false;
+    if (!selection) {
+      const currentId = workflowSelectionRef.current.id;
+      if (currentId && currentId !== next.id) return false;
+      workflowSelectionRef.current = { ...workflowSelectionRef.current, id: next.id };
+    }
+    setWorkflowJob(next);
+    return true;
+  }
 
   useEffect(() => {
     api.styleReferences().then((data) => setStyleReferences(data.references || [])).catch(() => {});
@@ -417,16 +472,33 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const id = workflowJob?.id || "";
+    if (!id) {
+      setWorkflowDeliveryBundle(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setWorkflowDeliveryBundle((current) => current?.jobId === id ? current : null);
+    api.workflowDeliveryStatus(id, controller.signal)
+      .then((bundle) => setWorkflowDeliveryBundle({ ...bundle, jobId: id }))
+      .catch((requestError) => {
+        if (requestError?.name !== "AbortError") setWorkflowDeliveryBundle(null);
+      });
+    return () => controller.abort();
+  }, [workflowJob?.id, workflowJob?.updatedAt]);
+
+  useEffect(() => {
     if (workflowJob?.id || !workflowJobs.length) return;
     const selected = selectDefaultWorkflowJob(workflowJobs, primaryWorkflow);
     if (!selected?.id) return;
     let cancelled = false;
+    const selection = claimWorkflowSelection(selected.id);
     api.workflowJob(selected.id)
       .then((job) => {
-        if (!cancelled && job?.id) setWorkflowJob(job);
+        if (!cancelled && job?.id) applySelectedWorkflowJob(job, selection);
       })
       .catch(() => {
-        if (!cancelled) setWorkflowJob(selected);
+        if (!cancelled) applySelectedWorkflowJob(selected, selection);
       });
     return () => {
       cancelled = true;
@@ -460,6 +532,36 @@ function App() {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    const editableRuns = Array.isArray(workflowJob?.artifacts?.editableWorkerBatchRuns)
+      ? workflowJob.artifacts.editableWorkerBatchRuns
+      : [];
+    const codexRuns = Array.isArray(workflowJob?.artifacts?.codexPptSlideBatchRuns)
+      ? workflowJob.artifacts.codexPptSlideBatchRuns
+      : [];
+    const codexTasks = Array.isArray(workflowJob?.artifacts?.codexPptSlideWorkerTasks)
+      ? workflowJob.artifacts.codexPptSlideWorkerTasks
+      : [];
+    const activeRun = [...editableRuns, ...codexRuns].find((run) => ["queued", "running"].includes(run?.status));
+    const activeCodexTask = codexTasks.some((task) => ["claimed", "dispatched", "running", "recording"].includes(task?.status));
+    const visualGenerationActive = ["visual_generating", "pages_running"].includes(workflowJob?.status)
+      && Number(workflowJob?.artifacts?.visualImages?.length || 0) < Number(workflowJob?.artifacts?.renderedPages?.length || workflowJob?.artifacts?.codexPptOutline?.slideCount || 0);
+    if (!workflowJob?.id || (!activeRun && !activeCodexTask && !visualGenerationActive)) return undefined;
+    const polledJobId = workflowJob.id;
+    const selection = { ...workflowSelectionRef.current };
+    const timer = window.setInterval(async () => {
+      try {
+        const refreshed = await api.workflowJob(polledJobId);
+        if (!isWorkflowSelectionCurrent(selection, polledJobId)) return;
+        applySelectedWorkflowJob(refreshed, selection);
+        await loadWorkflowJobs({ activeId: refreshed.id, selection });
+      } catch {
+        // The regular health/error surfaces report connection failures.
+      }
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [workflowJob?.id, workflowJob?.status, workflowJob?.artifacts?.editableWorkerBatchRuns, workflowJob?.artifacts?.codexPptSlideBatchRuns, workflowJob?.artifacts?.codexPptSlideWorkerTasks, workflowJob?.artifacts?.visualImages?.length]);
 
   useEffect(() => {
     let active = true;
@@ -564,8 +666,16 @@ function App() {
     return () => window.clearInterval(timer);
   }, [generationProgress.active]);
 
+  function invalidateOutlineDraft() {
+    intakeRevisionRef.current += 1;
+    setOutlinePlan(null);
+    setOutlineBrief(null);
+    setOutlineEditingIndex(null);
+  }
+
   function update(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
+    invalidateOutlineDraft();
   }
 
   function updateDraft(name, value) {
@@ -585,6 +695,7 @@ function App() {
     ]);
     if (text && intent.actionable) {
       setForm((current) => ({ ...current, notes: [current.notes, text].filter(Boolean).join("\n") }));
+      invalidateOutlineDraft();
     }
     setIntakeDraft("");
     setError("");
@@ -616,6 +727,8 @@ function App() {
       setFiles((current) => mergeById(current, uploaded));
       setFileIds((current) => uniqueIds([...current, ...uploaded.map((file) => file.id)]));
       if (uploaded.length) {
+        invalidateOutlineDraft();
+        claimWorkflowSelection("");
         setWorkflowJob(null);
         const names = uploaded.map((file) => file.originalName).filter(Boolean).join("、");
         const now = Date.now();
@@ -636,27 +749,41 @@ function App() {
   }
 
   async function removeUploadedFile(file) {
-    if (!file?.id) return;
-    if (!window.confirm("删除上传文件 " + (file.originalName || file.id) + "？本地源文件也会被移除。")) return;
+    if (!file?.id) return { ok: false, error: "文件记录无效，无法删除。" };
+    if (uploadDeleteBusyRef.current) return { ok: false, error: "另一个文件正在删除，请稍候。" };
+    if (workflowBusy || outlineBusy || generationProgress.active) {
+      return { ok: false, error: "任务正在处理源文件，完成后才能删除。" };
+    }
+    if (!window.confirm("删除上传文件 " + (file.originalName || file.id) + "？本地源文件也会被移除。")) {
+      return { ok: false, cancelled: true };
+    }
+    uploadDeleteBusyRef.current = file.id;
+    setUploadDeleteBusyId(file.id);
     setError("");
     setStatus("正在删除上传文件...");
     try {
       await api.remove("/api/uploads/" + file.id);
       setFiles((current) => current.filter((item) => item.id !== file.id));
       setFileIds((current) => current.filter((id) => id !== file.id));
+      invalidateOutlineDraft();
       setStatus("上传文件已删除。");
+      return { ok: true };
     } catch (err) {
       const message = getErrorMessage(err);
-      if (!isConnectionError(message)) {
-        setFiles((current) => current.filter((item) => item.id !== file.id));
-        setFileIds((current) => current.filter((id) => id !== file.id));
-        setError("");
-        setStatus("文件记录已清理。");
-      } else {
-        setError(message);
-        setStatus("");
-      }
+      setError(message);
+      setStatus("");
+      return { ok: false, error: message };
+    } finally {
+      if (uploadDeleteBusyRef.current === file.id) uploadDeleteBusyRef.current = "";
+      setUploadDeleteBusyId((current) => current === file.id ? "" : current);
     }
+  }
+
+  function canRunWhileUploadsStable() {
+    if (!uploadDeleteBusyRef.current) return true;
+    setError("正在删除上传文件，请稍候再继续。");
+    setStatus("");
+    return false;
   }
 
   async function runWorkflowRebuildPipeline(options = {}) {
@@ -676,28 +803,30 @@ function App() {
     try {
       let next = await api.createWorkflowJob({
         sourceUploadId,
+        projectName: getEffectiveProjectName(form, files),
         mode: "ppt-rebuild",
         notes: routeNote
       });
-      setWorkflowJob(next);
-      await loadWorkflowJobs({ activeId: next.id });
+      const selection = claimWorkflowSelection(next.id);
+      applySelectedWorkflowJob(next, selection);
+      await loadWorkflowJobs({ activeId: next.id, selection });
 
       const run = async (action, body, label) => {
         setStatus(label);
         next = await api.workflowAction(next.id, action, body);
-        setWorkflowJob(next);
+        applySelectedWorkflowJob(next, selection);
         return next;
       };
 
       await run("source/render", {}, "正在渲染源页面...");
       setStatus("正在记录大纲证据...");
       next = await api.recordCodexPptOutline(next.id, buildCodexPptOutlineRecordBody("frontend-upload-skill-first"));
-      setWorkflowJob(next);
+      applySelectedWorkflowJob(next, selection);
       setStatus("正在记录视觉风格和生成方式...");
       next = await api.recordCodexPptStyle(next.id, buildCodexPptStyleRecordBody("frontend-upload-skill-first"));
       next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-upload-skill-first"));
-      setWorkflowJob(next);
-      await loadWorkflowJobs({ activeId: next.id });
+      applySelectedWorkflowJob(next, selection);
+      await loadWorkflowJobs({ activeId: next.id, selection });
       setActiveStep("generate");
       setStatus(deliveryMode === "editable"
         ? "重制任务已创建。会先完成路线 A 图片版；确认后再进入路线 B 可编辑版，可编辑重建耗时较长。"
@@ -727,25 +856,27 @@ function App() {
     try {
       let next = await api.createWorkflowJob({
         sourceBrief,
+        projectName: getEffectiveProjectName(form, files),
         sourceOriginalName: getEffectiveProjectName(form, files) + "-brief.md",
         sourceMimeType: "text/markdown",
         mode: "codex-ppt-brief",
         notes: routeNote
       });
-      setWorkflowJob(next);
-      await loadWorkflowJobs({ activeId: next.id });
+      const selection = claimWorkflowSelection(next.id);
+      applySelectedWorkflowJob(next, selection);
+      await loadWorkflowJobs({ activeId: next.id, selection });
 
       setStatus("正在渲染简述来源...");
       next = await api.workflowAction(next.id, "source/render", {});
-      setWorkflowJob(next);
+      applySelectedWorkflowJob(next, selection);
       setStatus("正在记录大纲证据...");
       next = await api.recordCodexPptOutline(next.id, buildCodexPptOutlineRecordBody("frontend-brief-skill-first", sourceBrief));
-      setWorkflowJob(next);
+      applySelectedWorkflowJob(next, selection);
       setStatus("正在记录视觉风格和生成方式...");
       next = await api.recordCodexPptStyle(next.id, buildCodexPptStyleRecordBody("frontend-brief-skill-first"));
       next = await api.recordCodexPptBackend(next.id, buildCodexPptBackendRecordBody("frontend-brief-skill-first"));
-      setWorkflowJob(next);
-      await loadWorkflowJobs({ activeId: next.id });
+      applySelectedWorkflowJob(next, selection);
+      await loadWorkflowJobs({ activeId: next.id, selection });
       setActiveStep("generate");
       setStatus(deliveryMode === "editable"
         ? "简述重制任务已创建。会先完成路线 A 图片版；确认后再进入路线 B 可编辑版，可编辑重建耗时较长。"
@@ -759,6 +890,7 @@ function App() {
   }
 
   async function startSkillFirstWorkflow(options = {}) {
+    if (!canRunWhileUploadsStable()) return;
     if (!fileIds.length) {
       await runBriefWorkflowPipeline(options);
       return;
@@ -767,7 +899,7 @@ function App() {
   }
 
   async function confirmOutlineAndStartWorkflow() {
-    if (!outlinePlan?.layoutSequence?.length || workflowBusy) return;
+    if (!outlinePlan?.layoutSequence?.length || workflowBusy || outlineBusy) return;
     await startSkillFirstWorkflow({ deliveryMode: pendingDeliveryMode });
   }
 
@@ -802,20 +934,46 @@ function App() {
     };
   }
 
-  async function loadWorkflowJobs({ activeId = "", includeArchived = workflowShowArchived, restoreLatest = false } = {}) {
+  async function loadWorkflowJobs({ activeId = "", append = false, hydratedJob = null, includeArchived = workflowShowArchived, restoreLatest = false, selection = null } = {}) {
+    const requestSelection = selection || { ...workflowSelectionRef.current };
     try {
-      const data = await api.workflowJobs({ includeArchived });
+      const offset = append && workflowJobListPage.includeArchived === includeArchived
+        ? workflowJobListPage.nextOffset
+        : 0;
+      const data = await api.workflowJobs({ includeArchived, limit: WORKFLOW_JOB_LIST_PAGE_SIZE, offset });
       const primary = data.primaryWorkflow || null;
       setPrimaryWorkflow(primary);
-      const nextJobs = uniqueWorkflowJobs([primary?.job, ...(data.jobs || [])]).filter(isUserWorkflowJob);
+      const activeCandidate = hydratedJob?.id === activeId
+        ? hydratedJob
+        : workflowJob?.id === activeId
+          ? workflowJob
+          : null;
+      const loadedJobs = uniqueWorkflowJobs([primary?.job, ...(data.jobs || [])]).filter(isUserWorkflowJob);
+      const nextJobs = mergeWorkflowJobPage(workflowJobs, loadedJobs, {
+        activeJob: activeCandidate && isUserWorkflowJob(activeCandidate) ? activeCandidate : null,
+        append
+      });
       setWorkflowJobs(nextJobs);
+      setWorkflowJobListPage({
+        hasMore: data.hasMore === true,
+        nextOffset: Number(data.nextOffset || offset + (data.jobs || []).length),
+        includeArchived
+      });
       const active = activeId ? nextJobs.find((item) => item.id === activeId) : null;
       const latest = restoreLatest ? selectDefaultWorkflowJob(nextJobs, primary) : null;
       const selected = active || latest;
       if (selected) {
+        if (active && !isWorkflowSelectionCurrent(requestSelection, selected.id)) return nextJobs;
+        if (restoreLatest && workflowSelectionRef.current.epoch !== requestSelection.epoch) return nextJobs;
         const shouldHydrate = Boolean(active || restoreLatest);
-        const hydrated = shouldHydrate && selected?.id ? await api.workflowJob(selected.id).catch(() => selected) : selected;
+        const hydrated = hydratedJob?.id === selected?.id
+          ? hydratedJob
+          : shouldHydrate && selected?.id
+            ? await api.workflowJob(selected.id).catch(() => selected)
+            : selected;
         setWorkflowJob((current) => {
+          if (active && !isWorkflowSelectionCurrent(requestSelection, selected.id)) return current;
+          if (restoreLatest && workflowSelectionRef.current.epoch !== requestSelection.epoch) return current;
           if (active) return hydrated;
           if (restoreLatest && (!current?.id || isInternalWorkflowJob(current) || isPrimaryWorkflowJob(current, primary))) return hydrated;
           if (current?.id && !nextJobs.some((item) => item.id === current.id)) return hydrated;
@@ -835,6 +993,15 @@ function App() {
     }
   }
 
+  async function loadMoreWorkflowJobs() {
+    if (!workflowJobListPage.hasMore) return;
+    await loadWorkflowJobs({
+      activeId: workflowJob?.id || "",
+      append: true,
+      includeArchived: workflowJobListPage.includeArchived
+    });
+  }
+
   async function toggleWorkflowArchive(jobId, archive = true) {
     if (!jobId) return;
     setWorkflowBusy(true);
@@ -848,11 +1015,14 @@ function App() {
       const next = archive
         ? await api.archiveWorkflowJob(jobId, body)
         : await api.restoreWorkflowJob(jobId, body);
-      if (!archive) setWorkflowJob(next);
-      const nextJobs = await loadWorkflowJobs({ activeId: archive ? "" : next.id, includeArchived: workflowShowArchived, restoreLatest: archive });
+      const restoredSelection = !archive ? claimWorkflowSelection(next.id) : null;
+      if (restoredSelection) applySelectedWorkflowJob(next, restoredSelection);
+      const nextJobs = await loadWorkflowJobs({ activeId: archive ? "" : next.id, includeArchived: workflowShowArchived, restoreLatest: archive, selection: restoredSelection });
       if (archive && workflowJob?.id === jobId) {
         const nextVisibleJob = selectDefaultWorkflowJob(nextJobs, primaryWorkflow);
-        setWorkflowJob(nextVisibleJob || null);
+        const nextSelection = claimWorkflowSelection(nextVisibleJob?.id || "");
+        if (nextVisibleJob) applySelectedWorkflowJob(nextVisibleJob, nextSelection);
+        else setWorkflowJob(null);
       }
       setStatus(archive ? "工作流已归档，产物仍保留在磁盘。" : "工作流已恢复。");
     } catch (err) {
@@ -869,13 +1039,14 @@ function App() {
 
   async function selectWorkflowJob(id) {
     if (!id) return;
+    const selection = claimWorkflowSelection(id);
     setWorkflowBusy(true);
     setError("");
     try {
       const next = await api.workflowJob(id);
-      setWorkflowJob(next);
+      if (!applySelectedWorkflowJob(next, selection)) return;
       setStatus("已切换 workflow。");
-      await loadWorkflowJobs({ activeId: id });
+      await loadWorkflowJobs({ activeId: id, hydratedJob: next, selection });
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -885,12 +1056,14 @@ function App() {
 
   async function refreshWorkflowJob() {
     if (!workflowJob?.id) return;
+    const selection = { ...workflowSelectionRef.current };
+    const activeId = workflowJob.id;
     setWorkflowBusy(true);
     setError("");
     try {
-      const next = await api.workflowJob(workflowJob.id);
-      setWorkflowJob(next);
-      await loadWorkflowJobs({ activeId: next.id });
+      const next = await api.workflowJob(activeId);
+      if (!applySelectedWorkflowJob(next, selection)) return;
+      await loadWorkflowJobs({ activeId: next.id, selection });
       setStatus("workflow 状态已刷新。");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -996,9 +1169,11 @@ function App() {
       setActiveStep("generate");
       setStatus(`已确认 ${noCostApprovalSummary.labelText}。这一步未生成图片，样张前仍需要外部图片 API 授权。`);
       window.setTimeout(() => document.getElementById("workflow-compliance-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+      return next;
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
+      return null;
     } finally {
       setWorkflowBusy(false);
     }
@@ -1055,7 +1230,71 @@ function App() {
     return hydrated;
   }
 
+  async function runCodexPptBatchWithProgress({ pages = [], maxPages = 0 } = {}) {
+    const pageSelection = Array.isArray(pages) ? pages.join(",") : String(pages || "");
+    let settled = false;
+    let batchResult = null;
+    let batchError = null;
+    api.runCodexPptSlideBatch(workflowJob.id, {
+      forceSync: true,
+      pages: pageSelection,
+      maxPages,
+      confirmExternalImageSpend: true,
+      assembleImageDeck: false,
+      prepareEditable: false,
+      stopOnError: false,
+      requestedBy: "frontend-route-a-full-deck"
+    }).then((result) => {
+      batchResult = result;
+    }).catch((error) => {
+      batchError = error;
+    }).finally(() => {
+      settled = true;
+    });
+
+    while (!settled) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+      const progressJob = await api.workflowJob(workflowJob.id).catch(() => null);
+      if (!progressJob) continue;
+      setWorkflowJob(progressJob);
+      const progressState = buildDualRouteState(progressJob).routeA;
+      const completed = Math.max(0, Number(progressState.reviewPageIds?.length || 0));
+      const total = Math.max(completed, Number(progressState.imageTotal || progressState.sourceCount || 0));
+      setStatus(`正在逐页生成图片版：${completed}/${total || "?"}，已完成页面会立即保留。`);
+    }
+
+    if (batchError) throw batchError;
+    if (batchResult?.ok === false) throw new Error(batchResult.error || "图片页批量生成失败");
+    return api.workflowJob(workflowJob.id);
+  }
+
+  async function ensureVisualTextQuality(jobCandidate = null) {
+    const current = jobCandidate?.id ? jobCandidate : await api.workflowJob(workflowJob.id);
+    const images = (Array.isArray(current?.artifacts?.visualImages) ? current.artifacts.visualImages : [])
+      .filter((image) => image?.path && image.staleStyleReference !== true);
+    if (!images.length || hasCurrentVisualOcrCoverage(current)) return current;
+    const normalizePath = (value = "") => String(value || "").replace(/\\/g, "/").toLowerCase();
+    const evidenceByPage = new Map((Array.isArray(current?.artifacts?.visualOcrPages) ? current.artifacts.visualOcrPages : [])
+      .map((page, index) => [page.pageId || pageIdFromPageNumber(page.pageNumber || index + 1), page]));
+    const missingImages = images.filter((image, index) => {
+      const pageId = image.pageId || pageIdFromPageNumber(image.pageNumber || index + 1);
+      const evidence = evidenceByPage.get(pageId);
+      if (!evidence || normalizePath(evidence.imagePath) !== normalizePath(image.path)) return true;
+      return Boolean(image.sha256 && (!evidence.imageSha256 || image.sha256 !== evidence.imageSha256));
+    });
+    const targetImages = missingImages.length ? missingImages : images;
+    setStatus(`正在本地检查 ${targetImages.length} 页文字、页码和占位符...`);
+    return api.workflowAction(current.id, "ocr/run", {
+      source: "visual",
+      pages: targetImages.map((image, index) => image.pageId || pageIdFromPageNumber(image.pageNumber || index + 1)).join(","),
+      maxPages: targetImages.length,
+      preserveWorkflowStage: true,
+      requestedBy: "frontend-route-a-visual-text-quality"
+    });
+  }
+
   async function runRouteAAction() {
+    if (!canRunWhileUploadsStable()) return;
     if (!workflowJob?.id) {
       const hasCurrentCreateInput = Boolean(fileIds.length || form.notes.trim());
       if (!hasCurrentCreateInput) {
@@ -1071,20 +1310,26 @@ function App() {
       return;
     }
 
-    const routeState = buildDualRouteState(workflowJob);
+    let currentJob = workflowJob;
+    let routeState = buildDualRouteState(currentJob);
     setWorkflowBusy(true);
     setError("");
     try {
       if (noCostApprovalSummary?.readyCount) {
         setWorkflowBusy(false);
-        await approveNoCostCodexGates();
-        return;
+        const approvedJob = await approveNoCostCodexGates();
+        if (!approvedJob) return;
+        currentJob = approvedJob;
+        routeState = buildDualRouteState(currentJob);
+        setWorkflowBusy(true);
       }
 
       if (routeState.routeA.imageDeckReady) {
         if (routeState.routeA.imageDeckReviewReady) {
           setStatus("图片版 PPT 已完成，可以下载；如需对象级编辑，再继续路线 B。");
         } else {
+          currentJob = await ensureVisualTextQuality(currentJob);
+          await refreshActiveWorkflow(currentJob, "本地文字质量检查完成，请逐页复核现有图片版结果。");
           setImageDeckReviewOpen(true);
           setStatus("当前任务已有图片版 PPT，请先逐页复核现有结果；不会自动重新生图。");
         }
@@ -1099,21 +1344,14 @@ function App() {
 
       if (!routeState.routeA.informationAssetMapReady) {
         setStatus("正在分析页面信息资产...");
-        const next = await api.recordCodexPptInformationAssets(workflowJob.id, {
+        currentJob = await api.recordCodexPptInformationAssets(currentJob.id, {
           requestedBy: "frontend-route-a-information-assets"
         });
-        await refreshActiveWorkflow(next, "页面信息资产已拆解：原图、文字、图表等保真要求已记录。下一步生成 1 页样张。");
-        return;
+        routeState = buildDualRouteState(currentJob);
       }
 
-      if (!routeState.routeA.ocrTextReady) {
-        setStatus("正在提取源页文字，用于后续清晰渲染文字...");
-        const next = await api.workflowAction(workflowJob.id, "ocr/run", {
-          source: "rendered",
-          requestedBy: "frontend-route-a-source-text"
-        });
-        await refreshActiveWorkflow(next, "源页文字已提取，后续图片页会尽量用程序重新渲染文字。");
-        return;
+      if (currentJob !== workflowJob) {
+        await refreshActiveWorkflow(currentJob, "样张准备已完成。确认后将调用外部图片 API 生成 1 页样张。");
       }
 
       if (!routeState.routeA.sampleReady) {
@@ -1131,8 +1369,8 @@ function App() {
           note: "不需要用户操作的步骤会在后台处理。"
         });
         if (!confirmed) return;
-        setStatus("正在生成 1 页样张...");
-        const next = await api.workflowAction(workflowJob.id, "visual/sample", {
+        setStatus("正在生成 1 页样张，图片模型通常需要 1-2 分钟，请保持页面打开...");
+        const next = await api.workflowAction(currentJob.id, "visual/sample", {
           confirmExternalImageSpend: true,
           requestedBy: "frontend-route-a-sample"
         });
@@ -1148,35 +1386,61 @@ function App() {
       }
 
       if (!routeState.routeA.twoPageTestGenerated) {
+        const testPageIds = routeState.routeA.twoPageTestPages.map((pageNumber) => pageIdFromPageNumber(pageNumber));
+        const sourceOcrPageIds = new Set((Array.isArray(currentJob.artifacts?.ocrPages) ? currentJob.artifacts.ocrPages : [])
+          .map((page) => page.pageId || pageIdFromPageNumber(page.pageNumber))
+          .filter(Boolean));
+        const missingTestOcrPages = testPageIds.filter((pageId) => !sourceOcrPageIds.has(pageId));
+        if (missingTestOcrPages.length) {
+          setStatus(`\u6b63\u5728\u8865\u9f50 ${missingTestOcrPages.length} \u9875\u6d4b\u8bd5\u9875\u6e90\u7a3f OCR...`);
+          currentJob = await api.workflowAction(currentJob.id, "ocr/run", {
+            source: "rendered",
+            pages: missingTestOcrPages.join(","),
+            maxPages: missingTestOcrPages.length,
+            requestedBy: "frontend-route-a-test-source-ocr"
+          });
+          routeState = buildDualRouteState(currentJob);
+        }
+        const testPageCount = Math.max(1, Number(routeState.routeA.twoPageTestTarget || 1));
+        const testExternalCalls = Math.max(0, Number(routeState.routeA.twoPageExternalCalls ?? testPageCount));
+        const testLabel = `${testPageCount} 页测试图`;
+        const testActionLabel = testExternalCalls < testPageCount
+          ? `补生成 ${testExternalCalls} 页测试图`
+          : `生成 ${testLabel}`;
         const confirmed = await askUserConfirm({
-          title: "先生成 2 页测试图",
-          body: `先用当前样张作为风格参考生成 ${routeState.routeA.twoPageTestTarget} 页测试图。这一步预计调用 ${routeState.routeA.twoPageTestTarget} 次外部图片 API，通过复核后才会开放剩余页面。`,
-          primaryLabel: "开始 2 页测试"
+          title: testExternalCalls < testPageCount ? testActionLabel : `先生成 ${testLabel}`,
+          body: `已确认样张会直接保留，再补充生成另一种代表性页面。整套测试范围共 ${testPageCount} 页，本次预计调用 ${testExternalCalls} 次外部图片 API，通过复核后才会开放剩余页面。`,
+          primaryLabel: testActionLabel
         });
         if (!confirmed) return;
-        setStatus("正在生成 2 页风格测试图...");
-        const next = await api.workflowAction(workflowJob.id, "visual/generate", {
+        setStatus(`正在${testActionLabel}...`);
+        let next = await api.workflowAction(workflowJob.id, "visual/generate", {
           pages: routeState.routeA.twoPageTestPages.join(","),
           maxPages: routeState.routeA.twoPageTestTarget,
           confirmExternalImageSpend: true,
           requestedBy: "frontend-route-a-two-page-test"
         });
-        await refreshActiveWorkflow(next, "2 页测试图已生成，请逐页对比并标记通过。");
+        next = await ensureVisualTextQuality(next);
+        await refreshActiveWorkflow(next, `${testLabel}已生成，请逐页对比并标记通过。`);
         setImageDeckReviewOpen(true);
         return;
       }
 
       if (!routeState.routeA.twoPageTestReviewReady && !routeState.routeA.fullDeckApproved) {
+        const testPageCount = Math.max(1, Number(routeState.routeA.twoPageTestTarget || 1));
+        currentJob = await ensureVisualTextQuality(currentJob);
+        await refreshActiveWorkflow(currentJob, `${testPageCount} 页测试图的本地文字质量检查已完成。`);
         setImageDeckReviewOpen(true);
-        setStatus("请先逐页复核 2 页测试图，并把两页都标记为“通过”。");
+        setStatus(`请先逐页复核 ${testPageCount} 页测试图，并把测试页都标记为“通过”。`);
         return;
       }
 
       if (routeState.routeA.requiresFullDeck && !routeState.routeA.fullDeckApproved) {
         const pages = Math.max(0, Number(routeState.routeA.imageTotal || routeState.routeA.sourceCount || 0) - routeState.routeA.twoPageTestTarget);
+        const testPageCount = Math.max(1, Number(routeState.routeA.twoPageTestTarget || 1));
         const confirmed = await askUserConfirm({
-          title: "确认 2 页测试通过",
-          body: `两页测试图已逐页通过。确认后将开放剩余 ${pages} 页生成，并保留这两页测试结果，不会重复消耗额度。`,
+          title: `确认 ${testPageCount} 页测试通过`,
+          body: `${testPageCount} 页测试图已逐页通过。确认后将开放剩余 ${pages} 页生成，并保留这些测试结果，不会重复消耗额度。`,
           primaryLabel: "通过并开放全量"
         });
         if (!confirmed) return;
@@ -1186,27 +1450,60 @@ function App() {
         return;
       }
 
+      if (
+        routeState.routeA.fullDeckApproved
+        && !routeState.routeA.imageDeckReviewReady
+        && routeState.routeA.reviewPageIds.length > routeState.routeA.twoPageTestTarget
+      ) {
+        currentJob = await ensureVisualTextQuality(currentJob);
+        await refreshActiveWorkflow(currentJob, "本批次图片的本地文字质量检查已完成。");
+        setImageDeckReviewOpen(true);
+        setStatus("请先复核本批次新增页面；通过后再生成下一批，避免风格问题扩散。");
+        return;
+      }
+
       if (routeState.routeA.requiresFullDeck && !routeState.routeA.slideResultsRecorded) {
-        const pages = routeState.routeA.remainingFullDeckPages.length;
+        if (!routeState.routeA.ocrCoverageComplete) {
+          const sourcePageIds = (Array.isArray(currentJob.artifacts?.renderedPages) ? currentJob.artifacts.renderedPages : [])
+            .map((page, index) => page.pageId || pageIdFromPageNumber(page.pageNumber || index + 1))
+            .filter(Boolean);
+          setStatus(`\u6b63\u5728\u8865\u9f50 ${sourcePageIds.length} \u9875\u6e90\u7a3f OCR\uff0c\u8fd9\u4e00\u6b65\u53ea\u5728\u672c\u5730\u8fd0\u884c...`);
+          currentJob = await api.workflowAction(currentJob.id, "ocr/run", {
+            source: "rendered",
+            pages: sourcePageIds.join(","),
+            maxPages: sourcePageIds.length,
+            requestedBy: "frontend-route-a-full-source-ocr"
+          });
+          routeState = buildDualRouteState(currentJob);
+        }
+        const remainingPages = routeState.routeA.remainingFullDeckPages;
+        const batchPages = remainingPages.slice(0, VISUAL_FULL_DECK_BATCH_SIZE);
+        const pages = batchPages.length;
         const confirmed = await askUserConfirm({
-          title: "后台生成整套图片",
-          body: "开始后台生成整套图片页。" + (pages ? "预计生成 " + pages + " 页。" : "") + " 生成过程中可以先做别的，完成后会开放图片版 PPT 下载。",
-          primaryLabel: "开始生成"
+          title: `生成下一批 ${pages} 页图片`,
+          body: `本批次生成第 ${batchPages.join("、")} 页，最多调用 ${pages} 次 gpt-image-2 外部图片 API。完成后先复核本批次，还有 ${Math.max(0, remainingPages.length - pages)} 页待生成。`,
+          primaryLabel: `确认生成 ${pages} 页`
         });
         if (!confirmed) return;
-        setStatus("正在批量生成图片页...");
-        const next = await api.workflowAction(workflowJob.id, "visual/generate", {
-          pages: routeState.routeA.remainingFullDeckPages.join(","),
-          maxPages: pages,
-          confirmExternalImageSpend: true,
-          requestedBy: "frontend-route-a-full-deck"
-        });
-        await refreshActiveWorkflow(next, "整套图片页已生成，下一步请先复核整套图片。");
+        setStatus(`正在生成本批次 ${pages} 页图片...`);
+        let next = routeState.routeA.hasPartialFinal
+          ? await api.workflowContinueRemaining(workflowJob.id, {
+            confirmExternalImageSpend: true,
+            requestedBy: "frontend-route-a-partial-final-continuation"
+          })
+          : await runCodexPptBatchWithProgress({
+            pages: batchPages,
+            maxPages: pages
+          });
+        next = await ensureVisualTextQuality(next);
+        await refreshActiveWorkflow(next, `本批次 ${pages} 页图片已生成，请先复核后再继续。`);
         setImageDeckReviewOpen(true);
         return;
       }
 
       if (!routeState.routeA.imageDeckReviewReady) {
+        currentJob = await ensureVisualTextQuality(currentJob);
+        await refreshActiveWorkflow(currentJob, "整套图片的本地文字质量检查已完成。");
         setImageDeckReviewOpen(true);
         setStatus("请先逐页对比原始页和生成页，全部通过后再组装图片版 PPT。");
         return;
@@ -1230,7 +1527,8 @@ function App() {
     }
   }
 
-  async function runRouteBAction() {
+  async function runRouteBAction(options = {}) {
+    if (!canRunWhileUploadsStable()) return;
     if (!workflowJob?.id) return;
     const routeState = buildDualRouteState(workflowJob);
     if (!routeState.routeA.imageDeckReady || !routeState.routeA.imageDeckReviewReady) {
@@ -1241,36 +1539,243 @@ function App() {
       openDeliveryReviewPanel();
       return;
     }
-    const confirmed = await askUserConfirm({
-      title: "开始路线 B",
-      body: "路线 B 会基于已确认的图片版 PPT，继续做 OCR、页面理解、对象级重建和人工复核。它耗时更长，并可能调用模型或图片服务额度。",
-      primaryLabel: "确认开始路线 B",
-      variant: "route-a",
-      kicker: "可编辑版确认",
-      reviewItems: [
-        "先使用路线 A 的图片版结果",
-        "后台准备 editppt、文字识别和页面任务",
-        "完成后再逐页人工复核可编辑页"
-      ],
-      note: "不需要用户操作的步骤会在后台处理；需要确认时才会弹窗。"
-    });
-    if (!confirmed) return;
+    const artifacts = workflowJob.artifacts || {};
+    const visualOcrReady = hasCurrentVisualOcrCoverage(workflowJob);
+    const existingTasks = Array.isArray(artifacts.editableWorkerTasks?.tasks)
+      ? artifacts.editableWorkerTasks.tasks
+      : Array.isArray(artifacts.editableWorkerTasks)
+        ? artifacts.editableWorkerTasks
+        : [];
+    const runningTasks = existingTasks.filter((task) => ["claimed", "running", "recording"].includes(task.status));
+    if (runningTasks.length) {
+      await refreshActiveWorkflow(null, `正在生成 ${runningTasks.length} 页可编辑 PPT，请稍后刷新查看。`);
+      return;
+    }
+
+    if (!artifacts.editableRun || !existingTasks.length || !artifacts.workerBriefs || !visualOcrReady) {
+      if (!artifacts.editableRun) {
+        const confirmed = await askUserConfirm({
+          title: "准备可编辑版本",
+          body: "先在本地准备 editppt、文字提示和页面任务。这一步不会调用外部图片或对话模型；准备完成后，系统会显示预计调用次数，再由你确认是否开始生成。",
+          primaryLabel: "开始本地准备",
+          variant: "route-a",
+          kicker: "可编辑版准备",
+          reviewItems: [
+            "使用已确认的图片版结果",
+            "准备 editppt、文字提示和页面任务",
+            "外部模型调用前再次显示数量并确认"
+          ],
+          note: "这一步只处理本地文件，不消耗外部 API 额度。"
+        });
+        if (!confirmed) return;
+      }
+
+      setWorkflowBusy(true);
+      setError("");
+      setStatus("正在准备可编辑页面任务...");
+      try {
+        let currentJob = workflowJob;
+        for (let step = 0; step < 4; step += 1) {
+          const currentArtifacts = currentJob.artifacts || {};
+          const currentTasks = Array.isArray(currentArtifacts.editableWorkerTasks?.tasks)
+            ? currentArtifacts.editableWorkerTasks.tasks
+            : Array.isArray(currentArtifacts.editableWorkerTasks)
+              ? currentArtifacts.editableWorkerTasks
+              : [];
+          if (currentTasks.length) break;
+          const result = await api.workflowNextAction(workflowJob.id, {
+            requestedBy: "frontend-route-b-local-setup",
+            confirmRouteB: true
+          });
+          if (result.job) currentJob = result.job;
+          if (!result.didRun) break;
+        }
+        let currentArtifacts = currentJob.artifacts || {};
+        let visualOcrUpdated = false;
+        if (!hasCurrentVisualOcrCoverage(currentJob)) {
+          const visualPageIds = (Array.isArray(currentArtifacts.visualImages) ? currentArtifacts.visualImages : [])
+            .map((image, index) => image.pageId || pageIdFromPageNumber(image.pageNumber || index + 1))
+            .filter(Boolean);
+          setStatus(`正在为 ${visualPageIds.length} 页最终图片版重新识别文字和坐标...`);
+          currentJob = await api.workflowAction(currentJob.id, "ocr/run", {
+            source: "visual",
+            pages: visualPageIds.join(","),
+            maxPages: visualPageIds.length,
+            syncToEditableRun: true,
+            requestedBy: "frontend-route-b-visual-ocr"
+          });
+          currentArtifacts = currentJob.artifacts || {};
+          visualOcrUpdated = true;
+        }
+        let currentTasks = Array.isArray(currentArtifacts.editableWorkerTasks?.tasks)
+          ? currentArtifacts.editableWorkerTasks.tasks
+          : Array.isArray(currentArtifacts.editableWorkerTasks)
+            ? currentArtifacts.editableWorkerTasks
+            : [];
+        if (currentArtifacts.editableWorkerPrompts?.length && (!currentArtifacts.workerBriefs || visualOcrUpdated)) {
+          await api.buildWorkflowWorkerBriefs(workflowJob.id, {
+            pages: currentArtifacts.editableWorkerPrompts.map((prompt) => prompt.pageId).filter(Boolean).join(","),
+            reason: "main workspace route B local preparation"
+          });
+          currentJob = await api.workflowJob(workflowJob.id);
+          currentArtifacts = currentJob.artifacts || {};
+        }
+        if (currentArtifacts.editableWorkerPrompts?.length) {
+          const synced = await api.syncWorkflowWorkerTasks(workflowJob.id);
+          currentTasks = Array.isArray(synced.tasks) ? synced.tasks : [];
+          currentJob = await api.workflowJob(workflowJob.id);
+        }
+        await refreshActiveWorkflow(currentJob, currentTasks.length
+          ? `已准备 ${currentTasks.length} 页可编辑任务。点击“开始生成”后会先显示预计外部调用次数。`
+          : "可编辑页面任务尚未准备完成，请查看错误提示后重试。");
+        return;
+      } catch (err) {
+        setError(getErrorMessage(err));
+        setStatus("");
+        return;
+      } finally {
+        setWorkflowBusy(false);
+      }
+    }
+
+    const candidateTasks = existingTasks
+      .filter((task) => ["ready", "failed"].includes(task.status))
+      .sort((a, b) => (a.status === "failed" ? -1 : 1) - (b.status === "failed" ? -1 : 1));
+    const preferredPages = new Set((Array.isArray(options.pages) ? options.pages : [])
+      .map((pageId) => String(pageId || "").trim())
+      .filter(Boolean));
+    const preferredTasks = preferredPages.size
+      ? candidateTasks.filter((task) => preferredPages.has(task.pageId))
+      : candidateTasks;
+    const runnableTasks = preferredTasks.slice(0, EDITABLE_WORKER_BATCH_SIZE);
+    if (!runnableTasks.length) {
+      await refreshActiveWorkflow(null, "当前没有等待启动的可编辑页面任务，请稍后刷新状态。");
+      return;
+    }
+
     setWorkflowBusy(true);
     setError("");
-    setStatus("正在启动路线 B 可编辑重建...");
+    setStatus("正在检查可编辑页面任务和外部调用额度...");
     try {
-      const result = await api.workflowNextAction(workflowJob.id, {
-        requestedBy: "frontend-route-b",
-        confirmRouteB: true,
-        confirmExternalImageSpend: true
-      });
-      if (result.job) {
-        setWorkflowJob(result.job);
-        await loadWorkflowJobs({ activeId: result.job.id });
-      } else {
-        await refreshActiveWorkflow(null);
+      const failedTasks = runnableTasks.filter((task) => task.status === "failed");
+      if (failedTasks.length) {
+        const failureSummary = failedTasks
+          .map((task) => `${task.pageId}: ${task.error || task.message || "页面重建失败"}`)
+          .join("\n");
+        const resetConfirmed = await askUserConfirm({
+          title: `重置 ${failedTasks.length} 个失败页面`,
+          body: `这些页面必须先清理失败产物并恢复为待运行状态，之后才能重新调用模型。\n\n${failureSummary}`,
+          primaryLabel: "重置并继续预检",
+          variant: "route-a",
+          kicker: "失败恢复",
+          reviewItems: [
+            `失败页面：${failedTasks.map((task) => task.pageId).join("、")}`,
+            "只清理失败页，不覆盖已经成功的页面",
+            "重置是本地操作；真正调用外部模型前仍会再次确认额度"
+          ],
+          note: "页面重置会归档该页的失败产物，保留诊断记录。"
+        });
+        if (!resetConfirmed) {
+          setStatus("已取消失败页重置；当前成功页面和失败证据均已保留。");
+          return;
+        }
+        setStatus(`正在重置 ${failedTasks.length} 个失败页面...`);
+        for (const task of failedTasks) {
+          await api.workflowWorkerTaskAction(workflowJob.id, task.pageId, "reset", {
+            reason: "用户从新版工作台确认页面失败恢复后重跑",
+            archiveGeneratedArtifacts: true,
+            preserveGeneratedAssets: true,
+            confirmLost: Boolean(task.attemptId || task.leaseToken),
+            attemptId: task.attemptId || "",
+            leaseToken: task.leaseToken || ""
+          });
+        }
+        await refreshActiveWorkflow(null, `已重置 ${failedTasks.length} 个失败页面，正在重新预检。`);
       }
-      setStatus(result.didRun ? "路线 B 已启动，后台会继续处理可编辑重建。" : uiZh(result.reason || "路线 B 状态已刷新。"));
+      const pageSelection = runnableTasks.map((task) => task.pageId).filter(Boolean).join(",");
+      let preflight = await api.workflowWorkerBatchPreflight(workflowJob.id, {
+        mode: "model",
+        pages: pageSelection,
+        maxPages: runnableTasks.length,
+        agentPrefix: "product-page-worker",
+        acceptOfflineTextHints: true,
+        autoFinalize: true
+      });
+      const earlyBlockingIssues = (preflight.blockingIssues || []).filter((issue) => !/能力检测|provider probe|检测页面重建模型/i.test(String(issue || "")));
+      if (earlyBlockingIssues.length) throw new Error(earlyBlockingIssues.join("；"));
+      const imageCalls = Number(preflight.authorization?.imageCalls || preflight.externalImageCalls || runnableTasks.length * 8);
+      const authorization = preflight.requiredConfirmations?.externalImageSpend || {};
+      const completesAllRemainingTasks = runnableTasks.length === candidateTasks.length;
+      const confirmed = await askUserConfirm({
+        title: `开始生成 ${runnableTasks.length} 页可编辑 PPT`,
+        body: `将启动 image-to-editable-ppt 页面重建，预计最多调用 ${imageCalls} 次 gpt-image-2，并使用已配置的对话模型理解页面。失败时只重跑失败页，不覆盖已成功页面。`,
+        primaryLabel: "确认并开始生成",
+        variant: "route-a",
+        kicker: "外部调用确认",
+        reviewItems: [
+          `页面范围：${pageSelection || `${runnableTasks.length} 页`}`,
+          `预计最多 ${imageCalls} 次图片 API 调用`,
+          completesAllRemainingTasks
+            ? "本批完成后自动合成可编辑 PPT，并进入逐页复核"
+            : `本批完成后保留结果；剩余 ${candidateTasks.length - runnableTasks.length} 页可继续下一批，已成功页面不会被覆盖`
+        ],
+        note: "每次真实启动都会重新确认本批范围；授权账本只用于当前这些页面。"
+      });
+      if (!confirmed) {
+        setStatus("已取消可编辑页面生成；本地准备结果会保留。");
+        return;
+      }
+      if (authorization.required && !authorization.confirmed) {
+        await api.authorizeExternalImageSpend(workflowJob.id, {
+          scope: "editable-workers",
+          imageCalls,
+          pageSelection,
+          pageNumbers: runnableTasks.map((task) => Number(String(task.pageId || "").match(/\d+/)?.[0] || 0)).filter(Boolean),
+          targetPages: runnableTasks.length,
+          mode: "model",
+          confirmedBy: "frontend-route-b",
+          reason: `用户从主工作台确认生成 ${runnableTasks.length} 页可编辑 PPT`
+        });
+      }
+      if (artifacts.pageSpecProviderProbe?.ok !== true) {
+        setStatus("正在检测页面重建模型的图片理解和 JSON 输出能力...");
+        const probe = await api.probeWorkflowPageSpecProvider(workflowJob.id, {
+          pages: pageSelection,
+          maxPages: 1,
+          visionProbe: true
+        });
+        if (!probe.ok) throw new Error(probe.message || "页面重建模型能力检测未通过。");
+      }
+      preflight = await api.workflowWorkerBatchPreflight(workflowJob.id, {
+        mode: "model",
+        pages: pageSelection,
+        maxPages: runnableTasks.length,
+        agentPrefix: "product-page-worker",
+        confirmLlmProviderRecovered: true,
+        acceptOfflineTextHints: true,
+        autoFinalize: true
+      });
+      if (!preflight.ready) {
+        throw new Error((preflight.blockingIssues || []).join("；") || "可编辑页面任务预检未通过。");
+      }
+      if (!preflight.startReady) {
+        throw new Error([...(preflight.blockingIssues || []), ...(preflight.warnings || [])].join("；") || "可编辑页面任务暂时不能启动。");
+      }
+      const startBody = preflight.startBody || {};
+      const result = await api.startWorkflowWorkerBatch(workflowJob.id, {
+        mode: "model",
+        maxPages: preflight.selectedCount || runnableTasks.length,
+        pages: startBody.pages || pageSelection,
+        agentPrefix: startBody.agentPrefix || "product-page-worker",
+        confirmExternalImageSpend: true,
+        confirmLlmProviderRecovered: Boolean(startBody.confirmLlmProviderRecovered || preflight.requiredConfirmations?.llmProviderRecovered?.confirmed),
+        acceptOfflineTextHints: true,
+        externalImageCallBudget: startBody.externalImageCallBudget || imageCalls,
+        externalImageCallsPerPage: startBody.externalImageCallsPerPage || preflight.externalImageCallsPerPage || undefined,
+        offlineTextHintsReason: "main workspace explicit editable generation confirmation",
+        autoFinalize: true
+      });
+      await refreshActiveWorkflow(null, `已启动 ${runnableTasks.length} 页可编辑重建，后台任务 ${result.run?.id || result.runId || "已创建"} 正在运行。`);
     } catch (err) {
       setError(getErrorMessage(err));
       setStatus("");
@@ -1311,7 +1816,7 @@ function App() {
     if (!confirmed) return;
     setWorkflowBusy(true);
     setError("");
-    setStatus("正在重新生成 1 页样张...");
+    setStatus("正在重新生成 1 页样张，图片模型通常需要 1-2 分钟，请保持页面打开...");
     try {
       const next = await api.workflowAction(workflowJob.id, "visual/sample", {
         confirmExternalImageSpend: true,
@@ -1327,23 +1832,117 @@ function App() {
     }
   }
 
-  function openImageDeckReviewPanel() {
-    if (!workflowJob?.id) return;
-    setImageDeckReviewOpen(true);
-    setStatus("请逐页确认原始信息没有变形。");
-  }
-
-  async function markImageDeckReviewPage(pageId, status = "pass", note = "") {
-    if (!workflowJob?.id || workflowBusy || !pageId) return null;
+  async function openImageDeckReviewPanel() {
+    if (!workflowJob?.id || workflowBusy) return;
     setWorkflowBusy(true);
     setError("");
     try {
-      const next = await api.markImageDeckReviewPage(workflowJob.id, pageId, {
+      const next = await ensureVisualTextQuality(workflowJob);
+      await refreshActiveWorkflow(next, "本地文字质量检查已完成，请逐页确认原始信息没有变形。");
+      setImageDeckReviewOpen(true);
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function reloadImageDeckReviewEvidence({ rebuildVisualQuality = false } = {}) {
+    if (!workflowJob?.id || workflowBusy) return null;
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      const next = rebuildVisualQuality
+        ? await api.workflowAction(workflowJob.id, "visual-quality/rebuild-from-existing", { requestedBy: "frontend-image-deck-review-retry" })
+        : await api.workflowJob(workflowJob.id);
+      await refreshActiveWorkflow(next, rebuildVisualQuality ? "本地视觉质量报告已重新生成。" : "复核证据已刷新。");
+      return next;
+    } catch (reloadError) {
+      setError(getErrorMessage(reloadError));
+      return null;
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function markImageDeckReviewPage(pageId, status = "pass", note = "", confirmations = {}) {
+    if (!workflowJob?.id || workflowBusy || !pageId) return null;
+    if (status === "rerun") {
+      const confirmed = await askUserConfirm({
+        title: cp(0x786e, 0x8ba4, 0x91cd, 0x505a, 0x8fd9, 0x4e00, 0x9875),
+        body: cp(0x8fd9, 0x4f1a, 0x91cd, 0x7f6e, 0x5f53, 0x524d, 0x56fe, 0x7247, 0x9875, 0xff0c, 0x5e76, 0x4f7f, 0x540e, 0x7eed, 0x53ef, 0x7f16, 0x8f91, 0x7ed3, 0x679c, 0x5931, 0x6548, 0x3002, 0x539f, 0x56fe, 0x548c, 0x5176, 0x4ed6, 0x5df2, 0x901a, 0x8fc7, 0x7684, 0x56fe, 0x7247, 0x9875, 0x4e0d, 0x4f1a, 0x53d7, 0x5f71, 0x54cd, 0x3002),
+        primaryLabel: cp(0x786e, 0x8ba4, 0x91cd, 0x505a),
+        danger: true
+      });
+      if (!confirmed) return null;
+    }
+    if (status === "accept" && confirmations.confirmSemanticRisk === true) {
+      const riskSummary = String(confirmations.semanticSummary || "文字、数字、品牌、链接或标题可能与原稿不一致").trim();
+      const confirmed = await askUserConfirm({
+        title: "确认放行内容风险",
+        body: `系统检测到：${riskSummary}。请先放大对照原始页和生成页；只有确认原文、数字、品牌与链接都没有被改写时才能继续。`,
+        primaryLabel: "我已核对，内容确实无误",
+        danger: true
+      });
+      if (!confirmed) return null;
+    }
+    setWorkflowBusy(true);
+    setError("");
+    try {
+      let next = await api.markImageDeckReviewPage(workflowJob.id, pageId, {
         status,
         note,
+        confirmStyleDrift: status === "accept" && confirmations.confirmStyleDrift === true,
+        confirmSemanticRisk: status === "accept" && confirmations.confirmSemanticRisk === true,
+        resetForRerun: status === "rerun",
         reviewer: "frontend-route-a-image-deck-review"
       });
+      if (status === "rerun" && next?.artifacts?.visualImages?.length) {
+        setStatus("正在本地刷新剩余图片页的质量检查...");
+        next = await api.workflowAction(next.id, "visual-quality/rebuild-from-existing", {
+          requestedBy: "frontend-route-a-image-deck-rerun"
+        });
+      }
       await refreshActiveWorkflow(next, status === "rerun" ? "已标记该页需要重做。" : "该页已通过图片版复核。");
+      return next;
+    } catch (err) {
+      setError(getErrorMessage(err));
+      setStatus("");
+      return null;
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
+  async function markImageDeckBlockedPagesForRerun(pageIds = []) {
+    const targets = [...new Set((Array.isArray(pageIds) ? pageIds : []).filter(Boolean))];
+    if (!workflowJob?.id || workflowBusy || !targets.length) return null;
+    const confirmed = await askUserConfirm({
+      title: `将 ${targets.length} 页加入重做`,
+      body: `系统会归档这 ${targets.length} 页当前图片，并把它们重置为待生成；未选中的页面会完整保留。本操作不会调用外部 API，后续重新生成时仍会单独确认额度。`,
+      primaryLabel: "确认加入重做",
+      danger: true
+    });
+    if (!confirmed) return null;
+    setWorkflowBusy(true);
+    setError("");
+    setStatus(`正在安全重置 ${targets.length} 页...`);
+    try {
+      let next = await api.markImageDeckReviewPagesForRerun(workflowJob.id, {
+        pageIds: targets,
+        confirmResetForRerun: true,
+        reviewer: "frontend-route-a-image-deck-quality-batch-rerun",
+        note: "batch reset from semantic image deck quality gate"
+      });
+      if (next?.artifacts?.visualImages?.length) {
+        setStatus("正在本地刷新剩余图片页的质量检查...");
+        next = await api.workflowAction(next.id, "visual-quality/rebuild-from-existing", {
+          requestedBy: "frontend-route-a-image-deck-batch-rerun"
+        });
+      }
+      setImageDeckReviewOpen(false);
+      await refreshActiveWorkflow(next, `${targets.length} 页已加入重做；其余成功页面保持不变。重新生成前会再次确认外部 API 额度。`);
       return next;
     } catch (err) {
       setError(getErrorMessage(err));
@@ -1356,24 +1955,11 @@ function App() {
 
   async function approveImageDeckReviewFromPanel() {
     if (!workflowJob?.id || workflowBusy) return;
-    const state = buildDualRouteState(workflowJob);
-    const pages = state.routeA.reviewPageIds || [];
-    const marks = workflowJob.artifacts?.imageDeckReview?.marks || {};
     setWorkflowBusy(true);
     setError("");
     setStatus("正在确认整套图片复核...");
     try {
-      let next = workflowJob;
-      for (const pageId of pages) {
-        if (!["pass", "accept"].includes(marks[pageId]?.status)) {
-          next = await api.markImageDeckReviewPage(next.id, pageId, {
-            status: "pass",
-            note: "bulk approve from route A image deck review",
-            reviewer: "frontend-route-a-image-deck-review"
-          });
-        }
-      }
-      next = await api.approveImageDeckReview(next.id, {
+      const next = await api.approveImageDeckReview(workflowJob.id, {
         note: "route A image deck pages reviewed",
         reviewer: "frontend-route-a-image-deck-review"
       });
@@ -1395,9 +1981,12 @@ function App() {
     return hasUploadedMaterials ? current : { ...current, outlineStrategy: "regenerate" };
   }
 
-  async function planOutline(formOverride = null) {
+  async function planOutline(formOverride = null, options = {}) {
+    if (outlineBusy || workflowBusy) return;
+    if (!canRunWhileUploadsStable()) return;
     const requestForm = getRequestFormForFiles(formOverride || form);
     if (!validatePreparation(requestForm)) return;
+    const requestRevision = intakeRevisionRef.current;
     setError("");
     setOutlineBusy(true);
     setStatus("正在生成可确认大纲...");
@@ -1409,10 +1998,15 @@ function App() {
         materials: inferredMaterials,
         mode: getGenerationMode()
       });
+      if (requestRevision !== intakeRevisionRef.current) {
+        setStatus("资料或需求已更新，请基于最新内容重新生成大纲。");
+        return;
+      }
       setOutlinePlan(data.outlinePlan || null);
+      setOutlineEditingIndex(null);
       setOutlineBrief(data.materialBrief || null);
       setStatus("大纲已生成，可以调整后按确认大纲生成。");
-      setActiveStep("outline");
+      if (!options.stayInWorkspace) setActiveStep("outline");
       setRightPanelMode("edit");
     } catch (err) {
       setError(getErrorMessage(err));
@@ -1779,6 +2373,7 @@ function App() {
   }
 
   function updateOutlineStep(index, field, value) {
+    if (outlineBusy || workflowBusy) return;
     setOutlinePlan((current) => {
       if (!current?.layoutSequence) return current;
       return {
@@ -1791,6 +2386,8 @@ function App() {
   }
 
   function outlineAction(index, action) {
+    if (outlineBusy || workflowBusy) return;
+    setOutlineEditingIndex(null);
     setOutlinePlan((current) => {
       if (!current?.layoutSequence?.length) return current;
       const next = [...current.layoutSequence];
@@ -1811,10 +2408,19 @@ function App() {
   }
 
   function appendOutlineStep() {
+    if (outlineBusy || workflowBusy) return;
     setOutlinePlan((current) => {
       if (!current?.layoutSequence?.length) return current;
       return { ...current, layoutSequence: [...current.layoutSequence, makeOutlineStep(outlineInsertLayout)] };
     });
+  }
+
+  function openOutlineStep(index) {
+    if (outlineBusy || workflowBusy) return;
+    setOutlineEditingIndex(index);
+    window.setTimeout(() => {
+      document.getElementById(`outline-step-${index + 1}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
   }
 
   function toggleSettingsPanel() {
@@ -1834,9 +2440,14 @@ function App() {
     }, attempt ? 180 : 80);
   }
 
-  function openDeliveryReviewPanel() {
+  function openDeliveryReviewPanel(options = {}) {
+    setDeliveryReviewAutoOpen(options === true || options?.openReview === true);
     setActiveStep("export");
     scrollToDeliveryPanel();
+  }
+
+  function openEditableReviewPanel() {
+    openDeliveryReviewPanel({ openReview: true });
   }
 
   function goMainWorkbench() {
@@ -1922,6 +2533,12 @@ function App() {
   const editBlocked = Boolean(job?.editReadiness && job.editReadiness.ready === false);
   const hasEditableContext = Boolean(job && currentSlide && !editBlocked);
   const allowAdvancedEdit = activeStep === "preview" && hasEditableContext;
+  const modelConfigReady = Boolean(
+    (apiConfig?.hasApiKey || apiConfig?.apiKey)
+    && apiConfig?.baseUrl
+    && apiConfig?.model
+    && apiConfig?.imageModel
+  );
   const useDualRouteDashboard = activeStep === "generate";
   const showRightPanel = !useDualRouteDashboard && activeStep !== "export" && ((activeStep === "preview" && Boolean(job)) || rightPanelMode !== "closed");
   const visibleRightPanelMode = rightPanelMode === "closed"
@@ -1943,7 +2560,7 @@ function App() {
           </span>
           <span className="brand-name">PPT Agent</span>
           <span className="topbar-pill"><span className={topbarStateClass} />本地已连接</span>
-          <span className="topbar-pill"><span className="pill-check" />模型正常</span>
+          <span className="topbar-pill"><span className={modelConfigReady ? "pill-check" : "state-dot error"} />{modelConfigReady ? "模型已配置" : "模型待配置"}</span>
         </div>
         <div className="topbar-actions">
           <button className={`topbar-system-entry topbar-mode ${topbarPanel ? "active" : ""}`} type="button" aria-label="系统面板" onClick={() => toggleTopbarPanel("health")}>
@@ -2127,80 +2744,133 @@ function App() {
           )}
 
           {activeStep === "outline" && (
-            <SectionCard className="outline-card" title="确认大纲" desc="正式生成前，先确认页序、版式、标题和每页目标。">
-              <div className="readiness">
-                <Metric label="资料文件" value={fileIds.length} />
-                <Metric label="自动识别素材" value={inferredMaterials.length ? `${inferredMaterials.length} 类` : "待处理"} />
-                <Metric label="需求完整度" value={`${completion}%`} />
+            <SectionCard className="outline-card" title="确认大纲" desc="先看整套内容是否顺畅；只有需要调整的页面才展开编辑。">
+              <div className="outline-summary-bar" aria-label="大纲概况">
+                <span><b>{outlinePlan?.layoutSequence?.length || 0}</b><small>页面</small></span>
+                <span><b>{fileIds.length}</b><small>资料文件</small></span>
+                <span><b>{inferredMaterials.length ? `${inferredMaterials.length} 类` : "待处理"}</b><small>识别素材</small></span>
+                <span><b>{completion}%</b><small>需求完整度</small></span>
               </div>
               <div className="outline-panel">
-                <div>
-                  <b>大纲方案</b>
-                  <span>{outlineBrief ? `${inputStrengthLabel(outlineBrief.inputStrength)} / 产品 ${outlineBrief.productCount || 0} / 价格 ${outlineBrief.priceCount || 0} / 图片 ${outlineBrief.imageCount || 0}` : "先生成页序、版式、标题和页面目标，再确认生成。"} </span>
-                </div>
-                <div className="button-row tight">
-                  <button className="btn ghost" type="button" onClick={planOutline} disabled={outlineBusy}>{outlineBusy ? "正在生成大纲" : "重新生成大纲"}</button>
-                  <button className="btn primary" type="button" onClick={confirmOutlineAndStartWorkflow} disabled={workflowBusy || !outlinePlan?.layoutSequence?.length}>{workflowBusy ? "正在创建任务" : "确认大纲并生成"}</button>
+                <div className="outline-panel-head">
+                  <div>
+                    <small>内容结构</small>
+                    <b>{outlinePlan?.layoutSequence?.length ? `共 ${outlinePlan.layoutSequence.length} 页，按阅读顺序排列` : "还没有可确认的大纲"}</b>
+                    <span>{outlineBrief ? `${inputStrengthLabel(outlineBrief.inputStrength)} · 产品 ${outlineBrief.productCount || 0} · 价格 ${outlineBrief.priceCount || 0} · 图片 ${outlineBrief.imageCount || 0}` : "系统会先整理页序、标题和每页目标。"}</span>
+                  </div>
+                  <div className="outline-primary-actions">
+                    <button className="btn ghost" type="button" onClick={planOutline} disabled={outlineBusy || workflowBusy}>
+                      <RefreshCw size={14} aria-hidden="true" />
+                      {outlineBusy ? "正在生成" : "重新生成"}
+                    </button>
+                    <button className="btn primary" type="button" onClick={confirmOutlineAndStartWorkflow} disabled={workflowBusy || outlineBusy || !outlinePlan?.layoutSequence?.length}>
+                      <CheckCircle2 size={14} aria-hidden="true" />
+                      {workflowBusy ? "正在创建任务" : "确认并生成"}
+                    </button>
+                  </div>
                 </div>
                 {outlinePlan?.layoutSequence?.length ? (
-                  <div className="outline-list outline-card-list">
-                    <div className="outline-digest">
-                      <strong>叙事线</strong>
-                      <span>{outlinePlan.layoutSequence.map((step, index) => `${index + 1}. ${step.title || LAYOUT_LABELS[step.layout] || step.layout}`).slice(0, 8).join(" / ")}</span>
-                    </div>
-                    <div className="outline-insert-bar">
-                      <select value={outlineInsertLayout} onChange={(event) => setOutlineInsertLayout(event.target.value)}>
-                        {Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>新增版式：{label} / {value}</option>)}
-                      </select>
-                      <button className="btn ghost" type="button" onClick={appendOutlineStep}>追加到末尾</button>
-                    </div>
-                    {outlinePlan.layoutSequence.map((step, index) => (
-                      <div className="outline-card-item" key={`${step.layout}-${index}`}>
-                        <div className="outline-source-row">
-                          <span className={`source-badge ${getOutlineSourceMeta(step).tone}`}>{getOutlineSourceMeta(step).label}</span>
-                          {getOutlineSourceMeta(step).evidence ? <small>{getOutlineSourceMeta(step).evidence}</small> : null}
-                        </div>
-                        <div className="outline-card-index">
-                          <span>{String(index + 1).padStart(2, "0")}</span>
-                          <select value={step.layout || "section"} onChange={(event) => updateOutlineStep(index, "layout", event.target.value)}>
-                            {Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}
-                          </select>
-                        </div>
-                        <div className="outline-card-fields">
-                          <input value={step.title || ""} onChange={(event) => updateOutlineStep(index, "title", event.target.value)} placeholder="页面标题" />
-                          <textarea value={step.purpose || ""} onChange={(event) => updateOutlineStep(index, "purpose", event.target.value)} placeholder="这一页的用途" />
-                        </div>
-                        <div className="outline-actions" aria-label={"page " + (index + 1) + " actions"}>
-                          <button type="button" title="上移页面" aria-label="上移页面" onClick={() => outlineAction(index, "move-up")} disabled={index === 0}>上移</button>
-                          <button type="button" title="下移页面" aria-label="下移页面" onClick={() => outlineAction(index, "move-down")} disabled={index === outlinePlan.layoutSequence.length - 1}>下移</button>
-                          <button type="button" title="在后面插入" aria-label="在后面插入" onClick={() => outlineAction(index, "insert-after")}>+</button>
-                          <button type="button" title="复制页面" aria-label="复制页面" onClick={() => outlineAction(index, "duplicate")}>复制</button>
-                          <button type="button" title="删除页面" aria-label="删除页面" onClick={() => outlineAction(index, "delete")} disabled={outlinePlan.layoutSequence.length <= 1}>删除</button>
-                        </div>
-                        <small className="outline-action-hint">上移 / 下移 / 新增 / 复制 / 删除</small>
+                  <div className="outline-workbench">
+                    <div className="outline-storyline">
+                      <strong>故事线</strong>
+                      <div className="outline-storyline-track">
+                        {outlinePlan.layoutSequence.map((step, index) => (
+                          <button className={outlineEditingIndex === index ? "active" : ""} type="button" onClick={() => openOutlineStep(index)} disabled={outlineBusy || workflowBusy} aria-current={outlineEditingIndex === index ? "step" : undefined} key={`story-${step.layout}-${index}`} title={`编辑第 ${index + 1} 页`}>
+                            <span>{String(index + 1).padStart(2, "0")}</span>
+                            <b>{step.title || LAYOUT_LABELS[step.layout] || "未命名页"}</b>
+                          </button>
+                        ))}
                       </div>
-                    ))}
+                    </div>
+                    <div className="outline-add-bar">
+                      <label>
+                        <span>新增页面</span>
+                        <select value={outlineInsertLayout} onChange={(event) => setOutlineInsertLayout(event.target.value)} disabled={outlineBusy || workflowBusy}>
+                        {Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>新增版式：{label} / {value}</option>)}
+                        </select>
+                      </label>
+                      <button className="btn ghost" type="button" onClick={appendOutlineStep} disabled={outlineBusy || workflowBusy}><Plus size={14} aria-hidden="true" />追加到末尾</button>
+                    </div>
+                    <ol className="outline-sequence">
+                      {outlinePlan.layoutSequence.map((step, index) => {
+                        const sourceMeta = getOutlineSourceMeta(step);
+                        const editing = outlineEditingIndex === index;
+                        return (
+                          <li className={editing ? "editing" : ""} id={`outline-step-${index + 1}`} key={`${step.layout}-${index}`}>
+                            <button className="outline-sequence-summary" type="button" onClick={() => setOutlineEditingIndex(editing ? null : index)} disabled={outlineBusy || workflowBusy} aria-expanded={editing}>
+                              <span className="outline-sequence-number">{String(index + 1).padStart(2, "0")}</span>
+                              <span className="outline-layout-label">{LAYOUT_LABELS[step.layout] || step.layout || "页面"}</span>
+                              <span className="outline-sequence-copy">
+                                <b>{step.title || "未命名页面"}</b>
+                                <small>{step.purpose || "暂未填写页面目标"}</small>
+                              </span>
+                              <span className={`source-badge ${sourceMeta.tone}`}>{sourceMeta.label}</span>
+                              <ChevronDown className="outline-expand-icon" size={17} aria-hidden="true" />
+                            </button>
+                            {editing ? (
+                              <div className="outline-sequence-editor">
+                                <div className="outline-editor-grid">
+                                  <label>
+                                    <span>页面版式</span>
+                                    <select value={step.layout || "section"} onChange={(event) => updateOutlineStep(index, "layout", event.target.value)} disabled={outlineBusy || workflowBusy}>
+                                      {Object.entries(LAYOUT_LABELS).map(([value, label]) => <option key={value} value={value}>{label} / {value}</option>)}
+                                    </select>
+                                  </label>
+                                  <label className="outline-title-field">
+                                    <span>页面标题</span>
+                                    <input value={step.title || ""} onChange={(event) => updateOutlineStep(index, "title", event.target.value)} placeholder="页面标题" disabled={outlineBusy || workflowBusy} />
+                                  </label>
+                                  <label className="outline-purpose-field">
+                                    <span>这一页要讲什么</span>
+                                    <textarea value={step.purpose || ""} onChange={(event) => updateOutlineStep(index, "purpose", event.target.value)} placeholder="用一句话说明这一页的目标" disabled={outlineBusy || workflowBusy} />
+                                  </label>
+                                </div>
+                                {sourceMeta.evidence ? <p className="outline-source-evidence"><FileText size={13} aria-hidden="true" />{sourceMeta.evidence}</p> : null}
+                                <div className="outline-row-actions" aria-label={`第 ${index + 1} 页操作`}>
+                                  <button type="button" title="上移页面" aria-label="上移页面" onClick={() => outlineAction(index, "move-up")} disabled={outlineBusy || workflowBusy || index === 0}><ArrowUp size={15} /></button>
+                                  <button type="button" title="下移页面" aria-label="下移页面" onClick={() => outlineAction(index, "move-down")} disabled={outlineBusy || workflowBusy || index === outlinePlan.layoutSequence.length - 1}><ArrowDown size={15} /></button>
+                                  <button type="button" title="在后面插入页面" aria-label="在后面插入页面" onClick={() => outlineAction(index, "insert-after")} disabled={outlineBusy || workflowBusy}><Plus size={15} /></button>
+                                  <button type="button" title="复制页面" aria-label="复制页面" onClick={() => outlineAction(index, "duplicate")} disabled={outlineBusy || workflowBusy}><Copy size={15} /></button>
+                                  <button className="danger" type="button" title="删除页面" aria-label="删除页面" onClick={() => outlineAction(index, "delete")} disabled={outlineBusy || workflowBusy || outlinePlan.layoutSequence.length <= 1}><Trash2 size={15} /></button>
+                                </div>
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ol>
                   </div>
-                ) : null}
+                ) : (
+                  <div className="outline-empty-state">
+                    <span><PencilLine size={20} aria-hidden="true" /></span>
+                    <b>{outlineBusy ? "正在整理内容结构" : "先生成一份可阅读的大纲"}</b>
+                    <p>{outlineBusy ? "系统正在提取标题、素材和页面目标。" : "生成后，你可以按故事线浏览，并只展开需要修改的页面。"}</p>
+                    {!outlineBusy ? <button className="btn primary" type="button" onClick={planOutline}>生成大纲</button> : null}
+                  </div>
+                )}
               </div>
             </SectionCard>
           )}
 
           {activeStep === "generate" && (
             <DualRouteDashboard
-              busy={workflowBusy || generationProgress.active}
+              busy={workflowBusy || outlineBusy || generationProgress.active || Boolean(uploadDeleteBusyId)}
+              error={error}
               files={files}
               hasInput={Boolean(fileIds.length || form.notes.trim())}
               job={workflowJob}
+              jobListHasMore={workflowJobListPage.hasMore}
               jobs={workflowJobs}
+              deliveryBundle={workflowDeliveryBundle}
               notes={form.notes}
               noCostApprovalSummary={noCostApprovalSummary}
               onApproveNoCostGates={approveNoCostCodexGates}
               onConfirm={askUserConfirm}
               onCreateWorkflow={startSkillFirstWorkflow}
               onDeliveryModeChange={setPendingDeliveryMode}
-              onPlanOutline={planOutline}
+              onPlanOutline={() => planOutline(null, { stayInWorkspace: true })}
               onOpenDelivery={openDeliveryReviewPanel}
+              onOpenEditableReview={openEditableReviewPanel}
               onOpenEditable={() => window.setTimeout(() => document.getElementById("dual-route-editable")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60)}
               onOpenImageDeckReview={openImageDeckReviewPanel}
               onOpenSampleReview={openSampleReviewPanel}
@@ -2208,14 +2878,19 @@ function App() {
               onRouteAAction={runRouteAAction}
               onRouteBAction={runRouteBAction}
               onNotesChange={(value) => update("notes", value)}
+              onRemoveFile={removeUploadedFile}
+              outlinePlan={outlinePlan}
               outlineReady={Boolean(outlinePlan?.layoutSequence?.length)}
               pendingDeliveryMode={pendingDeliveryMode}
               onArchiveJob={toggleWorkflowArchive}
               onArchivedVisibilityChange={setWorkflowArchiveVisibility}
               onRefreshJobs={(includeArchived = false) => loadWorkflowJobs({ activeId: workflowJob?.id || "", includeArchived })}
+              onLoadMoreJobs={loadMoreWorkflowJobs}
               onSelectJob={selectWorkflowJob}
               onUploadFiles={uploadFiles}
+              uploadDeleteBusyId={uploadDeleteBusyId}
               showArchived={workflowShowArchived}
+              status={status}
             />
           )}
 
@@ -2267,6 +2942,7 @@ function App() {
           {activeStep === "export" && (
             <SectionCard title="交付文件" desc="只显示最终交付状态；需要人工确认时再展开复核界面。">
               <WorkflowDeliveryPortal
+                autoOpenReview={deliveryReviewAutoOpen}
                 job={workflowJob}
                 onCreateWorkflow={startSkillFirstWorkflow}
                 onGoMaterials={() => setActiveStep("materials")}
@@ -2275,6 +2951,7 @@ function App() {
                   window.setTimeout(() => document.getElementById("editable-page-worker-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
                 }}
                 onOpenWorkflow={goMainWorkbench}
+                onReviewAutoOpened={() => setDeliveryReviewAutoOpen(false)}
               />
             </SectionCard>
           )}
@@ -2404,7 +3081,9 @@ function App() {
         job={workflowJob}
         onApproveAll={approveImageDeckReviewFromPanel}
         onClose={() => setImageDeckReviewOpen(false)}
+        onMarkBlockedPages={markImageDeckBlockedPagesForRerun}
         onMarkPage={markImageDeckReviewPage}
+        onReloadEvidence={reloadImageDeckReviewEvidence}
         open={imageDeckReviewOpen}
         status={status}
       />
@@ -2526,12 +3205,32 @@ function SampleReviewDialog({ busy = false, job = null, onApprove, onClose, onRe
   );
 }
 
+const REVIEW_TEXT_ZH = new Map([
+  ["Full original page", "完整原始页"],
+  ["Baseline for factual fidelity and visual comparison.", "用于核对事实内容和视觉保真。"],
+  ["Data visual", "数据图表"],
+  ["Values, labels, hierarchy, and relationships must be preserved.", "数值、标签、层级和相互关系必须保持不变。"],
+  ["Dense text block", "密集文字区"],
+  ["Meaning should be retained; avoid hallucinated readable text.", "保留原意，不能生成虚假或乱码文字。"],
+  ["Compare against the original page before approving the sample/full deck.", "通过样张或整套图片前，请先与原始页逐项对比。"],
+  ["Check that all obvious source images and key labels still refer to the same content.", "检查源页中的图片和关键标签是否仍对应同一内容。"],
+  ["Logo/brand mark is not distorted or replaced.", "Logo 或品牌标识没有变形或被替换。"],
+  ["Original photo/screenshot subject, crop, and key details are still correct.", "原始图片或截图的主体、裁切和关键细节仍然正确。"],
+  ["Data values and relationships are unchanged.", "数据数值和相互关系没有改变。"],
+  ["Long text is not hallucinated; short visible labels remain legible.", "长文本没有被编造，页面上的短标签仍然清晰可读。"]
+]);
+
+function localizeReviewText(value) {
+  const text = String(value || "").trim();
+  return REVIEW_TEXT_ZH.get(text) || text;
+}
+
 function ReviewThreePointChecklist({ assetError = "", checklist = [], currentStatus = "", mode = "sample", preserve = [], risks = [] }) {
   const preserveItems = preserve.length
-    ? preserve.slice(0, 4).map((item) => `${item.label || item.type}${item.reason ? `：${item.reason}` : ""}`)
+    ? preserve.slice(0, 4).map((item) => `${localizeReviewText(item.label || item.type)}${item.reason ? `：${localizeReviewText(item.reason)}` : ""}`)
     : [assetError || "信息资产拆解读取中，稍后再确认通过。"];
   const designItems = checklist.length
-    ? checklist.slice(0, 3)
+    ? checklist.slice(0, 3).map(localizeReviewText)
     : ["背景、卡片、装饰和排版可以更好看。", "不要为了好看改掉产品、Logo、截图、图表或数字。"];
   const riskItems = risks.length
     ? risks.slice(0, 3).map(formatAssetRisk)
@@ -2562,14 +3261,20 @@ function ReviewThreePointChecklist({ assetError = "", checklist = [], currentSta
   );
 }
 
-function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApproveAll, onClose, onMarkPage, open = false, status = "" }) {
+function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApproveAll, onClose, onMarkBlockedPages, onMarkPage, onReloadEvidence, open = false, status = "" }) {
   const [selectedPageId, setSelectedPageId] = useState("");
   const [previewImage, setPreviewImage] = useState(null);
   const [assetMap, setAssetMap] = useState(null);
   const [assetError, setAssetError] = useState("");
+  const [visualQualityReport, setVisualQualityReport] = useState(null);
+  const [visualQualityError, setVisualQualityError] = useState("");
+  const [visualQualityLoading, setVisualQualityLoading] = useState(false);
+  const [evidenceReloadKey, setEvidenceReloadKey] = useState(0);
+  const [reviewFilter, setReviewFilter] = useState("all");
+  const [riskConfirmations, setRiskConfirmations] = useState({});
   const visualImages = useMemo(() => (
     Array.isArray(job?.artifacts?.visualImages)
-      ? [...job.artifacts.visualImages].filter((image) => image?.path).sort((a, b) => Number(a.pageNumber || 0) - Number(b.pageNumber || 0))
+      ? [...job.artifacts.visualImages].filter((image) => image?.path && image.staleStyleReference !== true).sort((a, b) => Number(a.pageNumber || 0) - Number(b.pageNumber || 0))
       : []
   ), [job?.artifacts?.visualImages]);
   const marks = job?.artifacts?.imageDeckReview?.marks || {};
@@ -2591,13 +3296,36 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
   }, [open, selectedPageId, visualImages]);
 
   useEffect(() => {
+    if (!open) {
+      setReviewFilter("all");
+      setRiskConfirmations({});
+    }
+  }, [job?.id, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setRiskConfirmations({});
+  }, [
+    evidenceReloadKey,
+    job?.artifacts?.visualQuality?.createdAt,
+    job?.artifacts?.visualQuality?.evidenceSha256,
+    job?.artifacts?.visualQuality?.sha256,
+    job?.artifacts?.visualSample?.sha256,
+    job?.artifacts?.visualTextQuality?.evidenceSha256,
+    job?.id,
+    open
+  ]);
+
+  useEffect(() => {
     if (!open || !job?.id) {
       setAssetMap(null);
       setAssetError("");
       return;
     }
     let active = true;
-    fetch(`/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/codex-ppt-information-assets`, { cache: "no-store" })
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort("timeout"), 12000);
+    fetch(`/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/codex-ppt-information-assets`, { cache: "no-store", signal: controller.signal })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error("asset map not ready")))
       .then((data) => {
         if (active) {
@@ -2608,13 +3336,59 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
       .catch((error) => {
         if (active) {
           setAssetMap(null);
-          setAssetError(error.message || "无法读取信息资产拆解");
+          setAssetError(controller.signal.aborted ? "读取信息资产超时，请重新读取。" : error.message || "无法读取信息资产拆解");
         }
       });
     return () => {
       active = false;
+      window.clearTimeout(timer);
+      controller.abort();
     };
-  }, [job?.id, open]);
+  }, [evidenceReloadKey, job?.id, open]);
+
+  useEffect(() => {
+    if (!open || !job?.id) {
+      setVisualQualityReport(null);
+      setVisualQualityError("");
+      setVisualQualityLoading(false);
+      return;
+    }
+    if (!job?.artifacts?.visualQuality?.path) {
+      setVisualQualityReport(null);
+      setVisualQualityError("当前任务还没有视觉质量报告，请刷新任务状态或重新运行本地质量检查。");
+      setVisualQualityLoading(false);
+      return;
+    }
+    setVisualQualityReport(null);
+    setVisualQualityError("");
+    setVisualQualityLoading(true);
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort("timeout"), 12000);
+    fetch(`/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-quality`, { cache: "no-store", signal: controller.signal })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("visual quality report not ready")))
+      .then((data) => {
+        if (active) {
+          setVisualQualityReport(data);
+          setVisualQualityError("");
+        }
+      })
+      .catch((loadError) => {
+        if (active) {
+          setVisualQualityReport(null);
+          setVisualQualityError(controller.signal.aborted ? "读取视觉质量报告超时，请重新读取。" : loadError.message || "无法读取当前视觉质量报告");
+        }
+      })
+      .finally(() => {
+        window.clearTimeout(timer);
+        if (active) setVisualQualityLoading(false);
+      });
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [evidenceReloadKey, job?.artifacts?.visualQuality?.createdAt, job?.artifacts?.visualQuality?.path, job?.artifacts?.visualSample?.sha256, job?.id, open, visualImages]);
 
   if (!open || !job?.id) return null;
 
@@ -2623,15 +3397,107 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
   const risks = Array.isArray(pageRecord?.risks) ? pageRecord.risks : [];
   const checklist = Array.isArray(pageRecord?.reviewChecklist) ? pageRecord.reviewChecklist : [];
   const preserve = Array.isArray(pageRecord?.mustPreserve) ? pageRecord.mustPreserve : [];
-  const hasRerun = Object.values(marks).some((mark) => mark?.status === "rerun");
+  const qualityPages = Array.isArray(visualQualityReport?.pages) ? visualQualityReport.pages : [];
+  const semanticQualitySummary = visualQualityReport?.summary?.semanticQuality
+    || job?.artifacts?.visualTextQuality?.summary
+    || null;
+  const closingRecommended = semanticQualitySummary?.closingRecommended === true;
+  const styleDriftReasonMap = new Map(qualityPages.map((page) => {
+    const id = page.pageId || pageIdFromPageNumber(page.pageNumber);
+    const reasons = [...new Set([
+      ...(Array.isArray(page?.styleConsistency?.reasons) ? page.styleConsistency.reasons : []),
+      ...(Array.isArray(page?.manualReviewReasons) ? page.manualReviewReasons : [])
+    ].filter((reason) => /^style-.*-drift$/i.test(String(reason || ""))))];
+    return [id, reasons];
+  }).filter(([id, reasons]) => id && reasons.length));
+  const styleDriftPageIds = new Set(styleDriftReasonMap.keys());
+  const hasStyleDrift = styleDriftPageIds.size > 0;
+  const semanticBlockReasonMap = new Map(qualityPages.map((page) => {
+    const id = page.pageId || pageIdFromPageNumber(page.pageNumber);
+    const reasons = [...new Set([
+      ...(Array.isArray(page?.blockingReasons) ? page.blockingReasons : []),
+      ...(Array.isArray(page?.semanticQuality?.blockingReasons) ? page.semanticQuality.blockingReasons : [])
+    ])];
+    return [id, reasons];
+  }).filter(([id, reasons]) => id && reasons.length));
+  const semanticBlockedPageIds = new Set(semanticBlockReasonMap.keys());
+  const hasSemanticBlockers = semanticBlockedPageIds.size > 0;
+  const semanticReviewReasonMap = new Map(qualityPages.map((page) => {
+    const id = page.pageId || pageIdFromPageNumber(page.pageNumber);
+    const reasons = Array.isArray(page?.semanticQuality?.reviewReasons) ? page.semanticQuality.reviewReasons : [];
+    return [id, reasons];
+  }).filter(([id, reasons]) => id && reasons.length));
+  const visualTextQualityPageEvidence = job?.artifacts?.visualTextQuality?.pageEvidenceSha256ByPage || {};
+  const visualQualityEvidenceSha256 = String(job?.artifacts?.visualQuality?.evidenceSha256 || job?.artifacts?.visualQuality?.sha256 || "").trim();
+  const qualityPageEvidenceHashes = new Map(qualityPages.map((page) => [
+    page.pageId || pageIdFromPageNumber(page.pageNumber),
+    page.evidenceSha256 || page.semanticQuality?.evidenceSha256 || ""
+  ]));
+  const isMarkQualityCurrent = (mark = {}, pageId = "") => {
+    const expected = String(visualTextQualityPageEvidence?.[pageId] || qualityPageEvidenceHashes.get(pageId) || "").trim();
+    return Boolean(
+      expected
+      && visualQualityEvidenceSha256
+      && mark.visualTextQualityPageEvidenceSha256 === expected
+      && mark.visualQualityEvidenceSha256 === visualQualityEvidenceSha256
+    );
+  };
+  const qualityPageHashes = new Map(qualityPages.map((page) => [page.pageId || pageIdFromPageNumber(page.pageNumber), page.sha256 || ""]));
+  const qualityEvidenceReady = Boolean(
+    qualityPages.length
+    && visualQualityEvidenceSha256
+    && job?.artifacts?.visualSample?.sha256
+    && visualQualityReport?.summary?.styleConsistency?.approvedSampleSha256 === job.artifacts.visualSample.sha256
+    && visualImages.every((image) => {
+      const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
+      return Boolean(id && image.sha256 && qualityPageHashes.get(id) === image.sha256);
+    })
+  );
+  const hasRerun = Object.entries(marks).some(([pageId, mark]) => isMarkQualityCurrent(mark, pageId) && mark?.status === "rerun");
   const reviewedCount = visualImages.filter((image) => {
     const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
-    return ["pass", "accept"].includes(marks[id]?.status);
+    const mark = marks[id] || {};
+    if (!isMarkQualityCurrent(mark, id)) return false;
+    if (semanticBlockedPageIds.has(id) && (mark.status !== "accept" || mark.semanticRiskAccepted !== true)) return false;
+    if (styleDriftPageIds.has(id) && (mark.status !== "accept" || mark.styleDriftAccepted !== true)) return false;
+    return ["pass", "accept"].includes(mark.status);
   }).length;
-  const canApproveAll = Boolean(visualImages.length && reviewedCount === visualImages.length && !hasRerun && assetMap);
+  const staleReviewCount = visualImages.filter((image) => {
+    const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
+    const mark = marks[id] || {};
+    return ["pass", "accept"].includes(mark.status) && !isMarkQualityCurrent(mark, id);
+  }).length;
+  const canApproveAll = Boolean(visualImages.length && qualityEvidenceReady && reviewedCount === visualImages.length && !hasRerun && assetMap);
+  const sampleApproved = (Array.isArray(job?.artifacts?.codexPptApprovals) ? job.artifacts.codexPptApprovals : [])
+    .some((approval) => approval?.gate === "sample" && approval?.status === "approved");
+  const sourcePageCount = artifactCountNumber(job?.artifacts?.renderedPages || job?.artifacts?.sourcePages || job?.artifacts?.source);
+  const isStyleConsistencyTest = Boolean(sampleApproved && sourcePageCount > visualImages.length && visualImages.length <= 2);
   const openPreview = (src, label) => {
     if (!src) return;
     setPreviewImage({ src, label, alt: label });
+  };
+  const reloadEvidence = async () => {
+    await onReloadEvidence?.({ rebuildVisualQuality: Boolean(visualQualityError) });
+    setEvidenceReloadKey((value) => value + 1);
+  };
+  const visibleVisualImages = visualImages.filter((image) => {
+    const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
+    const mark = marks[id] || {};
+    const semanticBlocked = semanticBlockedPageIds.has(id);
+    const styleDrift = styleDriftPageIds.has(id);
+    const accepted = isMarkQualityCurrent(mark, id)
+      && (!semanticBlocked || (mark.status === "accept" && mark.semanticRiskAccepted === true))
+      && (!styleDrift || (mark.status === "accept" && mark.styleDriftAccepted === true))
+      && ["pass", "accept"].includes(mark.status);
+    if (reviewFilter === "risk") return semanticBlocked || styleDrift;
+    if (reviewFilter === "pending") return !accepted;
+    return true;
+  });
+  const setRiskConfirmation = (pageIdValue, key, checked) => {
+    setRiskConfirmations((current) => ({
+      ...current,
+      [pageIdValue]: { ...(current[pageIdValue] || {}), [key]: checked }
+    }));
   };
 
   return (
@@ -2639,27 +3505,81 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
       <section className="sample-review-dialog image-deck-review-dialog" role="dialog" aria-modal="true" aria-labelledby="image-deck-review-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="sample-review-head">
           <div>
-            <span>整套图片复核</span>
-            <h2 id="image-deck-review-title">逐页对比原始页和生成页</h2>
-            <p>原图、文字、图表和关键数据都正确后，再通过整套图片版。</p>
+            <span>{isStyleConsistencyTest ? "图片测试稿复核" : "整套图片复核"}</span>
+            <h2 id="image-deck-review-title">{isStyleConsistencyTest ? `复核 ${visualImages.length} 页风格测试稿` : "逐页对比原始页和生成页"}</h2>
+            <p>{isStyleConsistencyTest
+              ? `当前只检查测试范围 ${visualImages.length}/${sourcePageCount} 页；通过后继续生成剩余 ${Math.max(0, sourcePageCount - visualImages.length)} 页。`
+              : "原图、文字、图表和关键数据都正确后，再通过整套图片版。"}</p>
           </div>
           <button className="topbar-popover-close" type="button" onClick={onClose} aria-label="关闭">×</button>
         </header>
 
         <div className="image-deck-review-layout">
           <div className="image-deck-review-summary">
-            <strong>可以就通过，不可以就重新生成</strong>
-            <span>一排排对比原始页和生成页，只确认三件事：信息保真、文字清楚、设计更好看。</span>
+            <strong>{isStyleConsistencyTest ? "样张已确认，这里检查两页是否保持同一风格" : "可以就通过，不可以就重新生成"}</strong>
+            <span>{isStyleConsistencyTest
+              ? "上一步确认的是风格基准；这里检查实际测试页是否遵循它。通过的测试页会直接保留，不会重复生成。"
+              : "一排排对比原始页和生成页，只确认三件事：信息保真、文字清楚、设计更好看。"}</span>
           </div>
-          {error || assetError || status ? (
-            <div className={`image-deck-review-message ${error || assetError ? "error" : ""}`} role={error || assetError ? "alert" : "status"}>
-              {error || assetError || status}
+          <section className="image-deck-style-overview" aria-label="整套图片风格总览">
+            <header>
+              <strong>整套图片质量总览</strong>
+              <span>{[
+                hasSemanticBlockers ? `${semanticBlockedPageIds.size} 页存在内容保真提示，需人工核对` : "",
+                hasStyleDrift ? `${styleDriftPageIds.size} 页存在风格偏离` : "",
+                closingRecommended ? "建议在内容页后补充真正的收尾页" : ""
+              ].filter(Boolean).join("；") || "未检测到明显内容或风格偏离"}</span>
+            </header>
+            <div className="image-deck-review-filters" role="group" aria-label="筛选复核页面">
+              <button type="button" className={reviewFilter === "all" ? "active" : ""} onClick={() => setReviewFilter("all")}>全部 {visualImages.length}</button>
+              <button type="button" className={reviewFilter === "risk" ? "active" : ""} onClick={() => setReviewFilter("risk")}>风险页 {new Set([...semanticBlockedPageIds, ...styleDriftPageIds]).size}</button>
+              <button type="button" className={reviewFilter === "pending" ? "active" : ""} onClick={() => setReviewFilter("pending")}>待复核 {Math.max(0, visualImages.length - reviewedCount)}</button>
+            </div>
+            <div className="image-deck-style-grid">
+              {visibleVisualImages.map((image, index) => {
+                const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
+                const actualPageNumber = Number(image.pageNumber || pageNumberFromPageId(id) || index + 1);
+                const displayPageNumber = String(actualPageNumber).padStart(2, "0");
+                const mark = marks[id] || {};
+                const styleDrift = styleDriftPageIds.has(id);
+                const semanticBlocked = semanticBlockedPageIds.has(id);
+                const accepted = isMarkQualityCurrent(mark, id)
+                  && (!semanticBlocked || (mark.status === "accept" && mark.semanticRiskAccepted === true))
+                  && (!styleDrift || (mark.status === "accept" && mark.styleDriftAccepted === true))
+                  && ["pass", "accept"].includes(mark.status);
+                const visualPageHref = open && job?.id && id
+                  ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-page/${encodeURIComponent(id)}`
+                  : "";
+                const selectPage = () => {
+                  setSelectedPageId(id);
+                  requestAnimationFrame(() => document.getElementById(`image-deck-review-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+                };
+                return (
+                  <button className={`image-deck-style-thumb ${selectedPageId === id ? "selected" : ""} ${mark.status === "rerun" ? "rerun" : accepted ? "accepted" : semanticBlocked ? "blocked" : styleDrift ? "drift" : ""}`} type="button" key={id || index} onClick={selectPage} aria-label={`查看第 ${actualPageNumber} 页复核详情`}>
+                    {visualPageHref ? <img src={visualPageHref} alt={`第 ${actualPageNumber} 页生成图`} /> : null}
+                    <span>{displayPageNumber}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+          {error || assetError || visualQualityError || status ? (
+            <div className={`image-deck-review-message ${error || assetError || visualQualityError ? "error" : ""}`} role={error || assetError || visualQualityError ? "alert" : "status"}>
+              <span>{error || assetError || visualQualityError || status}</span>
+              {assetError || visualQualityError ? <button className="btn" type="button" onClick={reloadEvidence} disabled={busy || visualQualityLoading}>重新读取</button> : null}
+            </div>
+          ) : null}
+          {staleReviewCount ? (
+            <div className="image-deck-review-message" role="status">
+              质检证据已经更新，{staleReviewCount} 页旧复核记录已失效，需要按当前原图和生成图重新确认。
             </div>
           ) : null}
 
           <div className="image-deck-review-rows" aria-label="一排排对比原始页和生成页">
-            {visualImages.length ? visualImages.map((image, index) => {
+            {visibleVisualImages.length ? visibleVisualImages.map((image, index) => {
               const id = image.pageId || pageIdFromPageNumber(image.pageNumber);
+              const actualPageNumber = Number(image.pageNumber || pageNumberFromPageId(id) || index + 1);
+              const displayPageNumber = String(actualPageNumber).padStart(2, "0");
               const mark = marks[id];
               const sourcePageHref = open && job?.id && id
                 ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/rendered-page/${encodeURIComponent(id)}`
@@ -2668,46 +3588,129 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
                 ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/visual-page/${encodeURIComponent(id)}`
                 : "";
               const pageRecordForRow = findSampleAssetPage(assetMap, image || {});
-              const hasRisks = Array.isArray(pageRecordForRow?.risks) && pageRecordForRow.risks.length > 0;
-              const statusLabel = mark?.status === "rerun" ? "需重做" : ["pass", "accept"].includes(mark?.status) ? "已通过" : "待确认";
+              const qualityPageForRow = qualityPages.find((page) => (page.pageId || pageIdFromPageNumber(page.pageNumber)) === id);
+              const styleDrift = styleDriftPageIds.has(id);
+              const styleDriftReasons = (styleDriftReasonMap.get(id) || []).map(styleDriftReasonLabel);
+              const semanticReasons = semanticBlockReasonMap.get(id) || [];
+              const semanticReviewReasons = semanticReviewReasonMap.get(id) || [];
+              const semanticBlocked = semanticReasons.length > 0;
+              const semanticPage = qualityPageForRow?.semanticQuality || qualityPageForRow || {};
+              const missingCriticalTexts = [...new Set([
+                ...(Array.isArray(semanticPage.missingCriticalTexts) ? semanticPage.missingCriticalTexts : []),
+                ...(Array.isArray(semanticPage.missingSourceTitleTexts) ? semanticPage.missingSourceTitleTexts : [])
+              ])].filter(isReadableReviewDiffText).slice(0, 6);
+              const inventedCriticalTexts = [...new Set(Array.isArray(semanticPage.inventedCriticalBlockingTexts)
+                ? semanticPage.inventedCriticalBlockingTexts
+                : [])].filter(isReadableReviewDiffText).slice(0, 6);
+              const pageNumberMismatch = semanticReasons.some((reason) => ["page-number-value-mismatch", "inconsistent-page-number-position", "inconsistent-page-number-format"].includes(reason));
+              const titleMismatch = semanticReasons.includes("source-title-mismatch");
+              const sourceTitleTexts = (Array.isArray(semanticPage.sourceTitleTexts) ? semanticPage.sourceTitleTexts : [])
+                .filter(isReadableReviewDiffText);
+              const generatedTitleText = isReadableReviewDiffText(semanticPage.titleText) ? semanticPage.titleText : "";
+              const concreteRiskSummary = [
+                missingCriticalTexts.length ? `原稿应保留：${missingCriticalTexts.join("、")}` : "",
+                inventedCriticalTexts.length ? `生成页疑似出现：${inventedCriticalTexts.join("、")}` : "",
+                pageNumberMismatch ? `页码需核对：当前识别为 ${Array.isArray(semanticPage.pageNumberTexts) ? semanticPage.pageNumberTexts.join("、") || "位置或格式异常" : "位置或格式异常"}` : "",
+                titleMismatch ? `标题需核对：原稿 ${sourceTitleTexts.join("、") || "标题"}；生成页 ${generatedTitleText || "未可靠识别"}` : ""
+              ].filter(Boolean);
+              const localConfirmation = riskConfirmations[id] || {};
+              const markQualityCurrent = isMarkQualityCurrent(mark || {}, id);
+              const semanticConfirmed = Boolean((markQualityCurrent && mark?.semanticRiskAccepted) || localConfirmation.semantic);
+              const styleConfirmed = Boolean((markQualityCurrent && mark?.styleDriftAccepted) || localConfirmation.style);
+              const markIsValid = markQualityCurrent
+                && (!semanticBlocked || (mark?.status === "accept" && mark?.semanticRiskAccepted === true))
+                && (!styleDrift || (mark?.status === "accept" && mark?.styleDriftAccepted === true))
+                && ["pass", "accept"].includes(mark?.status);
+              const hasRisks = semanticBlocked || semanticReviewReasons.length > 0 || styleDrift
+                || (Array.isArray(pageRecordForRow?.risks) && pageRecordForRow.risks.length > 0)
+                || (Array.isArray(qualityPageForRow?.manualReviewReasons) && qualityPageForRow.manualReviewReasons.length > 0);
+              const statusLabel = mark?.status === "rerun"
+                ? "需重做"
+                : semanticBlocked && !markIsValid
+                  ? "重点核对"
+                : ["pass", "accept"].includes(mark?.status) && !markQualityCurrent
+                  ? "原通过已失效"
+                : markIsValid
+                  ? styleDrift ? "已确认变化" : "已通过"
+                  : styleDrift ? "重点检查" : "待确认";
               return (
-                <article className={`image-deck-review-row ${mark?.status === "rerun" ? "needs-rerun" : ["pass", "accept"].includes(mark?.status) ? "passed" : ""}`} key={id || index}>
+                <article id={`image-deck-review-${id}`} className={`image-deck-review-row ${mark?.status === "rerun" ? "needs-rerun" : markIsValid ? "passed" : semanticBlocked || styleDrift ? "needs-review" : ""}`} key={id || index}>
                   <div className="image-deck-review-row-head">
-                    <b>{String(index + 1).padStart(2, "0")}</b>
+                    <b>{displayPageNumber}</b>
                     <span>{statusLabel}</span>
                   </div>
                   <div className="image-deck-review-pair">
                     <figure>
                       <figcaption>原始页</figcaption>
                       {sourcePageHref ? (
-                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(sourcePageHref, `原始页 ${String(index + 1).padStart(2, "0")}`)} aria-label={`放大查看第 ${index + 1} 页原始页`}>
-                          <img src={sourcePageHref} alt={`第 ${index + 1} 页原始页`} />
+                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(sourcePageHref, `原始页 ${displayPageNumber}`)} aria-label={`放大查看第 ${actualPageNumber} 页原始页`}>
+                          <img src={sourcePageHref} alt={`第 ${actualPageNumber} 页原始页`} />
                         </button>
                       ) : <div className="sample-review-empty">没有原始页预览</div>}
                     </figure>
                     <figure>
                       <figcaption>生成页</figcaption>
                       {visualPageHref ? (
-                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(visualPageHref, `生成页 ${String(index + 1).padStart(2, "0")}`)} aria-label={`放大查看第 ${index + 1} 页生成页`}>
-                          <img src={visualPageHref} alt={`第 ${index + 1} 页生成页`} />
+                        <button className="image-deck-preview-button" type="button" onClick={() => openPreview(visualPageHref, `生成页 ${displayPageNumber}`)} aria-label={`放大查看第 ${actualPageNumber} 页生成页`}>
+                          <img src={visualPageHref} alt={`第 ${actualPageNumber} 页生成页`} />
                         </button>
                       ) : <div className="sample-review-empty">没有生成页预览</div>}
                     </figure>
                   </div>
                   <div className="image-deck-review-row-actions">
-                    <small>{hasRisks ? "重点检查保真风险" : "看图确认即可"}</small>
+                    <small>{semanticBlocked
+                      ? `自动检查提示：${semanticReasons.map(semanticQualityReasonLabel).join(" / ")}${styleDriftReasons.length ? `；同时存在${styleDriftReasons.join(" / ")}` : ""}。请对照原始页；内容正确可明确接受，否则标记重做。`
+                      : semanticReviewReasons.length
+                        ? `重点核对：${semanticReviewReasons.map(semanticQualityReasonLabel).join(" / ")}${styleDriftReasons.length ? `；同时存在${styleDriftReasons.join(" / ")}` : ""}。`
+                      : styleDrift ? `检测到风格差异：${styleDriftReasons.join(" / ")}。请确认是正常页面变化，或标记重做。` : hasRisks ? "重点检查保真风险" : "看图确认即可"}</small>
+                    {concreteRiskSummary.length ? (
+                      <div className="image-deck-semantic-diff" aria-label={`第 ${actualPageNumber} 页文字差异`}>
+                        {concreteRiskSummary.map((item) => <span key={item}>{item}</span>)}
+                      </div>
+                    ) : null}
+                    {semanticBlocked || styleDrift ? (
+                      <div className="image-deck-risk-confirmations">
+                        {semanticBlocked ? (
+                          <label>
+                            <input type="checkbox" checked={semanticConfirmed} onChange={(event) => setRiskConfirmation(id, "semantic", event.target.checked)} />
+                            我已放大并逐字核对原稿，确认文字、数字、品牌和链接没有被改写
+                          </label>
+                        ) : null}
+                        {styleDrift ? (
+                          <label>
+                            <input type="checkbox" checked={styleConfirmed} onChange={(event) => setRiskConfirmation(id, "style", event.target.checked)} />
+                            我已单独核对风格差异，确认这是合理变化
+                          </label>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <button className="btn" type="button" onClick={() => id && onMarkPage?.(id, "rerun", "needs regeneration from image deck review")} disabled={busy || !id}>标记重做</button>
-                    <button className="btn primary" type="button" onClick={() => id && onMarkPage?.(id, "pass", "page approved from image deck review")} disabled={busy || !id}>通过本页</button>
+                    <button
+                      className="btn primary"
+                      type="button"
+                      onClick={() => id && onMarkPage?.(
+                        id,
+                        semanticBlocked || styleDrift ? "accept" : "pass",
+                        semanticBlocked ? "semantic fidelity risk explicitly accepted after source comparison" : styleDrift ? "style drift explicitly accepted after page comparison" : "page approved from image deck review",
+                        {
+                          confirmSemanticRisk: semanticBlocked && semanticConfirmed,
+                          confirmStyleDrift: styleDrift && styleConfirmed,
+                          semanticSummary: concreteRiskSummary.join("；") || semanticReasons.map(semanticQualityReasonLabel).join("、")
+                        }
+                      )}
+                      disabled={busy || !id || (semanticBlocked && !semanticConfirmed) || (styleDrift && !styleConfirmed)}
+                    >{semanticBlocked || styleDrift ? "确认并通过本页" : "通过本页"}</button>
                   </div>
                 </article>
               );
-            }) : <p>还没有生成图片页。</p>}
+            }) : <p>{visualImages.length ? "当前筛选下没有页面。" : "还没有生成图片页。"}</p>}
           </div>
         </div>
 
         <footer className="sample-review-actions image-deck-review-actions">
-          <span>{reviewedCount}/{visualImages.length} 页已通过{hasRerun ? "，有页面被标记重做" : ""}</span>
-          <button className="btn primary" type="button" onClick={onApproveAll} disabled={busy || !canApproveAll} title={canApproveAll ? "" : "等待信息资产拆解读取完成，且不能有重做页"}>全部通过并继续</button>
+          <span>{isStyleConsistencyTest ? `测试范围 ${reviewedCount}/${visualImages.length} 已通过 · 整套进度 ${visualImages.length}/${sourcePageCount}` : `${reviewedCount}/${visualImages.length} 页已通过`}{hasRerun ? "，有页面被标记重做" : hasSemanticBlockers ? `，${semanticBlockedPageIds.size} 页有内容提示待核对` : hasStyleDrift ? `，${styleDriftPageIds.size} 页建议重点检查` : ""}</span>
+          {hasSemanticBlockers ? <button className="btn" type="button" onClick={() => onMarkBlockedPages?.([...semanticBlockedPageIds])} disabled={busy}>将 {semanticBlockedPageIds.size} 页加入重做</button> : null}
+          <button className="btn primary" type="button" onClick={onApproveAll} disabled={busy || !canApproveAll} title={canApproveAll ? "" : visualQualityError ? visualQualityError : visualQualityLoading ? "正在读取当前视觉质量报告" : !qualityEvidenceReady ? "当前视觉质量证据不完整" : "必须逐页完成复核，且不能有重做页"}>{isStyleConsistencyTest ? "确认测试通过并继续" : "提交整套复核结果"}</button>
         </footer>
       </section>
       {previewImage ? (
@@ -2725,6 +3728,47 @@ function ImageDeckReviewDialog({ busy = false, error = "", job = null, onApprove
   );
 }
 
+function styleDriftReasonLabel(reason = "") {
+  const labels = {
+    "style-color-drift": "色彩偏离",
+    "style-hue-drift": "主色偏离",
+    "style-brightness-drift": "明暗偏离",
+    "style-density-drift": "版面密度偏离",
+    "style-text-density-drift": "文字密度偏离",
+    "style-title-density-drift": "标题层级偏离"
+  };
+  return labels[String(reason || "")] || "风格偏离";
+}
+
+function semanticQualityReasonLabel(reason = "") {
+  const labels = {
+    "placeholder-text-detected": "残留模板占位符",
+    "template-chrome-detected": "残留 Slide/Page 模板标题",
+    "unexpected-page-number": "出现未授权页码或页数",
+    "missing-page-number": "该页缺少统一页码",
+    "page-number-value-mismatch": "页码或总页数错误",
+    "inconsistent-page-number-format": "页码格式与整套不一致",
+    "inconsistent-page-number-position": "页码位置与整套不一致",
+    "synthetic-closing-on-content-page": "把内容页误判成尾页",
+    "closing-label-on-content-page": "内容页误用了尾页标题",
+    "severe-language-drift": "中英文语言风格严重漂移",
+    "critical-data-or-contact-missing": "关键数字、价格或链接缺失",
+    "critical-brand-or-code-missing": "品牌、公司名或型号缺失",
+    "substantial-source-text-loss": "源稿正文内容大量缺失",
+    "missing-critical-source-text": "关键源文字或数据缺失",
+    "invented-critical-text": "新增了源稿没有的品牌、数字或链接",
+    "source-title-mismatch": "主标题被改写或换成了正文句子",
+    "semantic-evidence-missing": "本页文字质检证据缺失",
+    "title-scale-outlier": "标题字号层级偏离"
+  };
+  return labels[String(reason || "")] || "内容质量异常";
+}
+
+function isReadableReviewDiffText(value = "") {
+  const text = String(value || "").trim();
+  return text.length >= 2 && !/[-–—/:：]$/.test(text);
+}
+
 function findSampleAssetPage(assetMap = null, sample = {}) {
   const pages = Array.isArray(assetMap?.pages) ? assetMap.pages : [];
   const sampleNumber = Number(sample.pageNumber || 0);
@@ -2734,6 +3778,11 @@ function findSampleAssetPage(assetMap = null, sample = {}) {
 function pageIdFromPageNumber(value = 0) {
   const number = Number(value || 0);
   return number ? `page_${String(number).padStart(3, "0")}` : "";
+}
+
+function pageNumberFromPageId(value = "") {
+  const match = String(value || "").match(/page[_-]?(\d+)/i);
+  return match ? Number(match[1]) : 0;
 }
 
 function formatAssetRisk(value = "") {
@@ -2775,6 +3824,7 @@ function TopbarQuickPanel({
   const jobState = buildDualRouteState(workflowJob);
   const modelLabel = apiConfig?.model || "未配置";
   const imageLabel = apiConfig?.imageModel || localImage?.details?.model || "未配置";
+  const imageConfigured = Boolean((apiConfig?.hasApiKey || apiConfig?.apiKey) && apiConfig?.baseUrl && apiConfig?.imageModel);
   const serviceReady = connection?.state === "online";
   const doctorReady = doctor?.state === "pass" || doctor?.state === "ready";
 
@@ -2809,7 +3859,7 @@ function TopbarQuickPanel({
           <div className="topbar-health-grid">
             <TopbarStatusCard label="本地连接" state={serviceReady ? "ready" : "blocked"} value={serviceReady ? "已连接" : "未连接"} detail={connection?.message || "-"} />
             <TopbarStatusCard label="对话模型" state={apiConfig?.hasApiKey || apiConfig?.apiKey ? "ready" : "warning"} value={modelLabel} detail={apiConfig?.baseUrl || "等待配置"} />
-            <TopbarStatusCard label="图片模型" state={imageLabel !== "未配置" ? "ready" : "warning"} value={imageLabel} detail={localImage?.message || "用于图片版 PPT"} />
+            <TopbarStatusCard label="图片模型" state={imageConfigured ? "ready" : "warning"} value={imageLabel} detail={imageConfigured ? apiConfig.baseUrl : "等待配置"} />
             <TopbarStatusCard label="产品环境" state={doctorReady ? "ready" : "warning"} value={doctorReady ? "通过" : "需确认"} detail={doctor?.message || "-"} />
           </div>
           <div className="topbar-popover-actions">
@@ -2915,7 +3965,7 @@ function DualCleanupPanel({ activeJobId = "", jobs = [], onArchiveJob, onRefresh
           return (
             <div className={`dual-cleanup-row ${active ? "active" : ""} ${archived ? "archived" : ""}`} key={item.id}>
               <div>
-                <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
+                <b>{workflowTaskTitle(item)}</b>
                 <span>{archived ? "已归档 / " : ""}图片版：{routeStatusLabel(state.routeA.status)} / 可编辑版：{routeStatusLabel(state.routeB.status)}</span>
               </div>
               <button className="btn" type="button" onClick={() => item.id && onSelectJob?.(item.id)} disabled={!item.id || active}>查看</button>
@@ -2954,7 +4004,6 @@ function getWorkflowTaskBucket(job = null) {
     job.stageStatus === "failed"
     || /fail|error/i.test(String(job.status || ""))
     || /fail|error/i.test(String(job.currentStage || ""))
-    || (Array.isArray(job.errors) && job.errors.length && !state.routeA.imageDeckReady)
   );
   if (hasFailure) return "failed";
   if (routeBStarted && state.routeB.status !== "ready") return "running";
@@ -2974,17 +4023,22 @@ function getRouteAPrimaryLabel({ hasInput = false, job = null, noCostApprovalSum
   }
   const routeA = state?.routeA || {};
   if (routeA.imageDeckReady) return routeA.imageDeckReviewReady ? "图片版已完成" : "复核现有图片版";
-  if (routeA.codexPptDecisionReady && routeA.informationAssetMapReady === false) {
-    return "分析页面信息资产";
-  }
   if (noCostApprovalSummary?.readyCount) return "确认大纲/风格/后端";
   if (!routeA.codexPptDecisionReady) return "查看确认项";
+  if (!routeA.informationAssetMapReady || !routeA.ocrTextReady) return "准备 1 页样张";
   if (!routeA.sampleReady) return "生成 1 页样张";
   if (!routeA.sampleApproved) return "确认样张通过";
-  if (!routeA.twoPageTestGenerated) return "生成 2 页测试图";
-  if (!routeA.twoPageTestReviewReady) return "复核 2 页测试图";
+  if (!routeA.twoPageTestGenerated) {
+    const target = Math.max(1, Number(routeA.twoPageTestTarget || 1));
+    const remaining = Math.max(0, Number(routeA.twoPageExternalCalls ?? target));
+    return remaining < target ? `补生成 ${remaining} 页测试图` : `生成 ${target} 页测试图`;
+  }
+  if (!routeA.twoPageTestReviewReady) return `复核 ${Math.max(1, Number(routeA.twoPageTestTarget || 1))} 页测试图`;
   if (routeA.requiresFullDeck && !routeA.fullDeckApproved) return "确认测试并开放全量";
-  if (!routeA.slideResultsRecorded) return "后台生成整套图片";
+  if (routeA.fullDeckApproved && !routeA.imageDeckReviewReady && routeA.reviewPageIds?.length > routeA.twoPageTestTarget) return "复核本批次图片";
+  if (!routeA.slideResultsRecorded) return routeA.remainingFullDeckPages?.length
+    ? `生成下一批 ${Math.min(VISUAL_FULL_DECK_BATCH_SIZE, routeA.remainingFullDeckPages.length)} 页`
+    : "后台生成整套图片";
   if (!routeA.imageDeckReviewReady) return "复核整套图片";
   if (!routeA.imageDeckReady) return "组装图片版 PPT";
   return "图片版已完成";
@@ -3004,11 +4058,24 @@ function workflowTaskMatchesSearch(job = null, query = "") {
   return haystack.includes(needle);
 }
 
+function workflowTaskTitle(job = null) {
+  return (
+    job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "")
+    || job?.input?.projectName
+    || job?.sourceName
+    || shortWorkflowId(job?.id)
+    || "当前任务"
+  ).replace(/_+/g, " ");
+}
+
 function DualRouteDashboard({
   busy = false,
+  deliveryBundle = null,
+  error = "",
   files = [],
   hasInput = false,
   job = null,
+  jobListHasMore = false,
   jobs = [],
   notes = "",
   noCostApprovalSummary = null,
@@ -3020,20 +4087,26 @@ function DualRouteDashboard({
   onNotesChange,
   onOpenArtifacts,
   onOpenDelivery,
+  onOpenEditableReview,
   onOpenEditable,
   onOpenImageDeckReview,
   onOpenSampleReview,
   onOpenVisual,
   onPlanOutline,
+  onLoadMoreJobs,
+  onRemoveFile,
   onRefreshJobs,
   onRefresh,
   onRouteAAction,
   onRouteBAction,
   onSelectJob,
   onUploadFiles,
+  uploadDeleteBusyId = "",
+  outlinePlan = null,
   outlineReady = false,
   pendingDeliveryMode = "visual",
   showArchived = false,
+  status = "",
   onArchivedVisibilityChange
 }) {
   const [createOpen, setCreateOpen] = useState(false);
@@ -3041,12 +4114,41 @@ function DualRouteDashboard({
   const [taskFilter, setTaskFilter] = useState("all");
   const [taskSearch, setTaskSearch] = useState("");
   const [taskListExpanded, setTaskListExpanded] = useState(false);
-  const state = buildDualRouteState(job);
+  const [previewMode, setPreviewMode] = useState("visual");
+  const [previewPageId, setPreviewPageId] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const previewPinnedRef = useRef(false);
+  const previousVisualCountRef = useRef(0);
+  const previousEditableCountRef = useRef(0);
+  const [editableWorkerRunBundle, setEditableWorkerRunBundle] = useState(null);
+  const state = buildDualRouteState(job, deliveryBundle);
+  const currentEditableWorkerTasks = Array.isArray(job?.artifacts?.editableWorkerTasks?.tasks)
+    ? job.artifacts.editableWorkerTasks.tasks
+    : Array.isArray(job?.artifacts?.editableWorkerTasks)
+      ? job.artifacts.editableWorkerTasks
+      : Array.isArray(job?.editableWorkerTasks?.tasks)
+        ? job.editableWorkerTasks.tasks
+        : [];
+  const unresolvedEditableFailures = currentEditableWorkerTasks.filter((task) => task.status === "failed");
+  const unresolvedFailurePageIds = new Set(unresolvedEditableFailures.map((task) => task.pageId).filter(Boolean));
+  const latestEditableWorkerRun = editableWorkerRunBundle?.jobId === job?.id && Array.isArray(editableWorkerRunBundle?.runs)
+    ? editableWorkerRunBundle.runs.find((run) => {
+      if (run?.status !== "failed") return false;
+      const pages = Array.isArray(run.failureAnalysis?.pages) ? run.failureAnalysis.pages : [];
+      return pages.some((pageId) => unresolvedFailurePageIds.has(pageId));
+    }) || null
+    : null;
+  const latestEditableWorkerFailure = unresolvedEditableFailures.length
+    ? latestEditableWorkerRun?.failureAnalysis || {
+      pages: unresolvedEditableFailures.map((task) => task.pageId).filter(Boolean),
+      retryLabel: `重置并重跑 ${unresolvedEditableFailures.length} 个失败页面`
+    }
+    : null;
   const showCreatePanel = createOpen;
-  const currentTitle = job?.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || job?.input?.projectName || "当前任务";
+  const currentTitle = workflowTaskTitle(job);
   const sourcePages = state.routeA.sourceLabel;
-  const editablePages = state.routeB.editableLabel;
-  const imageDeckHref = job?.id && state.routeA.imageDeckReady
+  const imageDeckHref = job?.id && state.routeA.imageDeckAvailable
     ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/image-deck?download=1`
     : "";
   const finalHref = job?.id && state.routeB.deliverableReady
@@ -3055,8 +4157,14 @@ function DualRouteDashboard({
   const routeAPrimaryLabel = getRouteAPrimaryLabel({ hasInput, job, noCostApprovalSummary, outlineReady, state });
   const routeAPrimaryAction = onRouteAAction || onOpenVisual;
   const routeANeedsAssetMap = Boolean(state.routeA.codexPptDecisionReady && !state.routeA.informationAssetMapReady);
+  const sampleGatePending = Boolean(job?.id && !state.routeA.codexPptDecisionReady);
+  const samplePreparationPending = Boolean(
+    job?.id
+    && state.routeA.codexPptDecisionReady
+    && (!state.routeA.informationAssetMapReady || !state.routeA.ocrTextReady)
+  );
   const routeASampleNeedsReview = Boolean(state.routeA.sampleHref && !state.routeA.sampleApproved);
-  const routeADeckNeedsReview = Boolean(state.routeA.slideResultsRecorded && !state.routeA.imageDeckReviewReady);
+  const routeADeckNeedsReview = Boolean(state.routeA.fullVisualCoverageReady && !state.routeA.imageDeckReviewReady);
   const primaryAction = state.routeB.finalReady && !state.routeB.reviewReady
     ? onOpenDelivery
     : state.routeA.status === "ready"
@@ -3065,7 +4173,15 @@ function DualRouteDashboard({
   const primaryLabel = state.routeB.finalReady && !state.routeB.reviewReady
     ? cp(0x67e5, 0x770b, 0x4ea4, 0x4ed8, 0x68c0, 0x67e5)
     : state.routeA.status === "ready"
-      ? "继续转可编辑 PPT"
+      ? state.routeB.runningEditablePages
+        ? `正在生成 ${state.routeB.runningEditablePages} 页可编辑 PPT`
+        : state.routeB.readyEditablePages && state.routeB.workerBriefsReady
+          ? state.routeB.readyEditablePages > EDITABLE_WORKER_BATCH_SIZE
+            ? `生成下一批 ${EDITABLE_WORKER_BATCH_SIZE} 页（剩余 ${state.routeB.readyEditablePages} 页）`
+            : `开始生成 ${state.routeB.readyEditablePages} 页可编辑 PPT`
+          : state.routeB.prepared
+            ? "准备可编辑页面"
+            : "继续转可编辑 PPT"
       : "先完成图片版 PPT";
   const canRunPrimary = state.routeB.finalReady && !state.routeB.reviewReady
     ? Boolean(primaryAction && job?.id)
@@ -3073,6 +4189,9 @@ function DualRouteDashboard({
   const canRunRouteA = Boolean(routeAPrimaryAction) && !busy && (job?.id || hasInput);
   const taskRows = uniqueWorkflowJobs([job, ...jobs]).filter(Boolean);
   const visibleTaskRows = taskRows.filter((item) => !item.archived && !item.lifecycle?.archivedAt);
+  const getTaskBucket = (item) => item?.id === job?.id && state.routeB.deliverableReady
+    ? "complete"
+    : getWorkflowTaskBucket(item);
   const taskTabs = [
     ["all", "全部"],
     ["running", "进行中"],
@@ -3080,37 +4199,276 @@ function DualRouteDashboard({
     ["failed", "已失败"]
   ];
   const taskTabCounts = visibleTaskRows.reduce((counts, item) => {
-    const bucket = getWorkflowTaskBucket(item);
+    const bucket = getTaskBucket(item);
     counts.all = (counts.all || 0) + 1;
     counts[bucket] = (counts[bucket] || 0) + 1;
     return counts;
   }, { all: 0, running: 0, complete: 0, failed: 0 });
   const searchedTaskRows = visibleTaskRows.filter((item) => workflowTaskMatchesSearch(item, taskSearch));
-  const filteredTaskRows = searchedTaskRows.filter((item) => taskFilter === "all" || getWorkflowTaskBucket(item) === taskFilter);
+  const filteredTaskRows = searchedTaskRows.filter((item) => taskFilter === "all" || getTaskBucket(item) === taskFilter);
   const displayedTaskRows = taskListExpanded ? filteredTaskRows : filteredTaskRows.slice(0, 5);
-  const events = Array.isArray(job?.events) ? job.events.slice(-7).reverse() : [];
   const hasCreateInput = Boolean(files.length || notes.trim());
-  const canCreateFromPanel = !busy && hasCreateInput;
+  const canCreateFromPanel = !busy && !uploadDeleteBusyId && hasCreateInput;
   const selectedDeliveryMode = pendingDeliveryMode === "editable" ? "editable" : "visual";
+  const visualImages = useMemo(() => (
+    Array.isArray(job?.artifacts?.visualImages)
+      ? [...job.artifacts.visualImages]
+        .filter((image) => image?.path && image.staleStyleReference !== true)
+        .sort((a, b) => Number(a.pageNumber || 0) - Number(b.pageNumber || 0))
+      : []
+  ), [job?.artifacts?.visualImages]);
+  const expectedPreviewPages = Math.max(
+    Number(state.routeA.imageTotal || 0),
+    Number(state.routeA.sourceCount || 0),
+    Number(job?.artifacts?.codexPptOutline?.slideCount || 0),
+    visualImages.length,
+    Number(job?.artifacts?.visualSample?.pageNumber || 0)
+  );
+  const visualPreviewSlots = useMemo(() => {
+    if (!expectedPreviewPages) return [];
+    const imagesByNumber = new Map(visualImages.map((image, index) => [Number(image.pageNumber || index + 1), image]));
+    const tasks = Array.isArray(job?.artifacts?.codexPptSlideWorkerTasks) ? job.artifacts.codexPptSlideWorkerTasks : [];
+    const tasksByNumber = new Map(tasks.map((task, index) => [Number(task.pageNumber || index + 1), task]));
+    const sample = job?.artifacts?.visualSample || {};
+    const sampleNumber = Number(sample.pageNumber || 0);
+    return Array.from({ length: expectedPreviewPages }, (_item, index) => {
+      const pageNumber = index + 1;
+      const id = pageIdFromPageNumber(pageNumber);
+      const image = imagesByNumber.get(pageNumber);
+      const task = tasksByNumber.get(pageNumber) || {};
+      const isSample = !image && sampleNumber === pageNumber && Boolean(sample.path || sample.relativePath);
+      const taskStatus = String(task.status || "").toLowerCase();
+      const status = image
+        ? "ready"
+        : isSample
+          ? "sample"
+          : ["failed", "error"].includes(taskStatus)
+            ? "failed"
+            : ["claimed", "dispatched", "running", "recording"].includes(taskStatus)
+              ? "running"
+              : "pending";
+      const cacheKey = encodeURIComponent(image?.sha256 || sample?.sha256 || task?.updatedAt || "pending");
+      const visualHref = image
+        ? `/api/workflow-jobs/${encodeURIComponent(job?.id || "")}/artifacts/visual-page/${encodeURIComponent(id)}?v=${cacheKey}`
+        : isSample
+          ? `/api/workflow-jobs/${encodeURIComponent(job?.id || "")}/artifacts/visual-sample?v=${cacheKey}`
+          : "";
+      return {
+        id,
+        pageNumber,
+        status,
+        isSample,
+        error: task.error || "",
+        sha256: image?.sha256 || sample?.sha256 || "",
+        href: visualHref,
+        thumbHref: visualHref
+      };
+    });
+  }, [expectedPreviewPages, job?.id, job?.artifacts?.codexPptSlideWorkerTasks, job?.artifacts?.visualSample, visualImages]);
+  const editablePreviewPageIds = new Set(Array.isArray(state.routeB.previewPageIds) ? state.routeB.previewPageIds : []);
+  const editablePreviewTasks = currentEditableWorkerTasks;
+  const editableTasksByPageId = new Map(editablePreviewTasks.map((task) => [
+    task.pageId || task.id || task.taskId || pageIdFromPageNumber(task.pageNumber),
+    task
+  ]));
+  const editablePreviewSlots = visualPreviewSlots.map((slot) => {
+    const task = editableTasksByPageId.get(slot.id) || {};
+    const taskStatus = String(task.status || "").toLowerCase();
+    const ready = editablePreviewPageIds.has(slot.id);
+    const status = ready
+      ? "ready"
+      : ["failed", "error"].includes(taskStatus)
+        ? "failed"
+        : ["claimed", "dispatched", "running", "recording"].includes(taskStatus)
+          ? "running"
+          : "pending";
+    const cacheKey = encodeURIComponent(task.recordedAt || task.updatedAt || (ready ? "ready" : "pending"));
+    const href = ready && job?.id
+      ? `/api/workflow-jobs/${encodeURIComponent(job.id)}/artifacts/rebuild-preview/${encodeURIComponent(slot.id)}?v=${cacheKey}`
+      : "";
+    return {
+      ...slot,
+      status,
+      isSample: false,
+      error: task.error || "",
+      href,
+      thumbHref: href
+    };
+  });
+  const activePreviewSlots = previewMode === "editable" ? editablePreviewSlots : visualPreviewSlots;
+  const selectedPreviewSlot = activePreviewSlots.find((slot) => slot.id === previewPageId)
+    || activePreviewSlots.find((slot) => ["ready", "sample"].includes(slot.status))
+    || activePreviewSlots[0]
+    || null;
+  const selectedPreviewId = selectedPreviewSlot?.id || "";
+  const editableModeAvailable = Boolean(editablePreviewPageIds.size || editablePreviewTasks.length || job?.artifacts?.editableRun);
+  const previewHref = selectedPreviewSlot?.href || "";
+
+  useEffect(() => {
+    setEditableWorkerRunBundle(null);
+    if (!job?.id) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    let timer = 0;
+    const refreshWorkerRuns = async () => {
+      try {
+        const bundle = await api.workflowWorkerRuns(job.id, controller.signal);
+        if (controller.signal.aborted) return;
+        setEditableWorkerRunBundle({ ...bundle, jobId: job.id });
+        const active = Array.isArray(bundle?.runs) && bundle.runs.some((run) => ["queued", "running"].includes(run?.status));
+        timer = window.setTimeout(refreshWorkerRuns, active ? 2500 : 8000);
+      } catch (workerRunError) {
+        if (controller.signal.aborted) return;
+        setEditableWorkerRunBundle(null);
+        timer = window.setTimeout(refreshWorkerRuns, 8000);
+      }
+    };
+    refreshWorkerRuns();
+    return () => {
+      controller.abort();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [job?.id]);
+
+  useEffect(() => {
+    previewPinnedRef.current = false;
+    setPreviewMode("visual");
+    previousVisualCountRef.current = visualImages.length;
+    previousEditableCountRef.current = editablePreviewPageIds.size;
+    const firstReady = visualPreviewSlots.find((slot) => ["ready", "sample"].includes(slot.status));
+    setPreviewPageId(firstReady?.id || visualPreviewSlots[0]?.id || "");
+  }, [job?.id]);
+
+  useEffect(() => {
+    const previousCount = previousVisualCountRef.current;
+    const latestReady = [...visualPreviewSlots].reverse().find((slot) => slot.status === "ready");
+    const currentExists = visualPreviewSlots.some((slot) => slot.id === previewPageId);
+    if (!currentExists) {
+      setPreviewPageId(visualPreviewSlots.find((slot) => ["ready", "sample"].includes(slot.status))?.id || visualPreviewSlots[0]?.id || "");
+    } else if (!previewPinnedRef.current && visualImages.length > previousCount && latestReady) {
+      setPreviewPageId(latestReady.id);
+    }
+    previousVisualCountRef.current = visualImages.length;
+  }, [previewPageId, visualImages.length, visualPreviewSlots]);
+
+  useEffect(() => {
+    if (previewMode !== "editable") return;
+    const previousCount = previousEditableCountRef.current;
+    const latestReady = [...editablePreviewSlots].reverse().find((slot) => slot.status === "ready");
+    const currentExists = editablePreviewSlots.some((slot) => slot.id === previewPageId);
+    if (!currentExists) {
+      setPreviewPageId(editablePreviewSlots.find((slot) => slot.status === "ready")?.id || editablePreviewSlots[0]?.id || "");
+    } else if (!previewPinnedRef.current && editablePreviewPageIds.size > previousCount && latestReady) {
+      setPreviewPageId(latestReady.id);
+    }
+    previousEditableCountRef.current = editablePreviewPageIds.size;
+  }, [editablePreviewPageIds.size, editablePreviewSlots, previewMode, previewPageId]);
+
+  const selectPreviewPage = (pageId) => {
+    previewPinnedRef.current = true;
+    setPreviewPageId(pageId);
+  };
+
+  useEffect(() => {
+    setPreviewFailed(false);
+    setPreviewLoading(Boolean(previewHref));
+  }, [previewHref]);
+
+  useEffect(() => {
+    if (previewMode === "editable" && !editableModeAvailable) setPreviewMode("visual");
+  }, [editableModeAvailable, previewMode]);
+
   const createModeCopy = selectedDeliveryMode === "editable"
     ? {
-      label: "创建路线 B 任务",
-      ready: "准备就绪：会先完成路线 A 图片版，再进入路线 B 可编辑版。",
+      label: "创建完整任务",
+      ready: "准备就绪：先生成图片版，确认后继续完成可编辑版。",
       pending: "请先上传材料，或填写一句任务需求。",
-      busy: "正在创建路线 B...",
-      confirm: "路线 B 可编辑 PPT 会耗时更长。\n\n系统仍会先完成路线 A 图片版 PPT；确认图片版后，再继续路线 B 可编辑重建。\n\n确认创建路线 B 任务？"
+      busy: "正在创建完整任务...",
+      confirm: "完整可编辑 PPT 会耗时更长。\n\n系统会先完成图片版 PPT；确认视觉效果后，再继续可编辑重建。\n\n确认创建完整任务？"
     }
     : {
-      label: "创建路线 A 任务",
-      ready: "准备就绪：会先进入路线 A 图片版 PPT 生成。",
+      label: "创建图片版任务",
+      ready: "准备就绪：先生成视觉统一的图片版 PPT。",
       pending: "请先上传材料，或填写一句任务需求。",
-      busy: "正在创建路线 A...",
+      busy: "正在创建图片版任务...",
       confirm: ""
     };
+  const visualActions = [
+    routeASampleNeedsReview ? { label: "查看样张并复核", onClick: onOpenSampleReview, primary: true } : null,
+    routeADeckNeedsReview ? { label: "复核整套图片", onClick: onOpenImageDeckReview, primary: true } : null,
+    imageDeckHref ? {
+      label: state.routeA.imageDeckReady
+        ? state.routeA.imageDeckReviewReady ? "下载已复核图片版 PPT" : "下载待复核图片版 PPT"
+        : `下载当前 ${state.routeA.imageDeckPageCount} 页测试稿`,
+      href: imageDeckHref,
+      primary: state.routeA.imageDeckReady && !routeANeedsAssetMap && !routeADeckNeedsReview
+    } : null,
+    ((!state.routeA.imageDeckReady || routeANeedsAssetMap) && !routeASampleNeedsReview && !routeADeckNeedsReview)
+      ? { label: routeAPrimaryLabel, onClick: routeAPrimaryAction, disabled: !canRunRouteA, primary: true }
+      : null
+  ].filter(Boolean);
+  const editableActions = [
+    finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
+    !finalHref && state.routeB.status !== "locked"
+      ? {
+        label: latestEditableWorkerFailure?.retryLabel || primaryLabel,
+        onClick: latestEditableWorkerFailure?.pages?.length && onRouteBAction
+          ? () => onRouteBAction({ pages: latestEditableWorkerFailure.pages })
+          : primaryAction,
+        disabled: !canRunPrimary,
+        primary: true
+      }
+      : null
+  ].filter(Boolean);
+  const currentActions = state.routeA.status === "ready" ? editableActions : visualActions;
+  const pipelineStages = [
+    {
+      label: "内容与方案",
+      detail: state.routeA.codexPptDecisionReady ? "大纲与视觉方向已确认" : "确认大纲、风格和生成方式",
+      state: state.routeA.codexPptDecisionReady ? "done" : job?.id ? "active" : "pending"
+    },
+    {
+      label: "视觉样张",
+      detail: state.routeA.sampleApproved
+        ? "样张已确认"
+        : state.routeA.sampleReady
+          ? "等待你确认样张"
+          : sampleGatePending
+            ? "等待方案确认"
+            : samplePreparationPending
+              ? "等待准备并生成样张"
+              : "等待生成 1 页样张",
+      state: state.routeA.sampleApproved ? "done" : state.routeA.sampleReady || state.routeA.codexPptDecisionReady ? "active" : "pending"
+    },
+    {
+      label: "图片版 PPT",
+      detail: state.routeA.imageDeckReady
+        ? state.routeA.imageDeckReviewReady ? "图片版已完成" : "等待逐页复核"
+        : state.routeA.imageDeckAvailable
+          ? `${state.routeA.imageDeckPageCount}/${state.routeA.imageTotal} 页测试稿，继续生成剩余页面`
+        : state.routeA.imageTotal ? `${state.routeA.visualLabel} 已生成` : state.routeA.visualLabel,
+      state: state.routeA.status === "ready" ? "done" : state.routeA.sampleApproved ? "active" : "pending"
+    },
+    {
+      label: "可编辑重建",
+      detail: state.routeB.status === "ready"
+        ? "对象级可编辑版已完成"
+        : state.routeA.imageDeckReady && !state.routeA.imageDeckReviewReady
+          ? `等待图片复核；${state.routeB.editableLabel}，仅作为历史草稿`
+          : state.routeB.editableLabel,
+      state: state.routeB.status === "ready" ? "done" : state.routeB.status === "active" ? "active" : state.routeB.status === "locked" ? "locked" : "pending"
+    },
+    {
+      label: "复核与交付",
+      detail: state.routeB.deliverableReady ? "已通过交付门禁" : state.routeB.finalReady ? "等待人工复核" : "最终文件尚未开放",
+      state: state.routeB.deliverableReady ? "done" : state.routeB.finalReady ? "active" : state.routeB.status === "locked" ? "locked" : "pending"
+    }
+  ];
   async function handleArchiveTask(event, item) {
     event.stopPropagation();
     if (!item?.id || !onArchiveJob) return;
-    const title = item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id);
+    const title = workflowTaskTitle(item);
     const currentHint = item.id === job?.id ? "\n\n这是当前正在查看的任务，移除后会自动切到下一条任务。" : "";
     const confirmed = onConfirm
       ? await onConfirm({
@@ -3131,14 +4489,212 @@ function DualRouteDashboard({
     if (selectedDeliveryMode === "editable") {
       const confirmed = onConfirm
         ? await onConfirm({
-          title: "创建路线 B 任务",
-          body: "路线 B 可编辑 PPT 会耗时更长。系统仍会先完成路线 A 图片版 PPT；确认图片版后，再继续路线 B 可编辑重建。",
-          primaryLabel: "创建路线 B"
+          title: "创建完整可编辑任务",
+          body: "完整可编辑 PPT 会耗时更长。系统会先完成图片版 PPT；确认视觉效果后，再继续可编辑重建。",
+          primaryLabel: "创建完整任务"
         })
         : window.confirm(createModeCopy.confirm);
       if (!confirmed) return;
     }
     onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode });
+  }
+
+  const useLegacyDashboard = new URLSearchParams(window.location.search).get("ui") === "legacy";
+  if (!useLegacyDashboard) {
+    const normalizedTasks = displayedTaskRows.map((item) => {
+      const itemState = buildDualRouteState(item, item.id === job?.id ? deliveryBundle : null);
+      const itemBucket = getTaskBucket(item);
+      const latestItemError = Array.isArray(item?.errors) ? item.errors[item.errors.length - 1] : null;
+      return {
+        id: item.id,
+        active: Boolean(item?.id && item.id === job?.id),
+        title: workflowTaskTitle(item),
+        summary: itemBucket === "failed"
+          ? latestItemError?.message || latestItemError?.reason || "任务失败，可在高级详情中查看恢复建议"
+          : `图片版 ${itemState.routeA.visualLabel || workflowJobLabel(item)} · 可编辑版 ${itemState.routeB.editableLabel}`,
+        status: itemBucket === "failed" ? "失败" : routeStatusLabel(itemState.routeB.status),
+        onSelect: () => {
+          if (!item.id) return;
+          setCreateOpen(false);
+          onSelectJob?.(item.id);
+        },
+        onRemove: (event) => handleArchiveTask(event, item)
+      };
+    });
+    const currentTaskBucket = job?.id ? getTaskBucket(job) : "";
+    const currentTaskFailed = currentTaskBucket === "failed" || Boolean(latestEditableWorkerFailure);
+    const latestJobError = Array.isArray(job?.errors) ? job.errors[job.errors.length - 1] : null;
+    const statusLabel = currentTaskFailed
+      ? "执行失败"
+      : state.routeB.status === "ready"
+        ? "已完成"
+        : state.routeA.status === "ready"
+          ? "图片版已完成"
+          : job?.id ? "进行中" : "未开始";
+    const statusTone = currentTaskFailed
+      ? "failed"
+      : state.routeB.status === "ready" || state.routeA.status === "ready"
+        ? "ready"
+        : job?.id ? "active" : "idle";
+    return (
+      <React.Suspense fallback={<div className="ppt-agent-v2-loading" role="status">正在加载 PPT Agent 工作台...</div>}>
+        <PptAgentWorkspace
+        header={{
+          title: currentTitle,
+          createdLabel: job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务",
+          sourceLabel: sourcePages,
+          statusLabel,
+          statusTone
+        }}
+        taskList={{
+          busy: Boolean(uploadDeleteBusyId),
+          mutationBusy: busy,
+          search: taskSearch,
+          onSearchChange: setTaskSearch,
+          selectedFilter: taskFilter,
+          onFilterChange: setTaskFilter,
+          filters: taskTabs.map(([id, label]) => ({ id, label, count: taskTabCounts[id] || 0 })),
+          rows: normalizedTasks,
+          emptyMessage: visibleTaskRows.length
+            ? taskSearch.trim() ? "没有匹配任务" : "这个分类下暂无任务"
+            : "暂无任务，先创建一份 PPT",
+          hasMore: filteredTaskRows.length > 5 || jobListHasMore,
+          moreLabel: taskListExpanded
+            ? jobListHasMore ? `加载更早任务（已加载 ${filteredTaskRows.length} 条）` : "收起任务"
+            : `显示更多任务（已加载 ${filteredTaskRows.length} 条）`,
+          onToggleMore: () => {
+            if (!taskListExpanded) setTaskListExpanded(true);
+            else if (jobListHasMore) onLoadMoreJobs?.();
+            else setTaskListExpanded(false);
+          }
+        }}
+        create={{
+          open: showCreatePanel,
+          onOpen: () => setCreateOpen(true),
+          onClose: () => setCreateOpen(false),
+          files,
+          notes,
+          inputLocked: busy,
+          outline: Array.isArray(outlinePlan?.layoutSequence) ? outlinePlan.layoutSequence : [],
+          onNotesChange,
+          onRemoveFile,
+          onUploadFiles,
+          removalDisabled: busy && !uploadDeleteBusyId,
+          removingFileId: uploadDeleteBusyId,
+          errorMessage: error,
+          deliveryMode: selectedDeliveryMode,
+          onDeliveryModeChange,
+          steps: ["分析内容", "确认视觉样张", "生成整套图片", selectedDeliveryMode === "editable" ? "可编辑重建" : "下载图片版"],
+          canSubmit: canCreateFromPanel,
+          hint: canCreateFromPanel
+            ? outlineReady ? createModeCopy.ready : "第一步先生成大纲，确认页数、标题和每页要点。"
+            : createModeCopy.pending,
+          submitLabel: busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成大纲",
+          onSubmit: handleCreateWorkflow
+        }}
+        workflow={{
+          actions: currentActions,
+          busy,
+          errorMessage: error || latestEditableWorkerFailure?.reason || "",
+          nextAction: latestEditableWorkerFailure?.title || (currentTaskBucket === "failed" ? "任务执行失败，先查看恢复建议" : state.nextAction),
+          message: latestEditableWorkerFailure?.recommendedAction || (currentTaskBucket === "failed"
+            ? latestJobError?.message || latestJobError?.reason || "已成功页面会继续保留；请在高级详情中查看失败页和推荐恢复动作。"
+            : state.message),
+          statusMessage: status,
+          stages: pipelineStages,
+          onOpenArtifacts,
+          deliverables: [
+            {
+              kind: "visual",
+              title: "图片版 PPT",
+              detail: state.routeA.imageDeckReady
+                ? state.routeA.imageDeckReviewReady
+                  ? "图片版已完成内容与视觉复核"
+                  : "图片版已生成，等待内容与视觉复核"
+                : state.routeA.imageDeckAvailable
+                  ? `${state.routeA.imageDeckPageCount}/${state.routeA.imageTotal} 页测试稿，不是完整交付`
+                  : `${state.routeA.visualLabel}，生成后可先检查`,
+              ready: state.routeA.imageDeckReviewReady,
+              href: imageDeckHref,
+              status: state.routeA.imageDeckReady
+                ? state.routeA.imageDeckReviewReady ? "\u5df2\u590d\u6838" : "\u5f85\u590d\u6838"
+                : state.routeA.fullVisualCoverageReady
+                  ? "\u5f85\u590d\u6838"
+                  : state.routeA.visualLabel && state.routeA.visualLabel !== "0/0"
+                    ? "\u751f\u6210\u4e2d"
+                    : "\u7b49\u5f85\u5f00\u59cb"
+            },
+            {
+              kind: "editable",
+              title: "可编辑 PPT",
+              detail: state.routeB.deliverableReady
+                ? "已通过复核和交付门禁"
+                : state.routeA.imageDeckReady && !state.routeA.imageDeckReviewReady
+                  ? `${state.routeB.editableLabel}，仅为历史草稿；图片版复核完成后才能继续`
+                : state.routeB.finalReady || state.routeB.sampleReviewReady
+                  ? `${state.routeB.editableLabel} · ${state.routeB.editabilityProfile}`
+                  : `${state.routeB.editableLabel}，完整图片版确认后继续`,
+              ready: state.routeB.deliverableReady,
+              href: finalHref,
+              status: routeStatusLabel(state.routeB.status)
+            }
+          ]
+        }}
+        preview={{
+          editableAvailable: editableModeAvailable,
+          emptyMessage: !job?.id
+            ? "创建任务后，Agent 会先生成一页视觉样张"
+            : sampleGatePending
+              ? "先在右侧确认大纲、视觉风格和生图后端"
+              : "点击右侧样张操作；完成后台准备后，调用图片 API 前会再次请你确认",
+          emptyTitle: !job?.id ? "页面将在这里生成" : "样张尚未生成",
+          failed: previewFailed,
+          href: previewHref,
+          images: activePreviewSlots,
+          loading: previewLoading,
+          mode: previewMode,
+          onImageError: () => {
+            setPreviewFailed(true);
+            setPreviewLoading(false);
+          },
+          onImageLoad: () => setPreviewLoading(false),
+          onModeChange: setPreviewMode,
+          onOpenReview: previewMode === "editable"
+            ? state.routeB.previewPageIds?.length ? onOpenEditableReview : null
+            : state.routeA.slideResultsRecorded ? onOpenImageDeckReview : null,
+          reviewLabel: previewMode === "editable"
+            ? cp(0x590d, 0x6838, 0x53ef, 0x7f16, 0x8f91, 0x7248)
+            : cp(0x590d, 0x6838, 0x56fe, 0x7247, 0x7248),
+          onSelectPage: selectPreviewPage,
+          selectedPageId: selectedPreviewId,
+          selectedStatus: selectedPreviewSlot?.status || "pending",
+          totalPages: expectedPreviewPages
+        }}
+        advanced={{
+          open: advancedOpen,
+          onToggle: setAdvancedOpen,
+          content: (
+            <>
+              <div className="dual-diagnostic-strip">
+                <span><b>{routeStatusLabel(state.routeA.status)}</b>图片版</span>
+                <span><b>{routeStatusLabel(state.routeB.status)}</b>可编辑版</span>
+                <span><b>{state.routeB.reviewReady ? "已复核" : "待复核"}</b>人工复核</span>
+              </div>
+              <DualCleanupPanel
+                activeJobId={job?.id || ""}
+                jobs={taskRows}
+                onArchiveJob={onArchiveJob}
+                onArchivedVisibilityChange={onArchivedVisibilityChange}
+                onRefreshJobs={onRefreshJobs}
+                onSelectJob={onSelectJob}
+                showArchived={showArchived}
+              />
+            </>
+          )
+        }}
+        />
+      </React.Suspense>
+    );
   }
 
   return (
@@ -3167,7 +4723,7 @@ function DualRouteDashboard({
             return (
               <div className={`dual-task-row ${active ? "active" : ""}`} key={item.id}>
                 <button className="dual-task-row-main" type="button" onClick={() => item.id && onSelectJob?.(item.id)}>
-                  <b>{item.input?.sourceOriginalName?.replace(/\.[^.]+$/, "") || shortWorkflowId(item.id)}</b>
+                  <b>{workflowTaskTitle(item)}</b>
                   <span>{pages} · {rowState.routeB.editableLabel} 可编辑</span>
                   <em>{routeStatusLabel(rowState.routeB.status)}</em>
                 </button>
@@ -3192,21 +4748,130 @@ function DualRouteDashboard({
       </aside>
 
       <section className="dual-dashboard-main">
-        <div className="dual-task-titlebar">
+        <header className="dual-task-titlebar">
           <div>
             <h1>{currentTitle}</h1>
-            <span>{job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务"} · {sourcePages}</span>
-            <strong>下一步：{state.nextAction}</strong>
+            <div className="agent-title-meta">
+              <span>{job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务"}</span>
+              <span>{sourcePages}</span>
+            </div>
           </div>
+          <span className={`agent-job-status ${state.routeB.status === "ready" || state.routeA.status === "ready" ? "ready" : "active"}`}>
+            {state.routeB.status === "ready" ? "已完成" : state.routeA.status === "ready" ? "图片版已完成" : job?.id ? "进行中" : "未开始"}
+          </span>
+        </header>
+        {showCreatePanel ? (
+          <section className="dual-create-panel">
+            <div className="dual-create-head">
+              <div>
+                <h2>新建 PPT 任务</h2>
+                <span>上传材料并说明目标，Agent 会先完成图片版，再按需要继续可编辑重建。</span>
+              </div>
+              <button className="btn" type="button" onClick={() => setCreateOpen(false)}>收起</button>
+            </div>
+            <div className="dual-create-grid">
+              <label className="dual-upload-box">
+                <input type="file" multiple onChange={onUploadFiles} />
+                <b>上传 PPT / PDF / 图片 / 文档</b>
+                <span>{files.length ? `已选择 ${files.length} 个文件` : "点击选择文件，或先填写需求直接创建"}</span>
+              </label>
+              <label className="dual-brief-box">
+                <span>任务需求</span>
+                <textarea
+                  value={notes}
+                  onChange={(event) => onNotesChange?.(event.target.value)}
+                  placeholder="例如：把这份资料重做成风格统一的图片版 PPT，确认视觉效果后再转成可编辑版。"
+                />
+              </label>
+            </div>
+            <div className="dual-route-choice" role="group" aria-label="选择交付目标">
+              <button className={selectedDeliveryMode === "visual" ? "active" : ""} type="button" onClick={() => onDeliveryModeChange?.("visual")}>
+                <b>快速交付</b>
+                <strong>图片版 PPT</strong>
+                <span>完成视觉统一的高质量图片页，确认后即可下载。</span>
+              </button>
+              <button className={selectedDeliveryMode === "editable" ? "active" : ""} type="button" onClick={() => onDeliveryModeChange?.("editable")}>
+                <b>完整交付</b>
+                <strong>图片版 + 可编辑版</strong>
+                <span>确认图片版后继续对象级重建、逐页复核和最终交付。</span>
+              </button>
+            </div>
+            <div className="dual-create-checks" aria-label="生成流程">
+              {["分析内容", "确认样张", "生成整套图片", selectedDeliveryMode === "editable" ? "可编辑重建" : "下载图片版"].map((item) => <span key={item}>{item}</span>)}
+            </div>
+            {selectedDeliveryMode === "editable" ? (
+              <div className="dual-route-warning">
+                完整可编辑版会消耗更多时间和模型额度，进入真实生成前仍会要求你确认。
+              </div>
+            ) : null}
+            {files.length ? (
+              <div className="dual-file-chips">
+                {files.slice(0, 6).map((file) => (
+                  <span key={file.id || file.originalName}><b>{fileExt(file.originalName)}</b>{file.originalName || file.id}</span>
+                ))}
+              </div>
+            ) : null}
+            <div className="dual-create-actions">
+              <span>{canCreateFromPanel ? (outlineReady ? createModeCopy.ready : "第一步：先生成大纲，确认页数、标题和每页要点。") : createModeCopy.pending}</span>
+              <button className="btn primary" type="button" onClick={handleCreateWorkflow} disabled={!canCreateFromPanel}>
+                {busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成大纲"}
+              </button>
+            </div>
+          </section>
+        ) : null}
+        <div className="agent-workbench-grid">
+          <AgentFlowPanel
+            actions={currentActions}
+            imageDeckHref={imageDeckHref}
+            finalHref={finalHref}
+            message={state.message}
+            nextAction={state.nextAction}
+            onOpenArtifacts={onOpenArtifacts}
+            pipelineStages={pipelineStages}
+            state={state}
+          />
+          <AgentPreviewPanel
+            editableAvailable={editablePreviewAvailable}
+            images={visualImages}
+            jobId={job?.id || ""}
+            loading={previewLoading}
+            failed={previewFailed}
+            mode={previewMode}
+            onImageError={() => {
+              setPreviewFailed(true);
+              setPreviewLoading(false);
+            }}
+            onImageLoad={() => setPreviewLoading(false)}
+            onModeChange={setPreviewMode}
+            onOpenReview={state.routeA.slideResultsRecorded ? onOpenImageDeckReview : null}
+            onSelectPage={setPreviewPageId}
+            previewHref={previewHref}
+            selectedPageId={selectedPreviewId}
+            totalPages={state.routeA.imageTotal || visualImages.length}
+          />
         </div>
-        <div className="dual-stage-alert">阶段交付：先完成图片版 PPT，再按需进入可编辑重建</div>
+        {!job?.id ? (
+          <details className="dual-help-panel" open>
+            <summary>使用说明</summary>
+            <section className="dual-first-use">
+              <div>
+                <b>开始制作</b>
+                {FIRST_USE_GUIDE.map((item) => <span key={item}>{item}</span>)}
+              </div>
+              <div>
+                <b>可以得到</b>
+                {CODEX_PPT_OUTPUTS.map((item) => <span key={item}>{item}</span>)}
+              </div>
+            </section>
+          </details>
+        ) : null}
         <details className="dual-advanced-panel" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
-          <summary>高级诊断</summary>
+          <summary>高级详情</summary>
           <div className="dual-advanced-body">
             <div className="dual-advanced-head">
               <div>
-                <h2>高级诊断</h2>
-                <span>这里放清理、归档和状态诊断；普通流程不需要看。</span>
+                <h2>高级详情</h2>
+                <span>查看任务状态、归档和工程诊断；正常制作不需要操作这里。</span>
               </div>
               <button className="btn" type="button" onClick={() => setAdvancedOpen(false)}>收起</button>
             </div>
@@ -3226,222 +4891,225 @@ function DualRouteDashboard({
             />
           </div>
         </details>
-        {showCreatePanel ? (
-          <section className="dual-create-panel">
-            <div className="dual-create-head">
-              <div>
-                <h2>新建 PPT 任务</h2>
-                <span>在当前工作台完成材料上传和需求录入，不跳回旧流程。</span>
-              </div>
-              <button className="btn" type="button" onClick={() => setCreateOpen(false)}>收起</button>
-            </div>
-            <div className="dual-create-grid">
-              <label className="dual-upload-box">
-                <input type="file" multiple onChange={onUploadFiles} />
-                <b>上传 PPT / PDF / 图片 / 文档</b>
-                <span>{files.length ? `已选择 ${files.length} 个文件` : "点击选择文件，或先填写需求直接创建"}</span>
-              </label>
-              <label className="dual-brief-box">
-                <span>任务需求</span>
-                <textarea
-                  value={notes}
-                  onChange={(event) => onNotesChange?.(event.target.value)}
-                  placeholder="例如：把这份中秋提案重做成更高级的图片版 PPT，图片版先交付，可编辑版后续再做。"
-                />
-              </label>
-            </div>
-            <div className="dual-route-choice" role="group" aria-label="选择任务路线">
-              <button className={selectedDeliveryMode === "visual" ? "active" : ""} type="button" onClick={() => onDeliveryModeChange?.("visual")}>
-                <b>路线 A</b>
-                <strong>图片版 PPT</strong>
-                <span>先生成高质量图片页，完成后可以先下载交付。</span>
-              </button>
-              <button className={selectedDeliveryMode === "editable" ? "active" : ""} type="button" onClick={() => onDeliveryModeChange?.("editable")}>
-                <b>路线 B</b>
-                <strong>可编辑 PPT</strong>
-                <span>会先完成路线 A，再做 OCR、重建和人工复核，耗时更长。</span>
-              </button>
-            </div>
-            <div className="dual-create-checks" aria-label="生成流程">
-              {["生成大纲", "识别页面内容", "可确认大纲", "每页高清图片"].map((item) => <span key={item}>{item}</span>)}
-            </div>
-            {selectedDeliveryMode === "editable" ? (
-              <div className="dual-route-warning">
-                路线 B 会消耗更多时间：系统会先生成图片版 PPT，确认后再进入可编辑重建。
-              </div>
-            ) : null}
-            {files.length ? (
-              <div className="dual-file-chips">
-                {files.slice(0, 6).map((file) => (
-                  <span key={file.id || file.originalName}><b>{fileExt(file.originalName)}</b>{file.originalName || file.id}</span>
-                ))}
-              </div>
-            ) : null}
-            <div className="dual-create-actions">
-              <span>{canCreateFromPanel ? (outlineReady ? createModeCopy.ready : "第一步：先生成大纲，确认页数、标题和每页要点。") : createModeCopy.pending}</span>
-              <button className="btn primary" type="button" onClick={handleCreateWorkflow} disabled={!canCreateFromPanel}>
-                {busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成大纲"}
-              </button>
-            </div>
-          </section>
-        ) : null}
-        <details className="dual-help-panel">
-          <summary>第一次使用建议 / 生成结果</summary>
-          <section className="dual-first-use">
-            <div>
-              <b>第一次使用建议</b>
-              {FIRST_USE_GUIDE.map((item) => <span key={item}>{item}</span>)}
-            </div>
-            <div>
-              <b>生成结果</b>
-              {CODEX_PPT_OUTPUTS.map((item) => <span key={item}>{item}</span>)}
-            </div>
-          </section>
-        </details>
-        <DualRouteLane
-          accent="visual"
-          id="dual-route-visual"
-          badge="路线 A"
-          title="图片版 PPT"
-          summary={state.routeA.summary}
-          status={state.routeA.status}
-          metrics={[
-            ["用户确认", state.routeA.userConfirmLabel],
-            ["后台生成", state.routeA.backgroundLabel],
-            ["图片版", state.routeA.imageDeckReady ? "可下载" : "未完成"]
-          ]}
-          actions={[
-            routeASampleNeedsReview ? { label: "查看样张并复核", onClick: onOpenSampleReview, primary: true } : null,
-            routeADeckNeedsReview ? { label: "复核整套图片", onClick: onOpenImageDeckReview, primary: true } : null,
-            imageDeckHref ? { label: "下载图片版 PPT", href: imageDeckHref, primary: !routeANeedsAssetMap && !routeADeckNeedsReview } : null,
-            ((!imageDeckHref || routeANeedsAssetMap) && !routeASampleNeedsReview && !routeADeckNeedsReview) ? { label: routeAPrimaryLabel, onClick: routeAPrimaryAction, disabled: !canRunRouteA, primary: true } : null,
-          ].filter(Boolean)}
-        />
-        <DualRouteLane
-          accent="editable"
-          id="dual-route-editable"
-          badge="路线 B"
-          title="可编辑 PPT"
-          summary={state.routeB.summary}
-          status={state.routeB.status}
-          metrics={[
-            ["可编辑页", editablePages],
-            ["人工复核", state.routeB.reviewReady ? "已记录" : "待复核"],
-            ["最终交付", state.routeB.deliverableReady ? "可下载" : state.routeB.finalReady ? "待复核" : "未完成"]
-          ]}
-          actions={[
-            finalHref ? { label: "下载可编辑 PPT", href: finalHref, primary: true } : null,
-            !finalHref && state.routeB.status !== "locked" ? { label: primaryLabel, onClick: primaryAction, disabled: !canRunPrimary, primary: true } : null
-          ].filter(Boolean)}
-        />
       </section>
     </div>
   );
 }
 
-function DualRouteLane({ accent = "visual", actions = [], badge, id = "", metrics = [], status = "pending", summary, title }) {
+function AgentAction({ action, primary = false }) {
+  if (!action) return null;
+  return action.href ? (
+    <a className={`btn ${primary ? "primary" : ""}`} href={action.href}>{action.label}</a>
+  ) : (
+    <button className={`btn ${primary ? "primary" : ""}`} type="button" onClick={action.onClick} disabled={action.disabled}>
+      {action.label}
+    </button>
+  );
+}
+
+function AgentFlowPanel({ actions = [], finalHref = "", imageDeckHref = "", message = "", nextAction = "", onOpenArtifacts, pipelineStages = [], state }) {
   const primaryAction = actions.find((action) => action.primary) || actions[0];
   const secondaryActions = actions.filter((action) => action !== primaryAction).slice(0, 1);
-  const completionMetric = accent === "editable" && (status === "locked" || status === "optional")
-    ? metrics[0] || ["进度", "-"]
-    : metrics[1] || metrics[0] || ["进度", "-"];
-  const completionTitle = accent === "visual" && status === "ready"
-    ? "图片版 PPT 已完成"
-    : accent === "editable" && status === "ready"
-      ? "可编辑 PPT 已完成"
-      : accent === "editable" && status === "active"
-        ? "可编辑 PPT 待复核"
-      : accent === "editable"
-        ? "可编辑重建尚未开始"
-        : "图片版 PPT 生成中";
-
   return (
-    <section className={`route-lane ${accent} ${status}`} id={id || undefined}>
-      <div className="route-lane-head">
-        <span className="route-icon" aria-hidden="true">
-          {accent === "visual" ? (
-            <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5V5Zm2 2v10h10V7H7Zm1.5 8 2.8-3.2 2 2.2 1.2-1.3L17 15H8.5Zm1.2-5.4a1.4 1.4 0 1 1 2.8 0 1.4 1.4 0 0 1-2.8 0Z" /></svg>
-          ) : (
-            <svg viewBox="0 0 24 24"><path d="M6 4h12v16H6V4Zm2 2v12h8V6H8Zm1.5 2.5h5v1.6h-5V8.5Zm0 3.2h5v1.6h-5v-1.6Zm0 3.2h3.2v1.6H9.5v-1.6Z" /></svg>
-          )}
-        </span>
-        <div>
-          <span>{badge}</span>
-          <h3>{title} <em>{routeStatusLabel(status)}</em></h3>
-          <p>{summary}</p>
+    <section className="agent-flow-panel" aria-labelledby="agent-current-step">
+      <header className="agent-current-step">
+        <span>当前下一步</span>
+        <h2 id="agent-current-step">{nextAction}</h2>
+        <p>{message}</p>
+        <div className="agent-current-actions">
+          {secondaryActions.map((action) => <AgentAction action={action} key={action.label} />)}
+          <AgentAction action={primaryAction} primary />
+        </div>
+      </header>
+
+      <div className="agent-pipeline" aria-label="PPT 制作进度">
+        {pipelineStages.map((stage, index) => (
+          <div className={`agent-stage ${stage.state}`} key={stage.label}>
+            <span className="agent-stage-index" aria-hidden="true">{stage.state === "done" ? "✓" : index + 1}</span>
+            <div>
+              <b>{stage.label}</b>
+              <small>{stage.detail}</small>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="agent-deliverables">
+        <div className={`agent-deliverable ${state.routeA.imageDeckReviewReady ? "ready" : ""}`}>
+          <div>
+            <span>阶段结果</span>
+            <b>图片版 PPT</b>
+            <small>{state.routeA.imageDeckReady
+              ? state.routeA.imageDeckReviewReady
+                ? "图片版已完成内容与视觉复核"
+                : "图片版已生成，等待内容与视觉复核"
+              : state.routeA.imageDeckAvailable
+                ? `${state.routeA.imageDeckPageCount}/${state.routeA.imageTotal} 页测试稿，不是完整交付`
+                : `${state.routeA.visualLabel}，生成后可先检查`}</small>
+          </div>
+          {imageDeckHref ? <a className="agent-text-action" href={imageDeckHref}>{state.routeA.imageDeckReviewReady ? "下载" : "下载待复核版"}</a> : <em>{state.routeA.userConfirmLabel}</em>}
+        </div>
+        <div className={`agent-deliverable ${state.routeB.deliverableReady ? "ready" : ""}`}>
+          <div>
+            <span>最终结果</span>
+            <b>可编辑 PPT</b>
+            <small>{state.routeB.deliverableReady
+              ? "已通过复核和交付门禁"
+              : state.routeB.finalReady || state.routeB.sampleReviewReady
+                ? `${state.routeB.editableLabel} · ${state.routeB.editabilityProfile}`
+                : `${state.routeB.editableLabel}，完整图片版确认后继续`}</small>
+          </div>
+          {finalHref ? <a className="agent-text-action" href={finalHref}>下载</a> : <em>{routeStatusLabel(state.routeB.status)}</em>}
         </div>
       </div>
-      <div className="route-completion">
-        <div>
-          <b>{completionTitle}</b>
-          <span>当前为 {completionMetric[1]} {completionMetric[0]}</span>
-        </div>
-        <div className="route-actions">
-          {secondaryActions.map((action) => action.href ? (
-            <a className="btn" href={action.href} key={action.label}>{action.label}</a>
-          ) : (
-            <button className="btn" type="button" onClick={action.onClick} disabled={action.disabled} key={action.label}>
-              {action.label}
-            </button>
-          ))}
-          {primaryAction ? primaryAction.href ? (
-            <a className="btn primary" href={primaryAction.href}>{primaryAction.label}</a>
-          ) : (
-            <button className="btn primary" type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
-              {primaryAction.label}
-            </button>
-          ) : null}
-        </div>
-      </div>
+
+      {onOpenArtifacts ? (
+        <button className="agent-artifact-link" type="button" onClick={onOpenArtifacts}>查看全部产物与记录</button>
+      ) : null}
     </section>
   );
 }
 
-function isFrontendImageDeckReviewApproved(artifacts = {}) {
-  const review = artifacts.imageDeckReview || {};
-  const summary = review.summary || {};
-  if (review.status !== "approved") return false;
-  if (summary.readyForApproval !== true || summary.allPagesReviewed !== true || summary.allMarksCurrent !== true) return false;
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
-  const expectedPages = visualImages.map((image, index) => image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`).filter(Boolean);
-  const uniquePages = Array.from(new Set(expectedPages));
-  if (!uniquePages.length) return false;
-  const marks = review.marks || {};
-  const visualByPage = new Map(visualImages.map((image, index) => [image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`, image]));
-  const allPagesPassed = uniquePages.every((pageId) => {
-    const mark = marks[pageId] || {};
-    const image = visualByPage.get(pageId) || {};
-    if (String(mark.status || "").toLowerCase() !== "pass") return false;
-    if (!image.path || mark.visualImagePath !== image.path) return false;
-    if (image.sha256 && mark.visualImageSha256 !== image.sha256) return false;
-    return true;
-  });
-  const total = Number(summary.totalPages ?? summary.pageCount ?? review.pageCount ?? 0) || 0;
-  const passed = Number(summary.passCount ?? summary.passedCount ?? summary.approvedPages ?? 0) || 0;
-  return Boolean(allPagesPassed && total === uniquePages.length && passed === uniquePages.length);
+function AgentPreviewPanel({ editableAvailable = false, failed = false, images = [], jobId = "", loading = false, mode = "visual", onImageError, onImageLoad, onModeChange, onOpenReview, onSelectPage, previewHref = "", reviewLabel = "", selectedPageId = "", totalPages = 0 }) {
+  const currentIndex = Math.max(0, images.findIndex((image) => (
+    (image.pageId || pageIdFromPageNumber(image.pageNumber)) === selectedPageId
+  )));
+  const selectAdjacentPage = (offset) => {
+    const nextImage = images[currentIndex + offset];
+    if (!nextImage) return;
+    onSelectPage?.(nextImage.pageId || pageIdFromPageNumber(nextImage.pageNumber));
+  };
+  return (
+    <aside className="agent-preview-panel" aria-label="PPT 页面预览">
+      <header className="agent-preview-head">
+        <div>
+          <span>PPT 预览</span>
+          <b>{images.length ? `第 ${currentIndex + 1} 页 / 共 ${totalPages || images.length} 页` : "等待生成页面"}</b>
+        </div>
+        <div className="agent-preview-modes" role="group" aria-label="预览版本">
+          <button className={mode === "visual" ? "active" : ""} type="button" aria-pressed={mode === "visual"} onClick={() => onModeChange?.("visual")}>图片版</button>
+          <button className={mode === "editable" ? "active" : ""} type="button" aria-pressed={mode === "editable"} onClick={() => onModeChange?.("editable")} disabled={!editableAvailable}>可编辑版</button>
+        </div>
+        <div className="agent-preview-nav" aria-label="切换页面">
+          <button type="button" onClick={() => selectAdjacentPage(-1)} disabled={!images.length || currentIndex === 0} title="上一页" aria-label="上一页">‹</button>
+          <button type="button" onClick={() => selectAdjacentPage(1)} disabled={!images.length || currentIndex >= images.length - 1} title="下一页" aria-label="下一页">›</button>
+        </div>
+      </header>
+
+      <div className={`agent-preview-canvas ${loading ? "loading" : ""}`}>
+        {previewHref && !failed ? (
+          <img src={previewHref} alt={mode === "editable" ? "当前页可编辑版预览" : "当前页图片版预览"} onLoad={onImageLoad} onError={onImageError} />
+        ) : (
+          <div className="agent-preview-empty">
+            <span aria-hidden="true">▤</span>
+            <b>{failed ? "这一页暂时没有可用预览" : "生成后会在这里显示 PPT"}</b>
+            <small>{failed ? "可以切换版本或选择其他页面" : "先完成内容与视觉确认"}</small>
+          </div>
+        )}
+        {loading ? <span className="agent-preview-loading">正在加载页面...</span> : null}
+      </div>
+
+      {images.length ? (
+        <div className="agent-preview-strip" aria-label="页面缩略图">
+          {images.map((image, index) => {
+            const pageId = image.pageId || pageIdFromPageNumber(image.pageNumber);
+            const actualPageNumber = Number(image.pageNumber || pageNumberFromPageId(pageId) || index + 1);
+            const thumbHref = `/api/workflow-jobs/${encodeURIComponent(jobId)}/artifacts/visual-page/${encodeURIComponent(pageId)}`;
+            return (
+              <button className={selectedPageId === pageId ? "active" : ""} type="button" onClick={() => onSelectPage?.(pageId)} key={pageId || index} aria-label={`查看第 ${actualPageNumber} 页`}>
+                <img src={thumbHref} alt="" />
+                <span>{actualPageNumber}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {images.length && onOpenReview ? (
+        <button className="agent-review-action" type="button" onClick={onOpenReview}>{reviewLabel || "打开逐页对比与复核"}</button>
+      ) : null}
+    </aside>
+  );
 }
 
-function buildDualRouteState(job = null) {
+function isFrontendImageDeckReviewApproved(artifacts = {}, expectedPages = 0) {
+  return isWorkflowImageDeckReviewReady(artifacts, {
+    expectedPages: Number(expectedPages || 0) || Math.max(
+      Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
+      Number(artifacts.imageDeck?.pageCount || 0),
+      Number(artifacts.ocrTextHints?.pageCount || 0),
+      (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+        .filter((image) => image?.path && image.staleStyleReference !== true).length
+    )
+  });
+}
+
+function hasCurrentVisualOcrCoverage(job = null) {
   const artifacts = job?.artifacts || {};
+  if (artifacts.visualOcrTextHints?.coordinateModeVersion !== "visual-coordinates-v2") return false;
+  const semanticQuality = artifacts.visualTextQuality?.summary || artifacts.visualQuality?.semanticQuality || artifacts.visualQuality?.summary?.semanticQuality || null;
+  if (!artifacts.visualTextQuality?.path || !artifacts.visualTextQuality?.evidenceSha256 || semanticQuality?.complete !== true) return false;
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
+  const visualOcrPages = Array.isArray(artifacts.visualOcrPages) ? artifacts.visualOcrPages : [];
+  if (!visualImages.length || visualOcrPages.length < visualImages.length) return false;
+  const normalizePath = (value = "") => String(value || "").replace(/\\/g, "/").toLowerCase();
+  const evidenceByPage = new Map(visualOcrPages.map((page, index) => [
+    page.pageId || pageIdFromPageNumber(page.pageNumber || index + 1),
+    page
+  ]));
+  return visualImages.every((image, index) => {
+    const pageId = image.pageId || pageIdFromPageNumber(image.pageNumber || index + 1);
+    const evidence = evidenceByPage.get(pageId);
+    if (!evidence || normalizePath(evidence.imagePath) !== normalizePath(image.path)) return false;
+    return Boolean(image.sha256 && evidence.imageSha256 && image.sha256 === evidence.imageSha256);
+  });
+}
+
+function buildDualRouteState(job = null, deliveryBundle = null) {
+  const artifacts = job?.artifacts || {};
+  const currentDeliveryBundle = deliveryBundle?.jobId === job?.id ? deliveryBundle : null;
   const sourcePages = artifactCountNumber(artifacts.renderedPages || artifacts.sourcePages || artifacts.source);
-  const visualPages = artifactCountNumber(artifacts.visualImages);
+  const currentVisualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.path && image.staleStyleReference !== true);
+  const visualPages = currentVisualImages.length;
   const codexTasks = Array.isArray(job?.codexPptSlideTasks?.tasks) ? job.codexPptSlideTasks.tasks : [];
   const recordedVisualPages = codexTasks.filter((task) => task.status === "recorded").length;
-  const imagePageCount = Math.max(visualPages, recordedVisualPages);
+  const imagePageCount = visualPages;
   const expectedPages = Number(
-    job?.input?.sourcePageCount
+    job?.sourceMeta?.pageCount
+    || artifacts.sourceMeta?.pageCount
+    || job?.input?.sourcePageCount
     || artifacts.source?.pageCount
-    || artifacts.ocrTextHints?.pageCount
-    || artifacts.editableFinal?.summary?.expectedPages
     || sourcePages
+    || artifacts.ocrTextHints?.pageCount
     || imagePageCount
     || 0
   );
   const imageTotal = expectedPages || imagePageCount || sourcePages || 0;
-  const imageDeckReady = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const imageDeckAvailable = Boolean(artifacts.imageDeck?.path || artifacts.imageDeck?.relativePath);
+  const imageDeckPageCount = Number(artifacts.imageDeck?.pageCount || imagePageCount || 0);
+  const fullVisualCoverageReady = Boolean(imageTotal > 0 && imagePageCount >= imageTotal);
+  const imageDeckReady = Boolean(imageDeckAvailable && imageTotal > 0 && imageDeckPageCount >= imageTotal);
+  const imageDeckDraft = Boolean(imageDeckAvailable && !imageDeckReady);
   const informationAssetMap = artifacts.codexPptInformationAssets || artifacts.informationAssetMap || {};
   const informationAssetMapReady = Boolean(informationAssetMap.path || informationAssetMap.relativePath || informationAssetMap.markdownPath);
-  const ocrTextReady = Boolean(artifacts.ocrTextHints?.path || artifacts.ocrTextHints?.relativePath);
+  const renderedOcrPages = Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages : [];
+  const sourceOcrPages = Array.isArray(artifacts.ocrPages) ? artifacts.ocrPages : [];
+  const normalizeEvidencePath = (value = "") => String(value || "").replace(/\\/g, "/").toLowerCase();
+  const renderedOcrPathByPage = new Map(renderedOcrPages.map((page, index) => [
+    page.pageId || pageIdFromPageNumber(page.pageNumber || index + 1),
+    normalizeEvidencePath(page.path)
+  ]));
+  const hasPathBoundOcrEvidence = Boolean(renderedOcrPathByPage.size && sourceOcrPages.some((page) => page?.imagePath));
+  const currentSourceOcrPages = hasPathBoundOcrEvidence
+    ? sourceOcrPages.filter((page, index) => {
+      const pageId = page.pageId || pageIdFromPageNumber(page.pageNumber || index + 1);
+      return Boolean(renderedOcrPathByPage.get(pageId) && renderedOcrPathByPage.get(pageId) === normalizeEvidencePath(page.imagePath));
+    })
+    : sourceOcrPages;
+  const ocrPageCount = Number(currentSourceOcrPages.length || (!hasPathBoundOcrEvidence ? artifacts.ocrTextHints?.pageCount : 0) || 0);
+  const ocrTextReady = Boolean((artifacts.ocrTextHints?.path || artifacts.ocrTextHints?.relativePath) && ocrPageCount > 0);
+  const ocrCoverageComplete = Boolean(imageTotal > 0 && ocrPageCount >= imageTotal);
   const approvedGates = getApprovedCodexPptGateSet(job);
   const visualSample = artifacts.visualSample || {};
   const sampleHref = job?.id && (visualSample.path || visualSample.relativePath)
@@ -3454,7 +5122,7 @@ function buildDualRouteState(job = null) {
     && visualSample.provider !== "passthrough"
     && visualSample.passthrough !== true
   );
-  const sampleApproved = Boolean(sampleReady && approvedGates.has("sample"));
+  const sampleApproved = Boolean(sampleReady && approvedGates.has("sample") && isFrontendSampleApprovalCurrent(job));
   const fullDeckTestEvidence = getCurrentFullDeckTestEvidence(job);
   const fullDeckApproved = Boolean(fullDeckTestEvidence);
   const codexPptDecisionReady = Boolean(
@@ -3480,77 +5148,148 @@ function buildDualRouteState(job = null) {
   const slideFailed = Number(artifacts.codexPptSlideRunState?.failed || artifacts.codexPptSlideJobs?.failed || 0);
   const slideJobsReady = Boolean(artifacts.codexPptDeckSpec?.path && artifacts.codexPptSlideJobs?.path && artifacts.codexPptSlideRunState?.path && slideJobTotal > 0);
   const slideDispatchReady = Boolean(slideJobsReady && slideJobTotal > 0 && slideDispatched >= slideJobTotal && slideFailed === 0);
-  const slideResultsRecorded = Boolean(slideJobsReady && slideJobTotal > 0 && slideRecorded >= slideJobTotal && slideFailed === 0);
-  const reviewPageIds = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+  const slideResultsRecorded = Boolean(fullVisualCoverageReady && slideFailed === 0);
+  const reviewPageIds = currentVisualImages
     .map((image, index) => image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`)
     .filter(Boolean);
   const imageDeckReview = artifacts.imageDeckReview || {};
   const imageDeckReviewReady = isFrontendImageDeckReviewApproved(artifacts);
+  const semanticBlockedCount = Number(
+    artifacts.visualTextQuality?.summary?.blockedCount
+    || artifacts.visualTextQuality?.blockedCount
+    || artifacts.visualQuality?.summary?.semanticQuality?.blockedCount
+    || artifacts.visualQuality?.semanticQuality?.blockedCount
+    || 0
+  );
+  const generatedVisualPages = new Set(currentVisualImages
+    .map((image, index) => Number(image.pageNumber || pageNumberFromPageId(image.pageId) || index + 1))
+    .filter(Boolean));
   const twoPageTestTarget = Math.min(2, imageTotal || sourcePages || 0);
-  const twoPageTestPages = Array.from({ length: twoPageTestTarget }, (_, index) => index + 1);
+  const samplePageNumber = Number(visualSample.pageNumber || pageNumberFromPageId(visualSample.pageId) || 0);
+  const structureRoles = Array.isArray(artifacts.codexPptOutline?.structureAudit?.pageRoles)
+    ? artifacts.codexPptOutline.structureAudit.pageRoles
+    : [];
+  const sampleRole = structureRoles.find((page) => Number(page.pageNumber || 0) === samplePageNumber)?.role || "content";
+  const contrastPriority = sampleRole === "table"
+    ? ["content", "product", "comparison", "process", "cover"]
+    : ["table", "comparison", "process", "product", "content", "cover"];
+  const contrastPage = contrastPriority
+    .map((role) => structureRoles.find((page) => page.role === role && Number(page.pageNumber || 0) !== samplePageNumber))
+    .find(Boolean);
+  const twoPageTestPages = [...new Set([
+    samplePageNumber || 1,
+    Number(contrastPage?.pageNumber || (samplePageNumber === 1 ? 2 : 1) || 1)
+  ])].filter((pageNumber) => pageNumber >= 1 && pageNumber <= (imageTotal || sourcePages || 0)).slice(0, twoPageTestTarget);
+  const twoPageExternalCalls = twoPageTestPages.filter((pageNumber) => pageNumber !== samplePageNumber).length;
   const twoPageTestGenerated = Boolean(
     fullDeckApproved
-    || (twoPageTestTarget > 0 && imagePageCount === twoPageTestTarget)
+    || (twoPageTestTarget > 0 && twoPageTestPages.length === twoPageTestTarget && twoPageTestPages.every((pageNumber) => generatedVisualPages.has(pageNumber)))
   );
   const twoPageTestReviewReady = Boolean(
     fullDeckApproved
-    || (twoPageTestGenerated && imageDeckReviewReady)
+    || (twoPageTestGenerated && isFrontendImageDeckReviewApproved(artifacts, twoPageTestTarget))
   );
-  const approvedTestPages = new Set((fullDeckTestEvidence?.pages || []).map((page) => Number(page.pageNumber || 0)).filter(Boolean));
-  const preservedTestPages = approvedTestPages.size ? approvedTestPages : new Set(twoPageTestPages);
   const remainingFullDeckPages = Array.from({ length: imageTotal || sourcePages || 0 }, (_, index) => index + 1)
-    .filter((pageNumber) => !preservedTestPages.has(pageNumber));
+    .filter((pageNumber) => !generatedVisualPages.has(pageNumber));
   const requiresFullDeck = remainingFullDeckPages.length > 0;
   const qaAssemblyReady = Boolean(imageDeckReady && (artifacts.codexPptSpeech?.path || artifacts.codexPptSpeech?.relativePath || artifacts.imageDeck?.path));
-  const editableTasks = Array.isArray(job?.editableWorkerTasks?.tasks)
-    ? job.editableWorkerTasks.tasks
-    : Array.isArray(job?.artifacts?.editableWorkerTasks?.tasks)
-      ? job.artifacts.editableWorkerTasks.tasks
-      : Array.isArray(job?.artifacts?.editableWorkerTasks)
-        ? job.artifacts.editableWorkerTasks
-        : [];
+  const topLevelEditableTasks = Array.isArray(job?.editableWorkerTasks?.tasks) ? job.editableWorkerTasks.tasks : [];
+  const artifactEditableTasks = Array.isArray(job?.artifacts?.editableWorkerTasks?.tasks)
+    ? job.artifacts.editableWorkerTasks.tasks
+    : Array.isArray(job?.artifacts?.editableWorkerTasks)
+      ? job.artifacts.editableWorkerTasks
+      : [];
+  const editableTasks = artifactEditableTasks.length >= topLevelEditableTasks.length
+    ? artifactEditableTasks
+    : topLevelEditableTasks;
   const recordedEditablePages = editableTasks.filter((task) => task.status === "recorded").length
     || Number(artifacts.pageEvidence?.summary?.readyPages || artifacts.editableFinal?.summary?.recordedPages || 0);
   const finalPages = Number(artifacts.editableFinal?.summary?.page_count || artifacts.editableFinal?.pptxEditability?.slideCount || 0);
-  const finalReady = Boolean(artifacts.editableFinal?.path && (!expectedPages || finalPages >= expectedPages));
-  const reviewReady = artifacts.manualReview?.status === "approved";
-  const finalGateProductReady = Boolean(artifacts.finalGate?.productReady || artifacts.deliveryGate?.productReady || artifacts.editableFinal?.finalGate?.productReady || artifacts.editableFinal?.productReady);
+  const hasPartialFinal = Boolean(artifacts.editableFinal?.path && expectedPages && finalPages > 0 && finalPages < expectedPages);
+  const completedEditablePages = Math.max(recordedEditablePages, finalPages);
+  const editability = artifacts.editableFinal?.pptxEditability || {};
+  const rasterBackgroundSlides = Number(editability.rasterBackgroundSlides || editability.fullSlidePictures || 0);
+  const editabilityProfile = finalPages
+    ? rasterBackgroundSlides
+      ? `混合可编辑：文字和独立对象可编辑，${rasterBackgroundSlides} 页使用整页设计背景`
+      : `对象级可编辑：${Number(editability.nativeTextBoxes || 0)} 个文字框、${Number(editability.nativeShapes || 0)} 个形状`
+    : recordedEditablePages
+      ? `已重建 ${recordedEditablePages} 页，等待合成可编辑 PPT`
+      : "尚未生成可编辑页面";
+  const editablePreviewPageIds = Array.from(new Set([
+    ...editableTasks
+      .filter((task) => task.status === "recorded")
+      .map((task) => task.pageId || task.id || task.taskId)
+      .filter(Boolean),
+    ...(expectedPages > 0 && finalPages === expectedPages
+      ? Array.from({ length: expectedPages }, (_, index) => pageIdFromPageNumber(index + 1))
+      : [])
+  ]));
+  const finalReady = Boolean(artifacts.editableFinal?.path && expectedPages > 0 && finalPages === expectedPages);
+  const manualReview = artifacts.manualReview || {};
+  const sampleReviewReady = Boolean(manualReview.status === "approved" && (manualReview.scope === "sample" || manualReview.partialSourceCoverage === true));
+  const reviewReady = Boolean(manualReview.status === "approved" && manualReview.scope !== "sample" && manualReview.partialSourceCoverage !== true && (!expectedPages || finalPages >= expectedPages));
+  const finalGateProductReady = Boolean(currentDeliveryBundle?.finalGate?.productReady || artifacts.finalGate?.productReady || artifacts.deliveryGate?.productReady || artifacts.editableFinal?.finalGate?.productReady || artifacts.editableFinal?.productReady);
   const deliverableReady = Boolean(finalReady && reviewReady && finalGateProductReady);
-  const routeAReady = Boolean(qaAssemblyReady && slideResultsRecorded && sampleApproved && codexPptDecisionReady && informationAssetMapReady && imageDeckReviewReady);
+  const routeAReady = Boolean(deliverableReady || (qaAssemblyReady && slideResultsRecorded && sampleApproved && codexPptDecisionReady && informationAssetMapReady && imageDeckReviewReady));
   const routeBStarted = Boolean(recordedEditablePages || finalPages || artifacts.editableRun);
+  const readyEditablePages = editableTasks.filter((task) => task.status === "ready").length;
+  const activeEditableRuns = Array.isArray(artifacts.editableWorkerBatchRuns)
+    ? artifacts.editableWorkerBatchRuns.filter((run) => run?.status === "running")
+    : [];
+  const claimedEditablePages = editableTasks.filter((task) => ["claimed", "running", "recording"].includes(task.status)).length;
+  const activeEditableBatchPages = activeEditableRuns.reduce((largestBatch, run) => (
+    Math.max(largestBatch, Number(run?.maxPages || run?.selectedCount || 0))
+  ), 0);
+  const runningEditablePages = activeEditableBatchPages || claimedEditablePages;
   const routeBReady = deliverableReady;
   const routeAStatus = routeAReady ? "ready" : job?.id ? "active" : "pending";
-  const routeBStatus = routeBReady ? "ready" : routeBStarted ? "active" : routeAReady ? "optional" : "locked";
+  const routeBStatus = routeBReady
+    ? "ready"
+    : imageDeckReady && !imageDeckReviewReady
+      ? "locked"
+      : routeBStarted ? "active" : routeAReady ? "optional" : "locked";
   const editableTotal = expectedPages || editableTasks.length || finalPages || 0;
+  const testPageLabel = `${Math.max(1, Number(twoPageTestTarget || 1))} 页测试图`;
   const nextUserConfirmation = !codexPptDecisionReady
     ? "需要你确认大纲、视觉风格和生图后端。"
-    : !sampleApproved
-      ? "需要你确认 1 页样张。"
+    : !sampleReady
+      ? "需要你授权生成 1 页样张。"
+      : !sampleApproved
+        ? "需要你确认 1 页样张作为整套风格基准。"
       : !twoPageTestGenerated
-        ? "下一步先生成 2 页测试图。"
+        ? `下一步先生成 ${testPageLabel}。`
         : !twoPageTestReviewReady
-          ? "需要你逐页复核 2 页测试图。"
+          ? `样张已确认；还需要检查 ${testPageLabel} 是否保持同一风格。`
           : requiresFullDeck && !fullDeckApproved
-            ? "需要你确认 2 页测试通过，才能开放剩余页面。"
+            ? `需要你确认 ${testPageLabel} 通过，才能开放剩余页面。`
             : "";
   const backgroundComplete = Boolean(slideResultsRecorded && qaAssemblyReady);
   const backgroundActive = Boolean(sampleApproved && !backgroundComplete);
-  const routeANextAction = !job?.id
+  const routeANextAction = deliverableReady
+    ? "可编辑 PPT 已通过交付门禁，可直接下载。"
+    : !job?.id
     ? "先上传材料并创建图片版 PPT 任务。"
     : imageDeckReady
       ? imageDeckReviewReady
         ? "图片版 PPT 已完成，可下载或继续转成可编辑 PPT。"
-        : "当前已有图片版 PPT，请先逐页复核现有结果；不会自动重新生图。"
+        : semanticBlockedCount
+          ? `本地质检给出 ${semanticBlockedCount} 页内容保真提示，请打开整套图片复核；对照原稿后可确认无误或标记重做。`
+          : "当前已有图片版 PPT，请先逐页复核现有结果；不会自动重新生图。"
     : !codexPptDecisionReady
       ? "先弹出确认界面：确认大纲、视觉风格和生图后端。"
-      : !sampleApproved
-        ? "先弹出样张确认界面。"
+      : !sampleReady
+        ? informationAssetMapReady && ocrTextReady
+          ? "准备已完成，下一步确认调用图片 API 生成 1 页样张。"
+          : "先完成本地准备，再确认调用图片 API 生成 1 页样张。"
+        : !sampleApproved
+          ? "样张已生成，请查看并确认。"
         : !twoPageTestGenerated
-          ? "先生成 2 页测试图，确认字体、色彩和版式一致。"
+          ? `先生成 ${testPageLabel}，确认字体、色彩和版式一致。`
           : !twoPageTestReviewReady
-            ? "逐页复核 2 页测试图，两页都通过后才能继续。"
+            ? `样张只确定风格方向；请再检查 ${testPageLabel} 是否保持一致。`
             : requiresFullDeck && !fullDeckApproved
-              ? "确认 2 页测试通过，开放剩余页面生成。"
+              ? `确认 ${testPageLabel} 通过，开放剩余页面生成。`
               : !qaAssemblyReady
                 ? "测试已通过，正在生成或复核剩余图片页。"
           : finalReady && !reviewReady
@@ -3560,8 +5299,16 @@ function buildDualRouteState(job = null) {
               : "可编辑 PPT 已完成交付门禁，可进入下载与复核。";
 
   return {
-    message: imageDeckReady
-      ? `图片版 PPT 已形成阶段交付；可继续进入可编辑重建。当前可编辑进度 ${formatProgress(recordedEditablePages || finalPages, editableTotal)}。`
+    message: deliverableReady
+      ? "图片版和可编辑版均已完成复核，最终 PPT 已开放下载。"
+      : imageDeckReady
+      ? imageDeckReviewReady
+        ? `图片版 PPT 已完成内容与视觉复核；可继续进入可编辑重建。当前可编辑进度 ${formatProgress(completedEditablePages, editableTotal)}。`
+        : semanticBlockedCount
+          ? `图片版 PPT 已生成；${semanticBlockedCount} 页有自动检查提示。逐页对照原稿并明确确认后，即可进入可编辑重建。`
+          : `图片版 PPT 已生成，但仍需完成内容与视觉复核。当前可编辑进度 ${formatProgress(completedEditablePages, editableTotal)}。`
+      : imageDeckDraft
+        ? `当前只有 ${imageDeckPageCount}/${imageTotal} 页图片测试稿。请继续生成剩余页面，完整覆盖后才能进入正式可编辑重建。`
       : job?.id
         ? "当前先推进图片版 PPT。完成图片页和图片型 PPT 后，再决定是否转成可编辑 PPT。"
         : "上传材料后先创建图片版 PPT 任务，可编辑重建作为第二阶段按需开启。",
@@ -3569,9 +5316,15 @@ function buildDualRouteState(job = null) {
     routeA: {
       status: routeAStatus,
       imageDeckReady,
+      imageDeckAvailable,
+      imageDeckDraft,
+      imageDeckPageCount,
+      fullVisualCoverageReady,
       codexPptDecisionReady,
       informationAssetMapReady,
       ocrTextReady,
+      ocrPageCount,
+      ocrCoverageComplete,
       slideJobsReady,
       slideDispatchReady,
       slideResultsRecorded,
@@ -3583,17 +5336,21 @@ function buildDualRouteState(job = null) {
       fullDeckTestEvidence,
       twoPageTestTarget,
       twoPageTestPages,
+      twoPageExternalCalls,
       twoPageTestGenerated,
       twoPageTestReviewReady,
       remainingFullDeckPages,
+      hasPartialFinal,
       requiresFullDeck,
       nextUserConfirmation,
       userConfirmLabel: !codexPptDecisionReady
         ? "待确认方案"
-        : !sampleApproved
-          ? "待确认样张"
+        : !sampleReady
+          ? "待生成样张"
+          : !sampleApproved
+            ? "待确认样张"
           : !twoPageTestReviewReady
-            ? "待复核 2 页测试"
+            ? "待检查 2 页风格一致性"
             : requiresFullDeck && !fullDeckApproved
               ? "待确认测试通过"
               : "已确认",
@@ -3607,33 +5364,58 @@ function buildDualRouteState(job = null) {
       visualLabel: imageTotal ? formatProgress(imagePageCount, imageTotal) : imagePageCount ? `${imagePageCount} 页` : "待生成",
       summary: routeAReady
         ? "图片版 PPT 已完成，可以先作为阶段交付。"
+        : imageDeckDraft
+          ? `当前是 ${imageDeckPageCount}/${imageTotal} 页图片测试稿；通过后继续生成剩余页面。`
         : !codexPptDecisionReady
           ? "先确认生成方案：大纲、视觉风格和生图后端需要你明确确认。"
-          : !sampleApproved
-            ? "先看 1 页样张，确认风格、版式节奏和文字质量。"
+          : !sampleReady
+            ? "准备 1 页视觉样张；调用图片 API 前会再次请你确认。"
+            : !sampleApproved
+              ? "样张已生成，请确认风格、版式节奏和文字质量。"
             : "样张已确认，后续会在后台完成。",
       // 不需要用户操作的步骤保持后台处理；这里只展示确认点和交付状态。
       steps: [
         { label: "确认方案", detail: codexPptDecisionReady ? "大纲、风格和生图后端已确认" : "需要弹出确认界面", state: codexPptDecisionReady ? "done" : job?.id ? "active" : "pending" },
         { label: "确认样张", detail: sampleApproved ? "样张已确认" : sampleReady ? "样张已生成，等待确认" : "等待生成 1 页样张", state: sampleApproved ? "done" : sampleReady ? "active" : codexPptDecisionReady ? "active" : "pending" },
         { label: "后台生成", detail: backgroundComplete ? "已完成" : backgroundActive ? "后台处理中" : "确认完成后自动处理", state: backgroundComplete ? "done" : backgroundActive ? "active" : "pending" },
-        { label: "下载图片版", detail: imageDeckReady ? "图片版 PPT 可下载" : "后台完成后开放下载", state: imageDeckReady ? "done" : backgroundActive ? "active" : "pending" }
+        {
+          label: "下载图片版",
+          detail: imageDeckReady
+            ? imageDeckReviewReady ? "完整图片版已复核，可下载" : "完整图片版待内容与视觉复核"
+            : imageDeckDraft ? `${imageDeckPageCount} 页测试稿可下载检查` : "后台完成后开放下载",
+          state: imageDeckReviewReady ? "done" : imageDeckReady || backgroundActive ? "active" : "pending"
+        }
       ]
     },
     routeB: {
       status: routeBStatus,
+      prepared: Boolean(artifacts.editableRun),
+      workerBriefsReady: Boolean(artifacts.workerBriefs),
+      workerTaskCount: editableTasks.length,
+      readyEditablePages,
+      runningEditablePages,
       finalReady,
       reviewReady,
+      sampleReviewReady,
       deliverableReady,
-      editableLabel: editableTotal ? formatProgress(recordedEditablePages || finalPages, editableTotal) : routeBStarted ? `${recordedEditablePages || finalPages} 页` : "未开始",
-      summary: routeAReady
-        ? "如需可编辑 PPT，系统会在后台准备；完成后只需要逐页确认是否合格。"
-        : "等待图片版 PPT 完成后再开启，可先完成阶段交付。",
+      editabilityProfile,
+      rasterBackgroundSlides,
+      previewPageIds: editablePreviewPageIds,
+      editableLabel: imageDeckReady && !imageDeckReviewReady && routeBStarted
+        ? `历史草稿 ${formatProgress(completedEditablePages, editableTotal || completedEditablePages)}`
+        : editableTotal ? formatProgress(completedEditablePages, editableTotal) : routeBStarted ? `${completedEditablePages} 页` : "未开始",
+      summary: imageDeckReady && !imageDeckReviewReady
+        ? `图片版复核完成前暂停可编辑重建${routeBStarted ? `；已有 ${completedEditablePages} 页仅作为历史草稿，不会继续扩展` : ""}。`
+        : routeAReady
+          ? "如需可编辑 PPT，系统会在后台准备；完成后只需要逐页确认是否合格。"
+        : sampleReviewReady
+          ? `${finalPages} 页可编辑测试稿已复核；等待完整图片版后继续正式重建。`
+          : "等待完整图片版 PPT 后再开启正式可编辑重建。",
       steps: [
-        { label: "使用图片版", detail: imageDeckReady ? "图片版已就绪" : "等待图片版", state: imageDeckReady ? "done" : "locked" },
-        { label: "准备可编辑版", detail: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "后台处理中" : "等待开始", state: artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
-        { label: "生成可编辑页", detail: editableTotal ? `${formatProgress(recordedEditablePages || finalPages, editableTotal)} 可编辑页` : "后台处理中", state: recordedEditablePages || finalPages ? (editableTotal && (recordedEditablePages || finalPages) >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
-        { label: "逐页确认", detail: reviewReady ? "可以逐页确认" : "等待确认", state: reviewReady ? "done" : finalPages ? "active" : "pending" },
+        { label: "使用图片版", detail: imageDeckReady ? imageDeckReviewReady ? "图片版已就绪并复核" : "图片版待逐页复核" : "等待图片版", state: imageDeckReady && imageDeckReviewReady ? "done" : "locked" },
+        { label: "准备可编辑版", detail: imageDeckReady && !imageDeckReviewReady ? "图片复核完成后开放" : artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "后台处理中" : "等待开始", state: imageDeckReady && !imageDeckReviewReady ? "locked" : artifacts.ocrTextHints?.path || artifacts.editableHints?.summary ? "done" : imageDeckReady ? "active" : "locked" },
+        { label: "生成可编辑页", detail: imageDeckReady && !imageDeckReviewReady ? (completedEditablePages ? `${completedEditablePages} 页历史草稿，当前暂停` : "等待图片复核") : editableTotal ? `${formatProgress(completedEditablePages, editableTotal)} 可编辑页` : "后台处理中", state: imageDeckReady && !imageDeckReviewReady ? "locked" : completedEditablePages ? (editableTotal && completedEditablePages >= editableTotal ? "done" : "active") : imageDeckReady ? "pending" : "locked" },
+        { label: "逐页确认", detail: reviewReady ? "完整范围已确认" : sampleReviewReady ? `${finalPages} 页测试稿已复核，完整范围待继续` : "等待确认", state: reviewReady ? "done" : finalReady ? "active" : "pending" },
         { label: "下载可编辑版", detail: deliverableReady ? "可下载交付物" : finalReady ? "等待人工复核后下载" : "等待最终交付", state: deliverableReady ? "done" : finalReady ? "active" : "pending" }
       ]
     }
@@ -4517,12 +6299,12 @@ function WorkflowFailedTaskRecoveryPanel({ failedTasks = [], onFocusTask, onRetr
       <div className="workflow-failed-recovery-head">
         <div>
           <b>失败页面恢复</b>
-          <span>失败的视觉统一和可编辑重建页面任务会集中在这里重试。</span>
+          <span>失败页不会自动再次运行。先查看原因并重置，随后再做重跑预检和额度确认。</span>
         </div>
         <div className="workflow-failed-recovery-actions">
           <small>{failedTasks.length} 个失败</small>
           <button type="button" onClick={() => onRetryFailedTasks?.()} disabled={bulkBusy}>
-            {bulkBusy ? "正在重试全部..." : "重试全部失败项"}
+            {bulkBusy ? "正在清理失败页..." : "清理并准备全部失败页"}
           </button>
         </div>
       </div>
@@ -4532,11 +6314,11 @@ function WorkflowFailedTaskRecoveryPanel({ failedTasks = [], onFocusTask, onRetr
             <div>
               <b>{task.taskId}</b>
               <span>{task.skillTitle}</span>
-              <small>{shortPath(task.primaryPath) || task.agentId || task.nextAction}</small>
+              <small>{task.failureReason || shortPath(task.primaryPath) || task.agentId || task.nextAction}</small>
             </div>
             <button type="button" onClick={() => { onSelectTask?.(task.key); onFocusTask?.(task); }}>定位</button>
             <button type="button" onClick={() => onRetryTask?.(task)} disabled={retryBusyKey === task.key}>
-              {retryBusyKey === task.key ? "正在重试..." : "重试"}
+              {retryBusyKey === task.key ? "正在重置..." : "查看并重置"}
             </button>
           </div>
         ))}
@@ -4596,12 +6378,13 @@ function WorkflowUnifiedTaskDetail({ detail, onFocusTask, onRetryTask, retryBusy
         <WorkflowArtifact label="提示/结果路径" value={shortPath(detail.primaryPath) || "待处理"} />
         <WorkflowArtifact label="边界" value={detail.boundary} />
         <WorkflowArtifact label="校验状态" value={detail.validationLabel || "待校验"} />
+        {detail.failureReason ? <WorkflowArtifact label="失败原因" value={detail.failureReason} /> : null}
         <WorkflowArtifact label="下一步" value={detail.nextAction} />
       </div>
       <div className="workflow-unified-detail-actions">
         <button type="button" onClick={() => onFocusTask?.(detail)}>定位详情面板</button>
         <button type="button" onClick={() => onRetryTask?.(detail)} disabled={detail.status === "recorded" || retryBusyKey === detail.key}>
-          {retryBusyKey === detail.key ? "正在重试..." : "重试页面"}
+          {retryBusyKey === detail.key ? "正在重置..." : detail.status === "failed" ? "清理并重新准备" : "重新处理页面"}
         </button>
       </div>
     </div>
@@ -4648,6 +6431,9 @@ function buildUnifiedTaskDetail(lane, task) {
   const primaryPath = isCodex
     ? task.imagePath || task.promptFile || task.relativePath || ""
     : task.pageResult || task.promptFile || task.relativePath || task.pageDir || "";
+  const failureReason = status === "failed"
+    ? formatEditableTaskIssue(task) || uiZh(task.error || task.message || "页面执行失败，请查看日志后重置。")
+    : "";
   const nextAction = isCodex
     ? status === "recorded"
       ? "所有图片页记录后组装图片型 PPT。"
@@ -4674,6 +6460,7 @@ function buildUnifiedTaskDetail(lane, task) {
     validationLabel: task.validationStatus === "passed" ? "校验通过" : task.validationStatus === "failed" ? "校验失败" : task.generated ? "已生成待校验" : "待生成",
     level: status === "failed" ? "blocked" : status === "recorded" ? "ready" : status === "running" || status === "claimed" ? "running" : "pending",
     agentId: task.agentId || "",
+    failureReason,
     primaryPath,
     boundary: isCodex ? "仅处理图片页" : "可编辑页面产物",
     nextAction
@@ -5093,7 +6880,7 @@ function getLowConfidenceOcrLines(data = null) {
   });
 }
 
-function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, onOpenPageTasks, onOpenWorkflow }) {
+function WorkflowDeliveryPortal({ autoOpenReview = false, job = null, onCreateWorkflow, onGoMaterials, onOpenPageTasks, onOpenWorkflow, onReviewAutoOpened }) {
   const [deliveryBundle, setDeliveryBundle] = useState(null);
   const [artifactBundle, setArtifactBundle] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -5169,11 +6956,15 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
 
   useEffect(() => {
     if (!job?.id || latestDeliveryRun?.status !== "running") return undefined;
+    const controller = new AbortController();
     const timer = window.setInterval(() => {
-      loadDelivery(job.id);
-      loadDeliveryWorkerRuns(job.id);
+      loadDelivery(job.id, controller.signal);
+      loadDeliveryWorkerRuns(job.id, controller.signal);
     }, 4000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
   }, [job?.id, latestDeliveryRun?.id, latestDeliveryRun?.status]);
 
   async function retryStalePageEvidence() {
@@ -5284,10 +7075,25 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
         apply: true,
         reason: "frontend reset final visual QA failed editable pages"
       });
+      if (result?.ok === false || Number(result?.failed || 0) > 0) {
+        const failures = (result?.results || []).filter((item) => item?.ok === false);
+        throw new Error(failures.length
+          ? `以下页面重置失败：${failures.map((item) => `${item.pageId}（${item.error || "未知错误"}）`).join("、")}`
+          : "视觉 QA 失败页没有全部重置成功。");
+      }
       setRecoveryResult({ finalVisualQa: result });
+      setWorkerPreflightBundle(result.workerBatchPreview || null);
       setRecoveryMessage(result.recovery?.message || `已重置 ${result.retried || 0} 个视觉 QA 失败页。下一步请启动这些页面重建任务。`);
       await loadDelivery(job.id);
     } catch (retryError) {
+      const partialResult = retryError?.data;
+      if (Array.isArray(partialResult?.results)) {
+        const succeededPages = partialResult.results.filter((item) => item?.ok && item?.retried).map((item) => item.pageId);
+        const failedPages = partialResult.results.filter((item) => item?.ok === false).map((item) => item.pageId);
+        setRecoveryResult({ finalVisualQa: partialResult });
+        setRecoveryMessage(`页面重置只完成了一部分：成功 ${succeededPages.length} 页${succeededPages.length ? `（${succeededPages.join("、")}）` : ""}，失败 ${failedPages.length} 页${failedPages.length ? `（${failedPages.join("、")}）` : ""}。已刷新当前状态，请只处理失败页。`);
+        await loadDelivery(job.id);
+      }
       setError(getErrorMessage(retryError));
     } finally {
       setRecoveryBusy("");
@@ -5510,10 +7316,15 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
     setRecoveryMessage("");
     setError("");
     try {
+      const taskBundle = await api.workflowWorkerTasks(job.id);
+      const taskByPage = new Map((taskBundle.tasks || []).map((task) => [task.pageId, task]));
       for (const pageId of latestDeliveryFailurePages) {
+        const task = taskByPage.get(pageId) || {};
         await api.workflowWorkerTaskAction(job.id, pageId, "reset", {
           reason: "frontend delivery reset latest failed editable page before retry",
-          confirmLost: true
+          confirmLost: Boolean(task.attemptId || task.leaseToken || ["running", "claimed"].includes(task.status)),
+          attemptId: task.attemptId || "",
+          leaseToken: task.leaseToken || ""
         });
       }
       setWorkerPreflightBundle(null);
@@ -5627,7 +7438,7 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       </div>
       {error ? <p className="workflow-error">{error}</p> : null}
       {recoveryMessage ? <p className="workflow-note">{recoveryMessage}</p> : null}
-      {recoveryResult ? (
+      {recoveryResult && !recoveryResult.finalVisualQa ? (
         <WorkflowPageEvidenceRecoveryResult
           freshRunBusy={recoveryBusy === "fresh-editable-run"}
           onFreshEditableRun={refreshEditableRunForStaleEvidence}
@@ -5638,39 +7449,54 @@ function WorkflowDeliveryPortal({ job = null, onCreateWorkflow, onGoMaterials, o
       {loading && !deliveryBundle ? <p className="workflow-note">正在读取交付状态和产物链接...</p> : null}
       <WorkflowDeliverySummary
         artifactBundle={artifactBundle}
+        autoOpenReview={autoOpenReview}
         bundle={deliveryBundle}
         job={job}
+        onAuthorizeEditableWorkerSpend={authorizeEditableWorkerSpend}
         onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
         onOpenWorkflow={onOpenWorkflow}
+        onPreviewEditableWorkerStart={previewEditableWorkerStart}
+        onPreviewFinalVisualQaRetry={previewFinalVisualQaRetry}
         onRefreshDelivery={() => loadDelivery(job.id)}
         onRecomposeEditableFinal={recomposeEditableFinal}
+        onRetryFinalVisualQaPages={retryFinalVisualQaPages}
+        onReviewAutoOpened={onReviewAutoOpened}
+        onStartEditableWorker={startEditableWorkerFromDelivery}
+        recoveryBusy={recoveryBusy}
+        recoveryResult={recoveryResult}
         status={status}
+        workerPreflightBundle={workerPreflightBundle}
+        workerPreflightBusy={workerPreflightBusy}
+        workerStartBusy={workerStartBusy}
       />
     </div>
   );
 }
 
-function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPageTasks, onOpenWorkflow, onRefreshDelivery, onRecomposeEditableFinal, status }) {
+function WorkflowDeliverySummary({ artifactBundle, autoOpenReview = false, bundle, job = null, onAuthorizeEditableWorkerSpend, onOpenPageTasks, onOpenWorkflow, onPreviewEditableWorkerStart, onPreviewFinalVisualQaRetry, onRefreshDelivery, onRecomposeEditableFinal, onRetryFinalVisualQaPages, onReviewAutoOpened, onStartEditableWorker, recoveryBusy = "", recoveryResult = null, status, workerPreflightBundle = null, workerPreflightBusy = false, workerStartBusy = false }) {
   const finalGate = bundle?.finalGate || null;
   const finalDownloadState = getFinalDownloadState(finalGate);
   const [manualReviewBusy, setManualReviewBusy] = useState(false);
   const [manualReviewError, setManualReviewError] = useState("");
   const [showReviewWorkbench, setShowReviewWorkbench] = useState(false);
   const [showRepairGuide, setShowRepairGuide] = useState(false);
+  const [persistedPageVisualReview, setPersistedPageVisualReview] = useState(job?.artifacts?.pageVisualReview || null);
+
+  useEffect(() => {
+    setPersistedPageVisualReview(job?.artifacts?.pageVisualReview || null);
+  }, [job?.artifacts?.pageVisualReview?.updatedAt, job?.id]);
+
+  useEffect(() => {
+    if (!autoOpenReview || !bundle?.pageEvidence?.pages?.length) return;
+    setShowReviewWorkbench(true);
+    onReviewAutoOpened?.();
+  }, [autoOpenReview, bundle?.pageEvidence?.pages?.length, onReviewAutoOpened]);
 
   async function approveFinalManualReview() {
     if (!job?.id || manualReviewBusy) return;
     const finalArtifact = bundle?.final?.artifact || job?.artifacts?.editableFinal || null;
     const sourcePages = Number(bundle?.finalGate?.checks?.sourcePages || bundle?.coverage?.sourcePages || job?.sourcePages || job?.sourceMeta?.pageCount || job?.artifacts?.sourceMeta?.pageCount || 0);
     const finalPages = Number(bundle?.finalGate?.checks?.finalPages || bundle?.coverage?.finalPages || finalArtifact?.summary?.page_count || finalArtifact?.pptxEditability?.slideCount || 0);
-    const isSampleReview = Boolean(sourcePages && finalPages && finalPages < sourcePages);
-    const reviewScopeText = finalPages
-      ? isSampleReview
-        ? `\n\n本次只记录当前小样本复核：${finalPages}/${sourcePages} 页。完整产品交付仍需要跑完全部页面并重新复核。`
-        : `\n\n本次复核范围：${finalPages} 页完整最终 PPT。`
-      : "";
-    const confirmed = window.confirm(`确认已经逐页对比原始页、图片版和可编辑页，且所有页面都已点击“通过”？确认后将当前最终 PPT 标记为人工复核通过。${reviewScopeText}`);
-    if (!confirmed) return;
     setManualReviewBusy(true);
     setManualReviewError("");
     try {
@@ -5694,6 +7520,7 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
       reviewer: "operator",
       note: `Marked ${pageId} as ${status} from page visual review workbench.`
     });
+    if (result?.artifacts?.pageVisualReview) setPersistedPageVisualReview(result.artifacts.pageVisualReview);
     return result?.artifacts?.pageVisualReview?.marks?.[pageId] || { pageId, status };
   }
 
@@ -5713,12 +7540,23 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
       />
       {showRepairGuide ? (
         <WorkflowDeliveryRepairGuide
+          bundle={bundle}
           finalGate={finalGate}
+          onAuthorizeEditableWorkerSpend={onAuthorizeEditableWorkerSpend}
           onClose={() => setShowRepairGuide(false)}
           onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+          onPreviewEditableWorkerStart={onPreviewEditableWorkerStart}
+          onPreviewFinalVisualQaRetry={onPreviewFinalVisualQaRetry}
           onRefreshDelivery={onRefreshDelivery}
           onRecomposeFinal={onRecomposeEditableFinal}
+          onRetryFinalVisualQaPages={onRetryFinalVisualQaPages}
+          onStartEditableWorker={onStartEditableWorker}
+          recoveryBusy={recoveryBusy}
+          recoveryResult={recoveryResult}
           status={status}
+          workerPreflightBundle={workerPreflightBundle}
+          workerPreflightBusy={workerPreflightBusy}
+          workerStartBusy={workerStartBusy}
         />
       ) : null}
       {manualReviewError ? <p className="workflow-error">{manualReviewError}</p> : null}
@@ -5729,16 +7567,23 @@ function WorkflowDeliverySummary({ artifactBundle, bundle, job = null, onOpenPag
               artifactBundle={artifactBundle}
               onApproveFinalReview={approveFinalManualReview}
               onClose={() => setShowReviewWorkbench(false)}
+              onOpenFailedPages={() => {
+                setShowReviewWorkbench(false);
+                setShowRepairGuide(true);
+              }}
               onMarkPage={markPageVisualReview}
               onOpenPageTasks={onOpenPageTasks || onOpenWorkflow}
+              onRefresh={onRefreshDelivery}
               pageEvidence={bundle?.pageEvidence}
-              pageVisualReview={job?.artifacts?.pageVisualReview || null}
+              pageVisualQa={bundle?.finalEvidence?.summary?.visualQa || null}
+              pageVisualReview={persistedPageVisualReview}
               reviewBusy={manualReviewBusy}
+              sourcePages={Number(bundle?.finalGate?.checks?.sourcePages || bundle?.coverage?.sourcePages || 0)}
             />
           </div>
         </div>
       ) : null}
-      <WorkflowDeliveryUserHint artifactBundle={artifactBundle} finalGate={finalGate} onBackToWorkbench={onOpenWorkflow} />
+      <WorkflowDeliveryUserHint artifactBundle={artifactBundle} coverage={bundle?.coverage} finalGate={finalGate} job={job} onBackToWorkbench={onOpenWorkflow} />
     </div>
   );
 }
@@ -5749,18 +7594,26 @@ function workflowFactNumber(status = {}, label = "") {
   return Number.isFinite(value) ? value : 0;
 }
 
-function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onBackToWorkbench }) {
+function WorkflowDeliveryUserHint({ artifactBundle = null, coverage = null, finalGate = null, job = null, onBackToWorkbench }) {
   const imageDeck = (artifactBundle?.links || []).find((link) => link.key === "image-deck");
   const productReady = Boolean(finalGate?.productReady);
+  const sourcePages = Number(coverage?.sourcePages || finalGate?.checks?.sourcePages || 0);
+  const imageDeckPages = Number(coverage?.imageDeckPages || coverage?.visualPages || 0);
+  const fullImageDeck = Boolean(sourcePages > 0 && imageDeckPages >= sourcePages);
+  const imageDeckReviewReady = isFrontendImageDeckReviewApproved(job?.artifacts || {});
   if (productReady || !imageDeck?.href) return null;
   return (
     <div className="workflow-delivery-user-hint">
       <div>
-        <b>图片版可先交付</b>
-        <span>图片版 PPT 已经可以作为阶段交付。可编辑版未通过前，先下载图片版给客户看也可以。</span>
+        <b>{fullImageDeck ? imageDeckReviewReady ? "完整图片版已复核" : "完整图片版待内容与视觉复核" : `${imageDeckPages || "当前"} 页图片测试稿`}</b>
+        <span>{fullImageDeck
+          ? imageDeckReviewReady
+            ? "完整图片版 PPT 已完成内容与视觉复核；可编辑版仍需通过交付门禁。"
+            : "页面已经齐全，但风格差异尚未逐页确认，不能作为已复核交付文件。"
+          : `当前文件只覆盖 ${imageDeckPages}/${sourcePages || "?"} 页，只用于内部测试和风格确认，不能作为客户交付文件。`}</span>
       </div>
       <div className="workflow-delivery-user-actions">
-        <a className="btn primary" href={imageDeck.href}>下载图片版 PPT</a>
+        <a className={fullImageDeck && imageDeckReviewReady ? "btn primary" : "btn"} href={imageDeck.href}>{fullImageDeck ? imageDeckReviewReady ? "下载已复核图片版 PPT" : "下载待复核图片版 PPT" : `下载 ${imageDeckPages} 页测试稿`}</a>
         <button className="btn" type="button" onClick={onBackToWorkbench} disabled={!onBackToWorkbench}>回到工作台</button>
       </div>
     </div>
@@ -5769,13 +7622,18 @@ function WorkflowDeliveryUserHint({ artifactBundle = null, finalGate = null, onB
 
 function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, finalGate = null, job = null, onOpenPageTasks, onOpenRepair, onOpenReview, onOpenWorkflow, onRecomposeFinal, status = {} }) {
   const checks = finalGate?.checks || {};
+  const visualQaPassed = checks.visualQaPassed === true;
+  const visualQaFailed = checks.visualQaStatus === "failed";
   const hasFinal = Boolean(checks.hasFinal || bundle?.final?.artifact || job?.artifacts?.editableFinal);
+  const imageDeckExists = Boolean(job?.artifacts?.imageDeck?.path || job?.artifacts?.visualImages?.length);
+  const imageDeckReviewReady = isFrontendImageDeckReviewApproved(job?.artifacts || {});
   const reviewReady = Boolean(
     hasFinal
     && checks.validationPassed === true
     && checks.editabilityPassed === true
     && checks.powerPointOpenable === true
     && checks.noFullSlideRaster === true
+    && visualQaPassed
     && checks.fullSourceCoverage === true
     && checks.manualReviewRecorded !== true
   );
@@ -5795,11 +7653,14 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
       ? "文件结构已通过，最后只需要人工确认视觉内容。"
       : hasFinal
         ? issueText
-        : "先完成路线 B 的可编辑重建，再进入交付检查。";
+        : imageDeckExists && !imageDeckReviewReady
+          ? "先返回图片版逐页复核；复核完成前，可编辑重建保持暂停。"
+          : "先完成路线 B 的可编辑重建，再进入交付检查。";
   const items = [
     { label: "页数", ok: checks.fullSourceCoverage === true, value: checks.fullSourceCoverage ? "通过" : formatDeliveryCheckValue(checks.finalPages, checks.sourcePages) },
     { label: "可打开", ok: checks.powerPointOpenable === true, value: checks.powerPointOpenable ? "通过" : "未通过" },
     { label: "可编辑性", ok: checks.editabilityPassed === true && checks.noFullSlideRaster === true, value: checks.editabilityPassed && checks.noFullSlideRaster ? "通过" : "未通过" },
+    { label: "视觉匹配", ok: visualQaPassed, value: visualQaFailed ? "未通过" : visualQaPassed ? "通过" : "待检查" },
     { label: "视觉复核", ok: checks.manualReviewRecorded === true, value: checks.manualReviewRecorded ? "已复核" : reviewReady ? "待确认" : "待修复" }
   ];
   const failedLabels = items.filter((item) => !item.ok).map((item) => item.label);
@@ -5831,10 +7692,15 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
         ) : hasFinal ? (
           <>
             <button className="btn primary" type="button" onClick={onOpenRepair} disabled={!onOpenRepair}>修复问题</button>
-            <button className="btn" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
+            {checks.fullSourceCoverage === true && !visualQaFailed ? <button className="btn" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button> : null}
           </>
         ) : (
-          <button className="btn primary" type="button" onClick={onOpenPageTasks || onOpenWorkflow} disabled={!onOpenPageTasks && !onOpenWorkflow}>继续可编辑重建</button>
+          <button
+            className="btn primary"
+            type="button"
+            onClick={imageDeckExists && !imageDeckReviewReady ? onOpenWorkflow : onOpenPageTasks || onOpenWorkflow}
+            disabled={imageDeckExists && !imageDeckReviewReady ? !onOpenWorkflow : !onOpenPageTasks && !onOpenWorkflow}
+          >{imageDeckExists && !imageDeckReviewReady ? "返回图片版复核" : "继续可编辑重建"}</button>
         )}
         <button className="btn ghost" type="button" onClick={onOpenWorkflow} disabled={!onOpenWorkflow}>查看工作流</button>
       </div>
@@ -5842,13 +7708,40 @@ function WorkflowDeliverySimpleCheck({ bundle = null, finalDownloadState = {}, f
   );
 }
 
-function WorkflowDeliveryRepairGuide({ finalGate = null, onClose, onOpenPageTasks, onRefreshDelivery, onRecomposeFinal, status = {} }) {
+function WorkflowDeliveryRepairGuide({
+  bundle = null,
+  finalGate = null,
+  onAuthorizeEditableWorkerSpend,
+  onClose,
+  onOpenPageTasks,
+  onPreviewEditableWorkerStart,
+  onPreviewFinalVisualQaRetry,
+  onRefreshDelivery,
+  onRecomposeFinal,
+  onRetryFinalVisualQaPages,
+  onStartEditableWorker,
+  recoveryBusy = "",
+  recoveryResult = null,
+  status = {},
+  workerPreflightBundle = null,
+  workerPreflightBusy = false,
+  workerStartBusy = false
+}) {
   const checks = finalGate?.checks || {};
+  const visualQa = bundle?.finalEvidence?.summary?.visualQa || null;
+  const visualQaFailed = visualQa?.status === "failed" || checks.visualQaStatus === "failed";
+  const visualRetry = recoveryResult?.finalVisualQa || null;
+  const resettablePages = Array.isArray(visualRetry?.resetPages) ? visualRetry.resetPages : [];
+  const resetComplete = Number(visualRetry?.retried || 0) > 0;
+  const missingPages = Math.max(0, Number(checks.sourcePages || 0) - Number(checks.finalPages || 0));
+  const workerExternal = workerPreflightBundle?.requiredConfirmations?.externalImageSpend || {};
+  const workerReady = Boolean(workerPreflightBundle?.startReady);
   const failedItems = [
-    { label: "页数", failed: checks.fullSourceCoverage !== true, detail: "最终 PPT 页数或来源覆盖不完整。" },
+    { label: "页数", failed: checks.fullSourceCoverage !== true, detail: "当前只完成 " + Number(checks.finalPages || 0) + "/" + Number(checks.sourcePages || 0) + " 页，不能作为完整交付。" },
     { label: "可打开", failed: checks.powerPointOpenable !== true, detail: "PowerPoint 打开性还没有通过。" },
     { label: "可编辑性", failed: checks.editabilityPassed !== true || checks.noFullSlideRaster !== true, detail: "仍存在不可编辑或整页图片风险。" },
-    { label: "视觉复核", failed: checks.manualReviewRecorded !== true, detail: "需要逐页确认原始页、图片版和可编辑页。" }
+    { label: "视觉匹配", failed: visualQaFailed, detail: "有 " + Number(visualQa?.failedPageCount || resettablePages.length || 0) + " 页可编辑预览与图片版差异过大，需要只重做这些页面。" },
+    { label: "人工复核", failed: checks.manualReviewRecorded !== true, detail: "自动检查通过后，再逐页确认原始页、图片版和可编辑页。" }
   ].filter((item) => item.failed);
   const reason = buildDeliveryUserIssue(finalGate, status);
   return (
@@ -5868,9 +7761,57 @@ function WorkflowDeliveryRepairGuide({ finalGate = null, onClose, onOpenPageTask
           </div>
         ))}
       </div>
+      {visualQaFailed ? (
+        <div className="workflow-note">
+          <b>可编辑样稿确实未达标。</b>
+          <span>不要直接重新合成，那只会把相同页面再合成一次。应先检查并重置 QA 失败页，再只重做这些页面。</span>
+        </div>
+      ) : null}
+      {visualRetry ? (
+        <div className={"workflow-page-evidence-preflight " + (resetComplete ? "ready" : resettablePages.length ? "warning" : "blocked")}>
+          <b>{resetComplete ? "已重置 " + Number(visualRetry.retried || 0) + " 页" : "可重做 " + resettablePages.length + " 页"}</b>
+          <span>{resettablePages.join("、") || "没有可重置的页面"}</span>
+        </div>
+      ) : null}
+      {workerPreflightBundle ? (
+        <div className={"workflow-page-evidence-preflight " + (workerReady ? "ready" : workerPreflightBundle.ready ? "warning" : "blocked")}>
+          <b>{workerReady ? "重做任务已可启动" : "重做任务还需确认"}</b>
+          <span>{Number(workerPreflightBundle.selectedCount || 0)} 页：{(workerPreflightBundle.selectedPageIds || []).join("、") || "未找到待重做页"}</span>
+        </div>
+      ) : null}
       <div className="workflow-delivery-repair-actions">
-        <button className="btn primary" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
-        <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>去主工作台处理</button>
+        {visualQaFailed && !visualRetry ? (
+          <button className="btn primary" type="button" onClick={onPreviewFinalVisualQaRetry} disabled={!onPreviewFinalVisualQaRetry || recoveryBusy === "final-visual-qa-preview"}>
+            {recoveryBusy === "final-visual-qa-preview" ? "检查中..." : "检查可重做页面"}
+          </button>
+        ) : null}
+        {visualQaFailed && visualRetry && !resetComplete && resettablePages.length ? (
+          <button className="btn primary" type="button" onClick={onRetryFinalVisualQaPages} disabled={!onRetryFinalVisualQaPages || recoveryBusy === "final-visual-qa-retry"}>
+            {recoveryBusy === "final-visual-qa-retry" ? "重置中..." : "重置 " + resettablePages.length + " 个不合格页"}
+          </button>
+        ) : null}
+        {resetComplete && !workerPreflightBundle ? (
+          <button className="btn primary" type="button" onClick={onPreviewEditableWorkerStart} disabled={!onPreviewEditableWorkerStart || workerPreflightBusy}>
+            {workerPreflightBusy ? "预检中..." : "检查重做条件"}
+          </button>
+        ) : null}
+        {resetComplete && workerPreflightBundle && workerExternal.required && !workerExternal.confirmed ? (
+          <button className="btn primary" type="button" onClick={onAuthorizeEditableWorkerSpend} disabled={!onAuthorizeEditableWorkerSpend}>确认重做额度</button>
+        ) : null}
+        {resetComplete && workerReady ? (
+          <button className="btn primary" type="button" onClick={onStartEditableWorker} disabled={!onStartEditableWorker || workerStartBusy}>
+            {workerStartBusy ? "启动中..." : "启动失败页重做"}
+          </button>
+        ) : null}
+        {!visualQaFailed && checks.fullSourceCoverage === true ? (
+          <button className="btn primary" type="button" onClick={onRecomposeFinal} disabled={!onRecomposeFinal}>重新合成 PPT</button>
+        ) : null}
+        {missingPages > 0 ? (
+          <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>返回工作台生成剩余 {missingPages} 页</button>
+        ) : null}
+        {!missingPages && !workerReady ? (
+          <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>去页面任务区</button>
+        ) : null}
         <button className="btn ghost" type="button" onClick={onRefreshDelivery} disabled={!onRefreshDelivery}>刷新交付</button>
       </div>
     </section>
@@ -6035,7 +7976,7 @@ function getFinalDownloadState(finalGate = null) {
   };
 }
 
-function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFinalReview, onClose, onMarkPage, onOpenPageTasks, pageEvidence = null, pageVisualReview = null, reviewBusy = false }) {
+function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFinalReview, onClose, onMarkPage, onOpenFailedPages, onOpenPageTasks, onRefresh, pageEvidence = null, pageVisualQa = null, pageVisualReview = null, reviewBusy = false, sourcePages = 0 }) {
   const persistedMarks = pageVisualReview?.marks || {};
   const [marks, setMarks] = useState(persistedMarks);
   const [pendingPageMarks, setPendingPageMarks] = useState({});
@@ -6045,13 +7986,45 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFin
     setMarks(persistedMarks);
   }, [pageVisualReview?.updatedAt]);
   const pages = Array.isArray(pageEvidence?.pages) ? pageEvidence.pages : [];
-  if (!pages.length) return null;
+  if (!pages.length) {
+    return (
+      <div className="workflow-page-review-workbench workflow-page-review-empty" role="status">
+        <div className="workflow-page-review-head">
+          <div>
+            <b>暂时无法开始人工复核</b>
+            <span>当前没有可用的页面证据。请先刷新交付状态；仍为空时，回到页面任务区重新生成页面预览和校验记录。</span>
+          </div>
+          <div className="workflow-page-review-actions">
+            {onRefresh ? <button className="btn" type="button" onClick={onRefresh}>刷新交付状态</button> : null}
+            {onOpenPageTasks ? <button className="btn" type="button" onClick={onOpenPageTasks}>查看页面任务</button> : null}
+            <button className="btn ghost" type="button" onClick={onClose}>关闭</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const partialReview = Boolean(sourcePages && pages.length < sourcePages);
   const linkIndex = buildWorkflowArtifactLinkIndex(artifactBundle?.links || []);
+  const visualQaByPage = new Map((Array.isArray(pageVisualQa?.pages) ? pageVisualQa.pages : []).map((page) => [page.pageId, page]));
+  const currentMarkStatus = (pageId) => {
+    const mark = marks[pageId];
+    const status = String(mark?.status || mark || "");
+    const signature = visualQaByPage.get(pageId)?.signature || "";
+    if (["pass", "accept"].includes(status) && (!signature || mark?.visualQaSignature !== signature)) return "";
+    return status;
+  };
   const savingPages = Object.keys(pendingPageMarks).filter((pageId) => pendingPageMarks[pageId]);
   const failedSaves = Object.keys(pageMarkErrors).filter((pageId) => pageMarkErrors[pageId]);
-  const reviewedPages = pages.filter((page) => ["pass", "rerun"].includes(String(marks[page.pageId]?.status || marks[page.pageId] || ""))).length;
-  const failedPages = pages.filter((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "rerun").length;
-  const allPassed = Boolean(pages.length && pages.every((page) => String(marks[page.pageId]?.status || marks[page.pageId] || "") === "pass"));
+  const automatedFailedPages = pages.filter((page) => (visualQaByPage.get(page.pageId)?.issues || []).some(isEditableVisualQaBlocking));
+  const pagesMissingVisualQa = pages.filter((page) => !visualQaByPage.get(page.pageId)?.signature);
+  const reviewedPages = pages.filter((page) => ["pass", "rerun"].includes(currentMarkStatus(page.pageId))).length;
+  const failedPages = pages.filter((page) => currentMarkStatus(page.pageId) === "rerun" || automatedFailedPages.includes(page)).length;
+  const allPassed = Boolean(
+    pages.length
+    && !automatedFailedPages.length
+    && !pagesMissingVisualQa.length
+    && pages.every((page) => currentMarkStatus(page.pageId) === "pass")
+  );
   const canRecordFinalReview = Boolean(pageEvidence?.complete && allPassed && !savingPages.length && !failedSaves.length && onApproveFinalReview);
   function markPage(pageId, value) {
     if (!pageId || pendingPageMarks[pageId]) return;
@@ -6115,9 +8088,14 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFin
           <button className="btn primary" type="button" onClick={onApproveFinalReview} disabled={!canRecordFinalReview || reviewBusy}>
             {reviewBusy ? "记录中..." : "全部通过，记录复核"}
           </button>
-          <button className="btn ghost" type="button" onClick={onClose} disabled={reviewBusy}>关闭</button>
+          <button className="btn ghost" type="button" onClick={onClose} disabled={reviewBusy || savingPages.length > 0}>关闭</button>
         </div>
       </div>
+      {partialReview ? (
+        <div className="workflow-note">
+          <b>复核范围：</b>本次只记录当前小样本复核。完整产品交付仍需要跑完全部页面并重新复核。
+        </div>
+      ) : null}
       <div className="workflow-page-review-list">
         {pages.map((page) => (
           <WorkflowPageVisualReviewRow
@@ -6125,34 +8103,45 @@ function WorkflowPageVisualReviewWorkbench({ artifactBundle = null, onApproveFin
             busy={Boolean(pendingPageMarks[page.pageId])}
             error={pageMarkErrors[page.pageId] || ""}
             links={linkIndex.get(page.pageId) || {}}
-            mark={marks[page.pageId]?.status || marks[page.pageId] || ""}
+            mark={currentMarkStatus(page.pageId)}
             onMark={markPage}
             page={page}
+            visualQa={visualQaByPage.get(page.pageId) || null}
           />
         ))}
       </div>
       {failedPages ? (
         <div className="workflow-page-review-footer">
           <span>有页面未通过，进入页面任务区处理后再回来复核。</span>
-          <button className="btn" type="button" onClick={onOpenPageTasks} disabled={!onOpenPageTasks}>处理不通过页面</button>
+          <button className="btn" type="button" onClick={onOpenFailedPages || onOpenPageTasks} disabled={!onOpenFailedPages && !onOpenPageTasks}>处理不通过页面</button>
         </div>
       ) : null}
     </div>
   );
 }
 
-function WorkflowPageVisualReviewRow({ busy = false, error = "", links = {}, mark = "", onMark, page = {} }) {
+function WorkflowPageVisualReviewRow({ busy = false, error = "", links = {}, mark = "", onMark, page = {}, visualQa = null }) {
   const pageId = page.pageId || "";
   const original = links["rendered-page"];
   const imagePage = links["visual-page"];
   const editablePage = links["rebuild-preview"];
   const complete = page.complete === true;
-  const state = mark === "rerun" ? "failed" : mark === "pass" ? "complete" : complete ? "ready" : "pending";
+  const qaIssues = Array.isArray(visualQa?.issues) ? visualQa.issues : [];
+  const automatedIssues = qaIssues.filter(isEditableVisualQaBlocking);
+  const reviewWarnings = qaIssues.filter((issue) => !isEditableVisualQaBlocking(issue));
+  const automatedBlocked = automatedIssues.length > 0;
+  const visualQaReady = Boolean(visualQa?.signature);
+  const similarityScore = Number(visualQa?.visualSimilarity?.score || 0);
+  const minimumSimilarity = Number(visualQa?.minimumSimilarity || 0.93);
+  const similarityLabel = visualQa?.visualSimilarity?.available === true
+    ? `视觉匹配度 ${(similarityScore * 100).toFixed(1)}% / 门槛 ${(minimumSimilarity * 100).toFixed(0)}%`
+    : "视觉匹配度暂不可用";
+  const state = automatedBlocked || mark === "rerun" ? "failed" : mark === "pass" && visualQaReady ? "complete" : complete && visualQaReady ? "ready" : "pending";
   return (
     <div className={`workflow-page-review-row ${state} ${mark ? `marked-${mark}` : ""}`}>
       <div className="workflow-page-review-title">
         <b>{formatWorkflowPageLabel(pageId)}</b>
-        <span>{mark === "pass" ? "已通过" : mark === "rerun" ? "不通过" : complete ? "待判断" : "图片未齐"}</span>
+        <span>{automatedBlocked ? "自动检查未通过" : mark === "pass" && visualQaReady ? "已通过" : mark === "rerun" ? "不通过" : complete && visualQaReady ? "待判断" : visualQaReady ? "页面证据未通过" : "等待质量证据"}</span>
       </div>
       <div className="workflow-page-review-previews">
         <WorkflowPageReviewThumb link={original} label="原始页" />
@@ -6160,12 +8149,35 @@ function WorkflowPageVisualReviewRow({ busy = false, error = "", links = {}, mar
         <WorkflowPageReviewThumb link={editablePage} label="可编辑页" />
       </div>
       <div className="workflow-page-review-mark">
-        <button type="button" className={mark === "pass" ? "active pass" : ""} onClick={() => onMark?.(pageId, "pass")} disabled={busy || !complete}>{busy ? "保存中..." : "通过"}</button>
+        <small>{similarityLabel}</small>
+        <button type="button" className={mark === "pass" && visualQaReady && !automatedBlocked ? "active pass" : ""} onClick={() => onMark?.(pageId, "pass")} disabled={busy || !complete || !visualQaReady || automatedBlocked}>{busy ? "保存中..." : "通过"}</button>
         <button type="button" className={mark === "rerun" ? "active danger" : "danger"} onClick={() => onMark?.(pageId, "rerun")} disabled={busy}>不通过</button>
       </div>
+      {automatedBlocked ? <small className="workflow-page-review-error">自动检查：{automatedIssues.map(formatEditableVisualQaIssue).join("、")}</small> : null}
+      {!visualQaReady ? <small className="workflow-page-review-warning">等待本地视觉质量证据生成后才能通过本页。</small> : null}
+      {!automatedBlocked && reviewWarnings.length ? <small className="workflow-page-review-warning">自动提示：{reviewWarnings.map(formatEditableVisualQaIssue).join("、")}，请由你最终判断。</small> : null}
       {error ? <small className="workflow-page-review-error">{error}</small> : null}
     </div>
   );
+}
+
+function isEditableVisualQaBlocking(issue = "") {
+  return /preview-visual-similarity-critical|preview-structure-loss|preview-too-small-simplified|preview-aspect-ratio-mismatch|editable-preview-missing|target-visual-missing|visual-comparison-unavailable|asset-checkerboard-background/.test(String(issue || ""));
+}
+
+function formatEditableVisualQaIssue(issue = "") {
+  const labels = {
+    "preview-visual-similarity-low": "可编辑页与图片版存在差异",
+    "preview-visual-similarity-critical": "可编辑页与图片版整体差异严重",
+    "preview-structure-loss": "版式或视觉结构丢失",
+    "preview-too-small-simplified": "页面被明显过度简化",
+    "preview-aspect-ratio-mismatch": "页面宽高比不一致",
+    "editable-preview-missing": "缺少可编辑预览",
+    "target-visual-missing": "缺少图片版页面",
+    "visual-comparison-unavailable": "当前图片格式无法完成视觉比较",
+    "asset-checkerboard-background": "分离图片带有棋盘格假透明背景"
+  };
+  return labels[String(issue || "")] || String(issue || "");
 }
 
 function WorkflowPageReviewThumb({ label = "", link = null }) {
@@ -8605,17 +10617,6 @@ function isUserWorkflowJob(job = {}) {
   return !isInternalWorkflowJob(job);
 }
 
-function isInternalWorkflowJob(job = {}) {
-  if (job.internal === true || job.input?.internal === true) return true;
-  const text = [
-    job.input?.mode,
-    job.input?.sourceOriginalName,
-    job.input?.notes,
-    ...(Array.isArray(job.events) ? job.events.map((event) => `${event.type || ""} ${event.message || ""}`) : [])
-  ].filter(Boolean).join(" ");
-  return /\b(regression|smoke-e2e|product-visual-readiness|codex-slide-negative)\b/i.test(text);
-}
-
 function workflowStatusLabel(status = "") {
   if (status === "not_started") return "未开始";
   if (status === "done") return "完成";
@@ -8650,6 +10651,12 @@ function workerTaskStatusLabel(status = "") {
 function formatEditableTaskIssue(task = null) {
   const issues = Array.isArray(task?.evidence?.outputContractIssues) ? task.evidence.outputContractIssues : [];
   if (issues.length) return `页面产物契约未通过：${issues.slice(0, 2).join("；")}`;
+  if (task?.failureKind === "visual-fidelity-failed") return "可编辑页与图片版差异过大，需要重新拆分资产或校准位置。";
+  if (task?.failureKind === "stale-generated-artifacts") return "上次失败留下了旧生成文件，重置时会先归档这些文件。";
+  if (task?.failureKind === "provider-timeout") return "页面重建模型响应超时，需要先检查模型后再重跑。";
+  if (task?.failureKind === "page-spec-json-invalid") return "页面重建模型返回内容无法解析，需要先检查模型输出。";
+  if (task?.failureKind === "required-assets-missing") return "页面需要的背景或前景资产没有生成完整。";
+  if (task?.error) return uiZh(task.error);
   return "";
 }
 

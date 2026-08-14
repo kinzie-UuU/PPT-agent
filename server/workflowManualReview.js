@@ -1,4 +1,7 @@
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import crypto from "crypto";
+import fs from "fs/promises";
+import { buildEditableVisualQaSignature, isBlockingEditableVisualIssue, scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
 import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 
 export async function approveWorkflowManualReview(jobId, options = {}) {
@@ -6,11 +9,36 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
   const artifacts = job.artifacts || {};
   const final = artifacts.editableFinal || {};
   if (!final.path) throw new Error("Final PPTX must exist before manual review can be approved.");
+  const pageEvidence = await scanWorkflowPageEvidence(job);
+  if (pageEvidence?.complete !== true) throw new Error("All page evidence must be complete before final manual review can be approved.");
+  const finalEvidence = await scanWorkflowFinalEvidence(job);
+  const visualQaPages = Array.isArray(finalEvidence.summary?.visualQa?.pages) ? finalEvidence.summary.visualQa.pages : [];
+  const failedVisualPages = visualQaPages.filter((page) => (page.issues || []).some(isBlockingEditableVisualIssue));
+  if (failedVisualPages.length) {
+    throw new Error(`Editable visual QA failed for: ${failedVisualPages.map((page) => page.pageId).join(", ")}. Rerun these pages before approval.`);
+  }
+  const pageMarks = artifacts.pageVisualReview?.marks || {};
+  const evidencePageIds = (pageEvidence.pages || []).map((page) => page.pageId).filter(Boolean);
+  const missingPassMarks = evidencePageIds.filter((pageId) => pageMarks[pageId]?.status !== "pass");
+  if (missingPassMarks.length) {
+    throw new Error(`Every page must be marked pass before final approval: ${missingPassMarks.join(", ")}.`);
+  }
+  const staleMarks = visualQaPages.filter((page) => pageMarks[page.pageId]?.visualQaSignature !== buildEditableVisualQaSignature(page));
+  if (staleMarks.length) {
+    throw new Error(`Page review is stale for: ${staleMarks.map((page) => page.pageId).join(", ")}. Review the current previews again.`);
+  }
   const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const recordedPages = tasks.filter((task) => task.status === "recorded").map((task) => task.pageId).filter(Boolean);
   const sourcePages = numberOrZero(job.sourceMeta?.pageCount || artifacts.sourceMeta?.pageCount);
   const finalPages = numberOrZero(final.summary?.page_count || final.pptxEditability?.slideCount);
+  if (!sourcePages || !finalPages) {
+    throw new Error("Source and final page counts are required before manual review can be approved.");
+  }
+  if (finalPages > sourcePages) {
+    throw new Error(`Final PPT page count does not match the source: ${finalPages}/${sourcePages}. Finalize again after removing duplicated or unexpected pages.`);
+  }
   const reviewScope = sourcePages && finalPages && finalPages < sourcePages ? "sample" : "full";
+  const finalSha256 = final.sha256 || await hashFile(final.path);
   const now = new Date().toISOString();
   const manualReview = {
     kind: "manual_review",
@@ -26,10 +54,12 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
     finalPath: final.path,
     finalCreatedAt: final.createdAt || "",
     finalSize: final.size || 0,
+    finalSha256,
     approvedAt: now
   };
   job.artifacts = {
     ...artifacts,
+    editableFinal: { ...final, sha256: finalSha256 },
     manualReview
   };
   job.events = appendEvent(job.events, "workflow.manual_review_approved", "Manual review approved", {
@@ -39,6 +69,11 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
     finalPath: final.path
   });
   return saveWorkflowJob(job);
+}
+
+async function hashFile(filePath) {
+  const buffer = await fs.readFile(filePath);
+  return crypto.createHash("sha256").update(buffer).digest("hex");
 }
 
 export async function approveWorkflowVisualQualityReview(jobId, options = {}) {
@@ -111,6 +146,15 @@ export async function recordWorkflowPageVisualReview(jobId, options = {}) {
   }
 
   const artifacts = job.artifacts || {};
+  const finalEvidence = status === "rerun" ? null : await scanWorkflowFinalEvidence(job);
+  const visualQaPage = Array.isArray(finalEvidence?.summary?.visualQa?.pages)
+    ? finalEvidence.summary.visualQa.pages.find((item) => item.pageId === pageId)
+    : null;
+  const blockingVisualIssues = (visualQaPage?.issues || []).filter(isBlockingEditableVisualIssue);
+  if (status !== "rerun" && (!visualQaPage || blockingVisualIssues.length)) {
+    const detail = blockingVisualIssues.length ? blockingVisualIssues.join(", ") : "visual-comparison-unavailable";
+    throw new Error(`Page visual QA is not ready for approval: ${pageId} (${detail}).`);
+  }
   const previous = artifacts.pageVisualReview || {};
   const marks = {
     ...(previous.marks || {})
@@ -124,6 +168,13 @@ export async function recordWorkflowPageVisualReview(jobId, options = {}) {
     note: cleanString(options.note || ""),
     evidenceComplete: page?.complete === true,
     issues: Array.isArray(page?.issues) ? page.issues : [],
+    visualQaSignature: visualQaPage ? buildEditableVisualQaSignature(visualQaPage) : "",
+    visualQa: visualQaPage ? {
+      score: visualQaPage.visualSimilarity?.score || 0,
+      edgeOverlap: visualQaPage.visualSimilarity?.edgeOverlap || 0,
+      edgeRetention: visualQaPage.visualSimilarity?.edgeRetention || 0,
+      weakContentTileRatio: visualQaPage.visualSimilarity?.weakContentTileRatio || 0
+    } : null,
     markedAt: now
   };
   const summary = summarizePageVisualReviewMarks(marks, pageEvidence);

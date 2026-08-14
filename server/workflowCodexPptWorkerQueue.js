@@ -4,6 +4,7 @@ import path from "path";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { prepareCodexPptSlideRun, recordCodexPptSlideDispatch, recordCodexPptSlideResult } from "./workflowCodexPptRunState.js";
 import { artifactRecord, assertWorkflowVisualGenerationAllowed, buildVisualImageRecord, discoverVisualImages, getRenderedPages, markStage, mergeVisualManifestRecords, parsePageSelection, readVisualManifest, upsertPage, visualManifestPath, writeVisualManifest, writeVisualPrompts } from "./workflowVisuals.js";
+import { isCodexPptSampleApprovalCurrent } from "./workflowApprovals.js";
 
 const TASK_STATUSES = ["ready", "claimed", "running", "recorded", "failed"];
 const DOWNSTREAM_ARTIFACT_KEYS = [
@@ -24,9 +25,35 @@ const DOWNSTREAM_ARTIFACT_KEYS = [
   "editableTextHintsAcknowledgement",
   "workerBriefs"
 ];
+const VISUAL_RESULT_DOWNSTREAM_ARTIFACT_KEYS = [
+  "imageDeck",
+  "visualQuality",
+  "visualQualityReview",
+  "imageDeckReview",
+  "editableRun",
+  "editableHints",
+  "editableNext",
+  "editableWorkerPrompts",
+  "editableWorkerTasks",
+  "editableDispatches",
+  "editableRecords",
+  "editableLocalRebuilds",
+  "editableWorkerBatchRuns",
+  "editableFinal",
+  "editableTextHintsAcknowledgement",
+  "workerBriefs"
+];
 
 export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
+  const styleReconciliation = await reconcileVisualImagesForCurrentSample(job);
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    ...(styleReconciliation.visualImages.length ? {
+      visualImages: styleReconciliation.visualImages,
+      visualManifest: artifactRecord("visual_images_manifest", styleReconciliation.manifestPath, { imageCount: styleReconciliation.visualImages.length })
+    } : {})
+  };
   const renderedPages = getRenderedPages(job);
   if (!renderedPages.length) throw new Error("No rendered source pages. Run source/render first.");
   const targetPages = await buildCodexPptSlideSourcePages(job, renderedPages);
@@ -52,9 +79,15 @@ export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
       : selectedPages;
     slideRun = await prepareCodexPptSlideRun(job, { renderedPages: targetPages, prompts, selectedPages: preparePages, options });
   }
-  const tasks = mergeTasks(job.artifacts?.codexPptSlideWorkerTasks, slideRun.slidePrompts, await readSlideRunState(slideRun.slideRunState?.path));
+  const tasks = mergeTasks(
+    job.artifacts?.codexPptSlideWorkerTasks,
+    slideRun.slidePrompts,
+    await readSlideRunState(slideRun.slideRunState?.path),
+    styleReconciliation.stalePageIds
+  );
+  const staleDeckInvalidation = invalidateStaleImageDeck(job.artifacts || {});
   job.artifacts = {
-    ...(job.artifacts || {}),
+    ...staleDeckInvalidation.artifacts,
     visualPrompts: artifactRecord("visual_prompts", prompts.path),
     codexPptDeckSpec: slideRun.deckSpec,
     codexPptSpeech: slideRun.speech,
@@ -66,10 +99,71 @@ export async function syncWorkflowCodexPptSlideTasks(jobId, options = {}) {
   job.events = appendEvent(job.events, "codex-ppt.slide_tasks_synced", `Synced ${tasks.length} codex-ppt slide task(s)`, {
     pages: tasks.map((task) => task.pageId),
     renderedSourcePages: renderedPages.length,
-    targetSlides: targetPages.length
+    targetSlides: targetPages.length,
+    invalidatedStaleArtifacts: staleDeckInvalidation.invalidatedKeys,
+    staleStylePages: styleReconciliation.stalePageIds
   });
   job = await saveWorkflowJob(job);
   return toTaskBundle(job, tasks);
+}
+
+async function reconcileVisualImagesForCurrentSample(job = {}) {
+  const images = Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [];
+  const sample = job.artifacts?.visualSample || {};
+  const samplePath = sample.path ? path.resolve(sample.path) : "";
+  const enforceStyleLock = Boolean(sample.sha256 && samplePath && isCodexPptSampleApprovalCurrent(job));
+  const visualImages = images.map((image) => {
+    const references = (Array.isArray(image.referenceImagePaths) ? image.referenceImagePaths : [])
+      .map((item) => path.resolve(item || ""));
+    const matches = !enforceStyleLock
+      || image.approvedSampleSha256 === sample.sha256
+      || references.includes(samplePath);
+    return {
+      ...image,
+      staleStyleReference: !matches,
+      styleLockStatus: matches ? "current" : "stale",
+      currentApprovedSampleSha256: sample.sha256 || ""
+    };
+  });
+  const manifestPath = visualManifestPath(job);
+  if (visualImages.length) await writeVisualManifest(manifestPath, visualImages, { styleReconciledAt: new Date().toISOString() });
+  return {
+    visualImages,
+    manifestPath,
+    stalePageIds: visualImages.filter((image) => image.staleStyleReference).map((image) => image.pageId).filter(Boolean)
+  };
+}
+
+export function invalidateStaleImageDeck(artifacts = {}) {
+  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages.filter((image) => image?.path) : [];
+  const visualCount = visualImages.filter((image) => image.staleStyleReference !== true).length;
+  const staleVisualCount = visualImages.filter((image) => image.staleStyleReference === true).length;
+  const imageDeckPageCount = Number(artifacts.imageDeck?.pageCount || 0);
+  if (staleVisualCount === 0 && (!artifacts.imageDeck?.path || (visualCount > 0 && imageDeckPageCount === visualCount))) {
+    return { artifacts, invalidatedKeys: [] };
+  }
+  return invalidateDownstreamArtifacts(artifacts, [
+    "imageDeck",
+    "imageDeckReview",
+    "visualQuality",
+    "visualQualityReview",
+    "editableRun",
+    "editableHints",
+    "editableNext",
+    "editableWorkerPrompts",
+    "editableWorkerTasks",
+    "editableDispatches",
+    "editableRecords",
+    "editableLocalRebuilds",
+    "editableWorkerBatchRuns",
+    "editableFinal",
+    "editableTextHintsAcknowledgement",
+    "workerBriefs"
+  ], {
+    reason: staleVisualCount
+      ? `image deck includes ${staleVisualCount} page(s) generated without the current approved sample reference`
+      : `stale image deck covers ${imageDeckPageCount}/${visualCount} current visual pages`
+  });
 }
 
 function shouldRefreshSlideRun(slideRun = {}, selectedPages = [], targetCount = 0) {
@@ -84,7 +178,16 @@ function shouldRefreshSlideRun(slideRun = {}, selectedPages = [], targetCount = 
 
 export async function listWorkflowCodexPptSlideTasks(jobId) {
   const job = await readWorkflowJob(jobId);
-  const tasks = mergeTasks(job.artifacts?.codexPptSlideWorkerTasks, job.artifacts?.codexPptSlidePrompts || [], await readSlideRunState(job.artifacts?.codexPptSlideRunState?.path));
+  const stalePageIds = (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
+    .filter((image) => image?.staleStyleReference === true)
+    .map((image) => image.pageId)
+    .filter(Boolean);
+  const tasks = mergeTasks(
+    job.artifacts?.codexPptSlideWorkerTasks,
+    job.artifacts?.codexPptSlidePrompts || [],
+    await readSlideRunState(job.artifacts?.codexPptSlideRunState?.path),
+    stalePageIds
+  );
   return toTaskBundle(job, tasks);
 }
 
@@ -177,6 +280,8 @@ export async function completeWorkflowCodexPptSlideTask(jobId, pageId, options =
       model: cleanString(options.model || options.backend?.model || job.artifacts?.codexPptBackend?.model || ""),
       dryRun: Boolean(options.dryRun || options.passthrough),
       source: cleanString(options.source || "external-slide-worker"),
+      referenceImagePaths: Array.isArray(options.referenceImagePaths) ? options.referenceImagePaths : [],
+      approvedSampleSha256: cleanString(options.approvedSampleSha256 || ""),
       qaNote: cleanString(options.qaNote || "")
     },
     job,
@@ -216,8 +321,12 @@ export async function completeWorkflowCodexPptSlideTask(jobId, pageId, options =
   const recordedCount = Number(slideRun.slideRunState?.recorded || 0);
   const failedCount = Number(slideRun.slideRunState?.failed || 0);
   const complete = selectedTotal > 0 && recordedCount >= selectedTotal && failedCount === 0;
+  const invalidation = invalidateDownstreamArtifacts(job.artifacts || {}, VISUAL_RESULT_DOWNSTREAM_ARTIFACT_KEYS, {
+    reason: `visual image changed for ${pageTask.pageId}`,
+    pages: [pageTask.pageId]
+  });
   job.artifacts = {
-    ...(job.artifacts || {}),
+    ...invalidation.artifacts,
     codexPptSlideJobs: slideRun.slideJobs,
     codexPptSlideRunState: slideRun.slideRunState,
     codexPptSlideWorkerTasks: tasks,
@@ -543,9 +652,15 @@ async function buildCodexPptSlideSourcePages(job = {}, renderedPages = []) {
     if (rendered) {
       return {
         ...rendered,
+        layout: cleanString(outlineStep.layout || rendered.layout || ""),
+        storyRole: cleanString(outlineStep.storyRole || rendered.storyRole || ""),
+        visualIntent: cleanString(outlineStep.visualIntent || rendered.visualIntent || ""),
         outlineTitle: cleanString(outlineStep.title || ""),
         outlinePurpose: cleanString(outlineStep.purpose || ""),
-        outlineEvidence: cleanString(outlineStep.evidence || "")
+        outlineEvidence: cleanString(outlineStep.evidence || ""),
+        outlineStoryRole: cleanString(outlineStep.storyRole || ""),
+        outlineVisualIntent: cleanString(outlineStep.visualIntent || ""),
+        outlineNotes: cleanString(outlineStep.notes || "")
       };
     }
     return {
@@ -553,12 +668,18 @@ async function buildCodexPptSlideSourcePages(job = {}, renderedPages = []) {
       pageNumber,
       kind: "outline_slide",
       format: "codex-ppt-outline",
+      layout: cleanString(outlineStep.layout || "content"),
+      storyRole: cleanString(outlineStep.storyRole || ""),
+      visualIntent: cleanString(outlineStep.visualIntent || ""),
       path: "",
       sourcePagePath: "",
       title: cleanString(outlineStep.title || `Slide ${pageNumber}`),
       outlineTitle: cleanString(outlineStep.title || `Slide ${pageNumber}`),
       outlinePurpose: cleanString(outlineStep.purpose || outlineStep.visualIntent || "Create a visually unified slide from the approved brief and outline."),
       outlineEvidence: cleanString(outlineStep.evidence || job.input?.sourceBrief || ""),
+      outlineStoryRole: cleanString(outlineStep.storyRole || ""),
+      outlineVisualIntent: cleanString(outlineStep.visualIntent || ""),
+      outlineNotes: cleanString(outlineStep.notes || ""),
       width: renderedPages[0]?.width || 1280,
       height: renderedPages[0]?.height || 720
     };
@@ -597,14 +718,23 @@ function toTaskBundle(job, tasks) {
   };
 }
 
-function mergeTasks(existingTasks = [], prompts = [], slideRunState = {}) {
+export function mergeTasks(existingTasks = [], prompts = [], slideRunState = {}, stalePageIds = []) {
   const existingByPage = new Map((Array.isArray(existingTasks) ? existingTasks : []).map((task) => [normalizePageId(task.pageId), normalizeTask(task)]));
   const slideByPage = new Map((Array.isArray(slideRunState.slides) ? slideRunState.slides : []).map((slide) => [normalizePageId(slide.pageId), slide]));
+  const stalePages = new Set((Array.isArray(stalePageIds) ? stalePageIds : []).map(normalizePageId).filter(Boolean));
   return (Array.isArray(prompts) ? prompts : []).map((prompt) => {
     const pageId = normalizePageId(prompt.pageId);
     const existing = existingByPage.get(pageId) || {};
     const slide = slideByPage.get(pageId) || {};
-    const status = existing.status || (slide.status === "recorded" ? "recorded" : slide.status === "dispatched" ? "running" : "ready");
+    const staleStyleReference = stalePages.has(pageId);
+    const hasSlideState = Boolean(slide.pageId || slide.slideId || slide.pageNumber);
+    const slideRecorded = !staleStyleReference && slide.status === "recorded" && slide.imagePath && fsSync.existsSync(slide.imagePath);
+    const existingRecorded = !staleStyleReference && existing.status === "recorded" && existing.imagePath && fsSync.existsSync(existing.imagePath);
+    const status = staleStyleReference
+      ? "ready"
+      : slideRecorded || existingRecorded
+      ? (hasSlideState ? (slideRecorded ? "recorded" : slide.status === "dispatched" ? "running" : "ready") : "recorded")
+      : hasSlideState ? (slide.status === "dispatched" ? "running" : "ready") : existing.status || "ready";
     return normalizeTask({
       ...existing,
       pageId,
@@ -613,11 +743,11 @@ function mergeTasks(existingTasks = [], prompts = [], slideRunState = {}) {
       promptFile: prompt.path || slide.promptPath || "",
       relativePath: prompt.relativePath || "",
       status,
-      agentId: existing.agentId || slide.agentId || "",
-      dispatchAt: existing.dispatchAt || slide.dispatchedAt || "",
-      recordedAt: existing.recordedAt || slide.recordedAt || "",
-      imagePath: existing.imagePath || slide.imagePath || "",
-      imageSha256: existing.imageSha256 || slide.imageSha256 || "",
+      agentId: status === "ready" ? "" : slide.agentId || existing.agentId || "",
+      dispatchAt: status === "ready" ? "" : slide.dispatchedAt || existing.dispatchAt || "",
+      recordedAt: status === "recorded" ? slide.recordedAt || existing.recordedAt || "" : "",
+      imagePath: status === "recorded" ? slide.imagePath || existing.imagePath || "" : "",
+      imageSha256: status === "recorded" ? slide.imageSha256 || existing.imageSha256 || "" : "",
       createdAt: existing.createdAt || prompt.createdAt || slide.createdAt || new Date().toISOString(),
       updatedAt: existing.updatedAt || slide.recordedAt || slide.dispatchedAt || new Date().toISOString()
     });

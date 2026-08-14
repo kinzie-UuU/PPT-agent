@@ -7,7 +7,11 @@ import crypto from "crypto";
 import zlib from "zlib";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { createWorkflowJob, saveWorkflowJob } from "../server/workflowJobs.js";
+import { approveCodexPptGate } from "../server/workflowApprovals.js";
+import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } from "../server/workflowCodexPptDecisions.js";
+import { prepareCodexPptSlideRun } from "../server/workflowCodexPptRunState.js";
+import { createWorkflowJob, readWorkflowJob, saveWorkflowJob } from "../server/workflowJobs.js";
+import { recordWorkflowCodexPptOutline } from "../server/workflowOutline.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BASE_URL = process.env.PPT_TOOL_BASE_URL || "http://127.0.0.1:4180";
@@ -34,13 +38,16 @@ async function runSmoke(args) {
   const health = await api(baseUrl, "/api/health");
   if (!health.ok) throw new Error(`PPT tool server is not healthy at ${baseUrl}`);
 
+  const deliveryReadyFixture = args["delivery-ready-fixture"] === true;
   let job = await createWorkflowJob({
-    internal: true,
+    internal: !deliveryReadyFixture,
+    visibility: deliveryReadyFixture ? "public" : "internal",
     mode: "smoke-e2e",
+    projectName: deliveryReadyFixture ? "严格 E2E 成功态验证（合成）" : "",
     notes: "Synthetic runner -> page pipeline -> record -> finalize smoke test."
   });
 
-  const sourceImage = path.join(job.dirs.visualImages, "smoke-page-001.png");
+  const sourceImage = path.join(job.dirs.visualImages, "page_001.png");
   await writeSolidPng(sourceImage, 1280, 720, {
     r: 248,
     g: 250,
@@ -48,80 +55,217 @@ async function runSmoke(args) {
     a: 255
   });
   const imageStat = await fs.stat(sourceImage);
+  const imageSha256 = await hashFile(sourceImage);
+  const ocrHintsPath = path.join(job.dirs.ocr, "text_hints.json");
+  const visualOcrHintsPath = path.join(job.dirs.ocr, "visual_text_hints.json");
+  const smokeOcrLines = [
+    { id: "title", text: "Editable PPT Smoke Test", confidence: 1, low_confidence: false, mojibake_suspect: false, box_px: [96, 128, 660, 86], font_pt_if_latin: 34 },
+    { id: "body", text: "Runner, pipeline, record, and finalize completed.", confidence: 1, low_confidence: false, mojibake_suspect: false, box_px: [100, 250, 640, 110], font_pt_if_latin: 20 }
+  ];
+  await writeJson(ocrHintsPath, {
+    version: 1,
+    jobId: job.id,
+    backend: "smoke-synthetic-ocr",
+    ocrBackend: { name: "smoke-synthetic-ocr", mode: "test" },
+    pageCount: 1,
+    textCount: smokeOcrLines.length,
+    lowConfidenceCount: 0,
+    summary: { pageCount: 1, textCount: smokeOcrLines.length, lowConfidenceCount: 0, mojibakeCount: 0, errorCount: 0 },
+    pages: [{
+      pageId: "page_001",
+      pageNumber: 1,
+      imagePath: sourceImage,
+      imageSha256,
+      backend: "smoke-synthetic-ocr",
+      lineCount: smokeOcrLines.length,
+      lowConfidenceCount: 0,
+      requiredText: smokeOcrLines.map((line) => line.text),
+      ocrLines: smokeOcrLines
+    }],
+    errors: []
+  });
+  await writeJson(visualOcrHintsPath, {
+    version: 1,
+    jobId: job.id,
+    backend: "smoke-synthetic-ocr",
+    ocrBackend: { name: "smoke-synthetic-ocr", mode: "test" },
+    pageCount: 1,
+    textCount: smokeOcrLines.length,
+    lowConfidenceCount: 0,
+    summary: { pageCount: 1, textCount: smokeOcrLines.length, lowConfidenceCount: 0, mojibakeCount: 0, errorCount: 0 },
+    pages: [{
+      pageId: "page_001",
+      pageNumber: 1,
+      imagePath: sourceImage,
+      imageSha256,
+      backend: "smoke-synthetic-ocr",
+      lineCount: smokeOcrLines.length,
+      lowConfidenceCount: 0,
+      requiredText: smokeOcrLines.map((line) => line.text),
+      ocrLines: smokeOcrLines
+    }],
+    errors: []
+  });
+  const visualPage = {
+    kind: "visual_image",
+    pageId: "page_001",
+    pageNumber: 1,
+    path: sourceImage,
+    relativePath: path.relative(process.cwd(), sourceImage),
+    size: imageStat.size,
+    sha256: imageSha256,
+    provider: "smoke-synthetic",
+    createdAt: new Date().toISOString()
+  };
   job.artifacts = {
     ...(job.artifacts || {}),
-    visualImages: [{
-      kind: "visual_image",
+    renderedPages: [{
+      kind: "rendered_page",
       pageId: "page_001",
       pageNumber: 1,
       path: sourceImage,
       relativePath: path.relative(process.cwd(), sourceImage),
       size: imageStat.size,
-      sha256: await hashFile(sourceImage),
-      provider: "smoke-synthetic",
+      sha256: imageSha256,
       createdAt: new Date().toISOString()
-    }]
+    }],
+    ocrTextHints: {
+      kind: "ocr_text_hints",
+      path: ocrHintsPath,
+      relativePath: path.relative(process.cwd(), ocrHintsPath),
+      backend: "smoke-synthetic-ocr",
+      pageCount: 1,
+      textCount: smokeOcrLines.length,
+      lowConfidenceCount: 0
+    },
+    visualOcrTextHints: {
+      kind: "visual_ocr_text_hints",
+      path: visualOcrHintsPath,
+      relativePath: path.relative(process.cwd(), visualOcrHintsPath),
+      backend: "smoke-synthetic-ocr",
+      pageCount: 1,
+      textCount: smokeOcrLines.length,
+      lowConfidenceCount: 0,
+      evidenceSource: "visual",
+      coordinateModeVersion: "visual-coordinates-v2"
+    },
+    sourceMeta: {
+      kind: "source_meta",
+      pageCount: 1,
+      width: 1280,
+      height: 720
+    },
+    visualSample: { ...visualPage, sample: true },
+    visualImages: [visualPage]
   };
   job = await saveWorkflowJob(job);
 
+  // Use the public review endpoints so the smoke covers the same visual gate as the product UI.
+  // The first call also verifies that missing quality evidence is rebuilt locally from existing images.
+  job = await api(baseUrl, `/api/workflow-jobs/${job.id}/image-deck/review/pages/page_001`, {
+    method: "POST",
+    body: { status: "pass", reviewer: "smoke-e2e", note: "synthetic visual page reviewed" }
+  });
+  job = await api(baseUrl, `/api/workflow-jobs/${job.id}/image-deck/review/approve`, {
+    method: "POST",
+    body: { reviewer: "smoke-e2e", note: "synthetic image deck review approved" }
+  });
+  job = await api(baseUrl, `/api/workflow-jobs/${job.id}/visual-quality/review/approve`, {
+    method: "POST",
+    body: { reviewer: "smoke-e2e", note: "synthetic visual quality evidence reviewed" }
+  });
+
   const prepared = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/prepare`, {
     method: "POST",
-    body: { force: true, noTextHints: true, maxConcurrentPages: 1, timeoutMs }
+    body: { force: true, noTextHints: true, maxConcurrentPages: 1, timeoutMs, confirmRouteB: true }
   });
-  const prompted = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/prompts`, {
-    method: "POST",
-    body: { pages: ["page_001"], timeoutMs }
-  });
-  const tasks = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/worker-tasks/sync`, {
-    method: "POST",
-    body: {}
-  });
-  const pageTask = (tasks.tasks || []).find((task) => task.pageId === "page_001");
-  if (!pageTask) throw new Error("Smoke worker task was not created for page_001");
+  const editableStatus = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/status`);
+  let prompted = prepared;
+  if (editableStatus.next?.stage === "rebuild_page_locally") {
+    job = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/local-rebuild`, {
+      method: "POST",
+      body: {
+        agentId: "main",
+        allowTextDominantLocal: true,
+        regression: true,
+        acceptOfflineTextHints: true,
+        offlineTextHintsReason: "synthetic smoke page has no OCR text requirement",
+        timeoutMs
+      }
+    });
+    prompted = job;
+  } else {
+    prompted = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/prompts`, {
+      method: "POST",
+      body: { pages: ["page_001"], timeoutMs }
+    });
+    const tasks = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/worker-tasks/sync`, {
+      method: "POST",
+      body: {}
+    });
+    const pageTask = (tasks.tasks || []).find((task) => task.pageId === "page_001");
+    if (!pageTask) throw new Error("Smoke worker task was not created for page_001");
 
-  const runnerArgs = [
-    "scripts/page-worker-runner.mjs",
-    "once",
-    "--base-url",
-    baseUrl,
-    "--job-id",
-    job.id,
-    "--agent-id",
-    agentId,
-    "--page",
-    "page_001",
-    "--heartbeat-ms",
-    "5000",
-    "--command",
-    quoteCommand([process.execPath, "scripts/smoke-workflow-e2e.mjs", "--worker"])
-  ];
-  await execFileAsync(process.execPath, runnerArgs, {
-    cwd: process.cwd(),
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    env: {
-      ...process.env,
-      PPT_TOOL_BASE_URL: baseUrl,
-      PYTHONIOENCODING: "utf-8"
-    }
-  });
+    const runnerArgs = [
+      "scripts/page-worker-runner.mjs",
+      "once",
+      "--base-url",
+      baseUrl,
+      "--job-id",
+      job.id,
+      "--agent-id",
+      agentId,
+      "--page",
+      "page_001",
+      "--heartbeat-ms",
+      "5000",
+      "--accept-offline-text-hints",
+      "--offline-text-hints-reason",
+      "synthetic smoke page has no OCR text requirement",
+      "--command",
+      quoteCommand([process.execPath, "scripts/smoke-workflow-e2e.mjs", "--worker"])
+    ];
+    await execFileAsync(process.execPath, runnerArgs, {
+      cwd: process.cwd(),
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        PPT_TOOL_BASE_URL: baseUrl,
+        PYTHONIOENCODING: "utf-8"
+      }
+    });
+  }
 
-  const finalized = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/finalize`, {
+  let finalized = await api(baseUrl, `/api/workflow-jobs/${job.id}/editable/finalize`, {
     method: "POST",
     body: { timeoutMs }
+  });
+  finalized = await api(baseUrl, `/api/workflow-jobs/${job.id}/review/pages/page_001`, {
+    method: "POST",
+    body: { status: "pass", reviewer: "smoke-e2e", note: "synthetic editable page visually reviewed" }
+  });
+  finalized = await api(baseUrl, `/api/workflow-jobs/${job.id}/review/approve`, {
+    method: "POST",
+    body: { reviewer: "smoke-e2e", note: "synthetic final deck reviewed" }
   });
   const finalPath = finalized.artifacts?.editableFinal?.path || "";
   const validationPath = finalized.artifacts?.editableFinal?.validation?.path || "";
   if (!finalPath || !fsSync.existsSync(finalPath)) throw new Error(`Final editable PPTX was not created: ${finalPath}`);
 
+  if (deliveryReadyFixture) finalized = await promoteSyntheticDeliveryReadyFixture(finalized.id);
   const delivery = await api(baseUrl, `/api/workflow-jobs/${job.id}/delivery-status`);
   const compliance = await api(baseUrl, `/api/workflow-jobs/${job.id}/compliance`);
-  assertDeliveryEvidence(delivery);
+  if (deliveryReadyFixture) assertReadyDeliveryEvidence(delivery);
+  else assertDeliveryEvidence(delivery);
   assertComplianceEvidence(compliance);
 
   const result = {
     ok: true,
+    kind: deliveryReadyFixture ? "synthetic-ready-api-workflow-e2e" : "synthetic-api-workflow-e2e",
+    reviewMode: "synthetic-api-transition",
+    fixtureScope: deliveryReadyFixture ? "control-plane-ready-state-only" : "blocked-state-only",
     baseUrl,
     jobId: job.id,
     rootDir: finalized.rootDir,
@@ -151,17 +295,121 @@ async function runSmoke(args) {
   console.log(JSON.stringify(result, null, 2));
 }
 
+async function promoteSyntheticDeliveryReadyFixture(jobId) {
+  const backend = {
+    provider: "strict-ui-fixture",
+    baseUrl: "http://strict-ui-fixture.local",
+    model: "strict-ui-image-fixture"
+  };
+  let job = await readWorkflowJob(jobId);
+  const sample = job.artifacts?.visualSample || {};
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    visualSample: { ...sample, ...backend, syntheticFixture: true },
+    visualImages: (job.artifacts?.visualImages || []).map((image) => ({
+      ...image,
+      ...backend,
+      approvedSampleSha256: sample.sha256,
+      referenceImagePaths: [sample.path].filter(Boolean),
+      staleStyleReference: false,
+      styleLockStatus: "current",
+      syntheticFixture: true
+    }))
+  };
+  job = await saveWorkflowJob(job);
+  job = await recordWorkflowCodexPptOutline(jobId, {
+    source: "strict-ui-synthetic-fixture",
+    recordedBy: "strict-ui-e2e",
+    title: "Synthetic ready-state fixture",
+    outlinePlan: {
+      title: "Synthetic ready-state fixture",
+      layoutSequence: [{ layout: "cover", title: "Editable PPT Smoke Test", purpose: "Validate ready-state delivery controls." }]
+    }
+  });
+  job = await recordWorkflowCodexPptStyle(jobId, {
+    source: "strict-ui-synthetic-fixture",
+    recordedBy: "strict-ui-e2e",
+    styleBrief: "Synthetic QA fixture with a restrained blue and white system.",
+    audience: "automated acceptance",
+    tone: "neutral"
+  });
+  job = await recordWorkflowCodexPptBackendDecision(jobId, {
+    source: "strict-ui-synthetic-fixture",
+    recordedBy: "strict-ui-e2e",
+    backend
+  });
+  for (const gate of ["outline", "style", "backend", "sample", "fullDeck"]) {
+    job = await approveCodexPptGate(jobId, {
+      gate,
+      backend,
+      allowNonProductBackend: true,
+      approvedBy: "strict-ui-e2e",
+      note: "Synthetic control-plane fixture; not product-generation evidence."
+    });
+  }
+  job = await readWorkflowJob(jobId);
+  const run = await prepareCodexPptSlideRun(job, {
+    renderedPages: job.artifacts?.renderedPages || [],
+    selectedPages: [1],
+    prompts: {
+      styleBrief: "Synthetic QA fixture",
+      styleLock: { source: "strict-ui-synthetic-fixture" },
+      pages: [{ pageNumber: 1, prompt: "Use the existing synthetic visual page as the accepted fixture." }]
+    },
+    options: { maxConcurrentSlides: 1 }
+  });
+  job.artifacts = {
+    ...(job.artifacts || {}),
+    codexPptDeckSpec: run.deckSpec,
+    codexPptSpeech: run.speech,
+    codexPptSlideJobs: run.slideJobs,
+    codexPptSlideRunState: run.slideRunState,
+    codexPptSlidePrompts: run.slidePrompts
+  };
+  return saveWorkflowJob(job);
+}
+
 function assertDeliveryEvidence(delivery = {}) {
   const gate = delivery.finalGate || {};
   const checks = gate.checks || {};
   for (const key of ["hasFinal", "validationPassed", "pageEvidenceComplete", "finalEvidenceComplete"]) {
     if (checks[key] !== true) throw new Error(`Delivery gate check failed: ${key}`);
   }
-  if (gate.level === "blocked" && !isOnlyCodexPptBlocked(gate)) {
+  if (gate.level !== "blocked") {
+    throw new Error(`Synthetic smoke must remain blocked without codex-ppt evidence, got ${gate.level || "missing"}.`);
+  }
+  if (!isOnlyCodexPptBlocked(gate)) {
     throw new Error(`Delivery gate is blocked for non-codex evidence reason(s): ${(gate.reasons || []).join("; ")}`);
   }
+  if (checks.codexPptApprovalsComplete !== false) throw new Error("Synthetic smoke unexpectedly has codex-ppt approval evidence.");
+  if (checks.codexPptBackendFixed !== false) throw new Error("Synthetic smoke unexpectedly has a fixed codex-ppt backend.");
+  if (delivery.status?.level !== "blocked") throw new Error(`Synthetic smoke delivery status must be blocked, got ${delivery.status?.level || "missing"}.`);
   if (delivery.pageEvidence?.complete !== true) throw new Error("Delivery page evidence is not complete.");
   if (delivery.finalEvidence?.complete !== true) throw new Error("Delivery final evidence is not complete.");
+}
+
+function assertReadyDeliveryEvidence(delivery = {}) {
+  const gate = delivery.finalGate || {};
+  const checks = gate.checks || {};
+  for (const key of [
+    "hasFinal",
+    "validationPassed",
+    "pageEvidenceComplete",
+    "finalEvidenceComplete",
+    "codexPptApprovalsComplete",
+    "codexPptOutlineRecorded",
+    "codexPptStyleRecorded",
+    "codexPptBackendDecisionRecorded",
+    "codexPptSampleRecorded",
+    "codexPptBackendFixed",
+    "codexPptSlideRunComplete"
+  ]) {
+    if (checks[key] !== true) throw new Error(`Ready fixture delivery gate check failed: ${key}`);
+  }
+  if (gate.productReady !== true || gate.downloadable !== true || gate.level !== "ready") {
+    throw new Error(`Synthetic ready fixture did not close the delivery gate: ${JSON.stringify({ level: gate.level, productReady: gate.productReady, downloadable: gate.downloadable, reasons: gate.reasons })}`);
+  }
+  if (delivery.status?.level !== "ready") throw new Error(`Synthetic ready fixture status must be ready, got ${delivery.status?.level || "missing"}.`);
 }
 
 function isOnlyCodexPptBlocked(gate = {}) {

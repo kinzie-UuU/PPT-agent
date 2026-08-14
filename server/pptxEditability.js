@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import fsSync from "fs";
+import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import JSZip from "jszip";
@@ -7,6 +8,17 @@ import JSZip from "jszip";
 const SLIDE_W_EMU = 13.333 * 914400;
 const SLIDE_H_EMU = 7.5 * 914400;
 const execFileAsync = promisify(execFile);
+
+export function resolvePowerShellExecutable() {
+  const windowsRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
+  const candidates = [
+    process.env.POWERSHELL_PATH,
+    path.join(windowsRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    path.join(windowsRoot, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    "powershell.exe"
+  ].filter(Boolean);
+  return candidates.find((candidate) => candidate === "powershell.exe" || fsSync.existsSync(candidate)) || "powershell.exe";
+}
 
 export async function inspectEditablePptx(pptxPath) {
   const zip = await JSZip.loadAsync(await fs.readFile(pptxPath));
@@ -98,7 +110,7 @@ export async function inspectPowerPointOpenability(pptxPath, options = {}) {
   ].join("; ");
 
   try {
-    const { stdout, stderr } = await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+    const { stdout, stderr } = await execFileAsync(resolvePowerShellExecutable(), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
       windowsHide: true,
       timeout: timeoutMs,
       encoding: "utf8",

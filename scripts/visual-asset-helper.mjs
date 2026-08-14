@@ -3,6 +3,7 @@ import "dotenv/config";
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
+import crypto from "crypto";
 import { execFile, spawn, spawnSync } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
@@ -10,10 +11,17 @@ import { fileURLToPath } from "url";
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
-const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt");
+const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || firstExistingPath([
+  path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".agents", "skills", "image-to-editable-ppt"),
+  path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt")
+]);
 const DEFAULT_EDITPPT_PYTHON = path.join(PROJECT_ROOT, "outputs", "skill-duo-test", "ocr-venv", "Scripts", "python.exe");
-const EDITPPT_PYTHON = chooseEditpptPython();
 const CLI_PATH = path.join(SKILL_ROOT, "cli");
+const EDITPPT_PYTHON = chooseEditpptPython();
+
+function firstExistingPath(candidates) {
+  return candidates.find((candidate) => candidate && fsSync.existsSync(candidate)) || candidates.find(Boolean) || "";
+}
 
 function chooseEditpptPython() {
   const bundledUserPython = path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", "AppData", "Local"), "Programs", "Python", "Python313", "python.exe");
@@ -88,7 +96,7 @@ async function main() {
   for (const job of jobs) {
     const promptFile = path.join(promptDir, `${job.id}.prompt.txt`);
     const outName = job.out || `${job.id}.png`;
-    const generated = path.join(outDir, outName);
+    const generated = pathWithinPage(outDir, outName);
     const generatedExists = fsSync.existsSync(generated);
     const previousPrompt = fsSync.existsSync(promptFile) ? fsSync.readFileSync(promptFile, "utf8") : "";
     if (generatedExists && previousPrompt !== job.prompt) {
@@ -129,8 +137,10 @@ async function main() {
       prompt: job.prompt,
       promptFile,
       generated,
+      imageJob: batchJob,
       importDest: job.dest,
       sourceBoxPx: coerceAssetJobBox(job),
+      transparentBackground: job.transparent_background !== false,
       processSheet: Boolean(job.processSheet)
     });
   }
@@ -168,43 +178,35 @@ async function main() {
     runJsonlPath = pathWithinPage(pageDir, args["pending-jsonl"] || spec.pendingJsonl || path.join("prompts", "visual-asset-batch.pending.jsonl"));
     await fs.writeFile(runJsonlPath, `${missingGeneratedIndexes.map((index) => batchLines[index]).join("\n")}\n`, "utf8");
   }
-  const shouldForceBatch = force || staleGeneratedIndexes.length > 0;
   const imageModel = String(spec.model || args.model || process.env.IMAGE_TO_EDITABLE_PPT_IMAGE_MODEL || process.env.OPENAI_IMAGE_MODEL || process.env.CLOUD_IMAGE_MODEL || "gpt-image-2").trim();
   const defaultSize = imageModel && !imageModel.includes("gpt-image-2") ? "auto" : "";
-  const batchArgs = ["image", "batch", "--input", runJsonlPath, "--out-dir", outDir, "--concurrency", String(spec.concurrency || args.concurrency || 2)];
-  for (const [flag, value] of [
-    ["--size", spec.size || args.size || defaultSize],
-    ["--quality", spec.quality || args.quality],
-    ["--background", spec.background || args.background],
-    ["--output-format", spec.outputFormat || spec.output_format || args["output-format"]],
-    ["--model", imageModel]
-  ]) {
-    if (value) batchArgs.push(flag, String(value));
-  }
-  if (shouldForceBatch) batchArgs.push("--force");
-  if (dryRun) batchArgs.push("--dry-run");
+  const forceProgressPath = pathWithinPage(pageDir, path.join("logs", "visual-asset-force-progress.json"));
+  const forceProgress = force ? await readJsonIfExists(forceProgressPath, { completed: {} }) : { completed: {} };
+  const serialIndexes = dryRun
+    ? planned.map((_item, index) => index)
+    : force
+      ? planned.map((_item, index) => index).filter((index) => !isForceCheckpointCurrent(forceProgress, planned[index]))
+      : missingGeneratedIndexes;
   let localFallback = false;
   let reusedExistingOutputs = false;
-  let batchStartedAtMs = 0;
   try {
     if (allGeneratedExist && !force) {
       reusedExistingOutputs = true;
       console.warn("All visual asset outputs already exist; reusing them for import.");
     } else {
-      batchStartedAtMs = Date.now();
-      await runEditppt(batchArgs);
+      await runEditpptImageJobs(planned, serialIndexes, {
+        dryRun,
+        force,
+        staleGeneratedIndexes,
+        forceIndexes: staleGenerated,
+        forceProgress,
+        forceProgressPath,
+        model: imageModel,
+        size: spec.size || args.size || defaultSize,
+        quality: spec.quality || args.quality
+      });
     }
   } catch (error) {
-    const partiallyGenerated = !dryRun && batchStartedAtMs > 0
-      ? planned.filter((item) => wasGeneratedAfter(item.generated, batchStartedAtMs))
-      : [];
-    if (partiallyGenerated.length) {
-      await writeCurrentPromptFiles(partiallyGenerated);
-      error.message = [
-        error.message || "editppt image asset generation failed",
-        `Recorded ${partiallyGenerated.length} successfully regenerated asset prompt sidecar(s); retry will only request remaining stale/missing outputs.`
-      ].join("\n");
-    }
     if (dryRun || !allowLocalFallback || !canUseLocalAssetSeparation(jobs)) {
       error.message = [
         error.message || "editppt image asset generation failed",
@@ -230,13 +232,30 @@ async function main() {
         error: error.message || "checkerboard postprocess failed"
       }));
       postprocessed.push(result);
+      if (item.transparentBackground && item.sourceBoxPx) {
+        const normalized = await normalizeSeparatedAssetCanvas(item.generated).catch((error) => ({
+          ok: false,
+          path: item.generated,
+          error: error.message || "separated asset normalization failed"
+        }));
+        postprocessed.push(normalized);
+      }
     }
+    const existingBackends = readExistingImageBackends(pageDir, planned);
     for (const job of jobs) {
       const generatedPath = path.join(outDir, job.out || `${job.id}.png`);
       if (!fsSync.existsSync(generatedPath)) throw new Error(`Generated image not found for ${job.id}: ${generatedPath}`);
       if (job.import !== false) {
         const dest = normalizeRelativePath(job.dest || path.join("assets", job.out || `${job.id}.png`));
-        await runEditppt(["image", "import", pageDir, "--job-id", job.id, "--source-image", generatedPath, "--dest", dest, "--role", job.role || "asset", "--prompt-file", path.join(promptDir, `${job.id}.prompt.txt`), "--note", job.note || "visual asset helper import"]);
+        const plannedItem = planned.find((item) => item.id === job.id);
+        const recordedBackend = existingBackends.get(normalizeId(job.id)) || "";
+        if (!localFallback && !plannedItem?.actualBackend && !recordedBackend) {
+          throw new Error(`Existing visual asset ${job.id} has no producing-backend provenance. Regenerate it through editppt image generate/edit before import.`);
+        }
+        const actualBackend = localFallback
+          ? "unknown"
+          : plannedItem?.actualBackend || recordedBackend;
+        await runEditppt(["image", "import", pageDir, "--job-id", job.id, "--source-image", generatedPath, "--dest", dest, "--role", job.role || "asset", "--prompt-file", path.join(promptDir, `${job.id}.prompt.txt`), "--backend", actualBackend, "--note", job.note || "visual asset helper import"]);
         imported.push({ id: job.id, source: generatedPath, dest });
       }
       if (job.processSheet) {
@@ -248,6 +267,7 @@ async function main() {
       }
     }
     await augmentImagegenJobIndex(pageDir, jobs, planned);
+    if (force) await fs.rm(forceProgressPath, { force: true });
   }
 
   const report = {
@@ -308,6 +328,68 @@ function appendProcessSheetArgs(args, options = {}) {
 async function writeCurrentPromptFiles(planned = []) {
   for (const item of planned) {
     await fs.writeFile(item.promptFile, item.prompt, "utf8");
+  }
+}
+
+async function runEditpptImageJobs(planned = [], indexes = [], options = {}) {
+  for (const index of indexes) {
+    const item = planned[index];
+    if (!item) continue;
+    const imageJob = item.imageJob || {};
+    const inputImages = [imageJob.image, ...(Array.isArray(imageJob.images) ? imageJob.images : [])].filter(Boolean);
+    await fs.mkdir(path.dirname(item.generated), { recursive: true });
+    await fs.writeFile(item.promptFile, item.prompt, "utf8");
+    const operation = inputImages.length ? "edit" : "generate";
+    const args = [
+      "image",
+      operation,
+      "--prompt-file",
+      item.promptFile,
+      "--out",
+      item.generated,
+      "--model",
+      options.model || "gpt-image-2"
+    ];
+    const size = imageJob.size || options.size;
+    const quality = imageJob.quality || options.quality;
+    if (size) args.push("--size", String(size));
+    if (quality) args.push("--quality", String(quality));
+    for (const imagePath of inputImages) args.push("--image", imagePath);
+    if (imageJob.mask) args.push("--mask", imageJob.mask);
+    if (options.force || options.forceIndexes?.has(index)) args.push("--force");
+    if (options.dryRun) args.push("--dry-run");
+    const result = await runEditppt(args);
+    item.actualBackend = detectEditpptImageBackend(result);
+    if (!options.dryRun && !item.actualBackend) {
+      throw new Error(`editppt image completed ${item.id} without reporting the producing backend; refusing to guess provenance.`);
+    }
+    if (options.force && !options.dryRun) {
+      options.forceProgress.completed ||= {};
+      options.forceProgress.completed[item.id] = forceCheckpointFor(item);
+      await fs.mkdir(path.dirname(options.forceProgressPath), { recursive: true });
+      await fs.writeFile(options.forceProgressPath, JSON.stringify(options.forceProgress, null, 2), "utf8");
+    }
+  }
+}
+
+function forceCheckpointFor(item) {
+  return {
+    promptSha256: crypto.createHash("sha256").update(item.prompt, "utf8").digest("hex"),
+    generated: item.generated
+  };
+}
+
+function isForceCheckpointCurrent(progress, item) {
+  const saved = progress?.completed?.[item.id];
+  if (!saved || !fsSync.existsSync(item.generated)) return false;
+  return saved.promptSha256 === forceCheckpointFor(item).promptSha256 && path.resolve(saved.generated || "") === path.resolve(item.generated);
+}
+
+async function readJsonIfExists(filePath, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8"));
+  } catch {
+    return fallback;
   }
 }
 
@@ -459,7 +541,7 @@ function normalizeRelativePath(value) {
 
 async function runEditppt(args) {
   const editpptEnv = normalizeEditpptApiEnv(process.env);
-  await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const child = spawn(EDITPPT_PYTHON, ["-m", "editppt.cli", ...args], {
       cwd: PROJECT_ROOT,
       windowsHide: true,
@@ -470,8 +552,12 @@ async function runEditppt(args) {
         PYTHONIOENCODING: "utf-8"
       }
     });
+    let stdoutText = "";
     let stderrTail = "";
-    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.stdout.on("data", (chunk) => {
+      stdoutText = `${stdoutText}${chunk.toString("utf8")}`.slice(-10000);
+      process.stdout.write(chunk);
+    });
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString("utf8");
       stderrTail = `${stderrTail}${text}`.slice(-2000);
@@ -480,7 +566,7 @@ async function runEditppt(args) {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) {
-        resolve();
+        resolve({ stdout: stdoutText, stderr: stderrTail });
         return;
       }
       const error = new Error(`editppt ${args.join(" ")} exited with code ${code ?? ""}${signal ? ` signal ${signal}` : ""}`.trim());
@@ -490,6 +576,53 @@ async function runEditppt(args) {
       reject(error);
     });
   });
+}
+
+function detectEditpptImageBackend(result = {}) {
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  if (/"backend"\s*:\s*"codex-oauth"|Calling Codex OAuth image backend/i.test(output)) return "codex-oauth";
+  if (/"backend"\s*:\s*"openai-compatible-api"|Calling Image API/i.test(output)) return "openai-compatible-api";
+  return "";
+}
+
+function readExistingImageBackends(pageDir = "", planned = []) {
+  const result = new Map();
+  const plannedById = new Map(planned.map((item) => [normalizeId(item.id), item]));
+  const currentIndex = path.join(pageDir, "imagegen-jobs.json");
+  const archiveRoot = path.join(pageDir, ".retry-archive");
+  const archivedIndexes = fsSync.existsSync(archiveRoot)
+    ? fsSync.readdirSync(archiveRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(archiveRoot, entry.name, "imagegen-jobs.json"))
+      .filter((entry) => fsSync.existsSync(entry))
+      .sort((left, right) => fsSync.statSync(right).mtimeMs - fsSync.statSync(left).mtimeMs)
+    : [];
+
+  for (const indexPath of [currentIndex, ...archivedIndexes]) {
+    let index;
+    try {
+      index = JSON.parse(fsSync.readFileSync(indexPath, "utf8").replace(/^\uFEFF/, ""));
+    } catch {
+      continue;
+    }
+    const archived = indexPath !== currentIndex;
+    for (const record of Array.isArray(index.jobs) ? index.jobs : []) {
+      const id = normalizeId(record.job_id || record.id || "");
+      const backend = String(record.backend || "");
+      if (!id || result.has(id) || !["codex-oauth", "openai-compatible-api"].includes(backend)) continue;
+      const plannedItem = plannedById.get(id);
+      if (archived && !matchesArchivedOutput(record, plannedItem?.generated)) continue;
+      result.set(id, backend);
+    }
+  }
+  return result;
+}
+
+function matchesArchivedOutput(record = {}, generatedPath = "") {
+  const expectedSha256 = String(record.output_sha256 || "").trim().toLowerCase();
+  if (!expectedSha256 || !generatedPath || !fsSync.existsSync(generatedPath)) return false;
+  const actualSha256 = crypto.createHash("sha256").update(fsSync.readFileSync(generatedPath)).digest("hex");
+  return actualSha256 === expectedSha256;
 }
 
 async function removeCheckerboardTransparencyGrid(filePath = "") {
@@ -561,6 +694,72 @@ print(json.dumps({"ok": True, "path": str(path), "changed": True, "changedPixels
   return JSON.parse(String(stdout || "{}"));
 }
 
+async function normalizeSeparatedAssetCanvas(filePath = "") {
+  if (!filePath || !fsSync.existsSync(filePath)) return { ok: false, path: filePath, skipped: true, reason: "missing" };
+  const code = `
+import json, sys
+from collections import Counter, deque
+from pathlib import Path
+from PIL import Image
+
+path = Path(sys.argv[1])
+im = Image.open(path).convert("RGBA")
+w, h = im.size
+px = im.load()
+changed = 0
+
+if min(a for _,_,_,a in im.getdata()) >= 250:
+    step = max(1, min(w, h) // 300)
+    edge = []
+    for x in range(0, w, step):
+        edge.append(px[x,0][:3]); edge.append(px[x,h-1][:3])
+    for y in range(0, h, step):
+        edge.append(px[0,y][:3]); edge.append(px[w-1,y][:3])
+    buckets = Counter(tuple((c//16)*16 for c in rgb) for rgb in edge)
+    key, count = buckets.most_common(1)[0]
+    dominance = count / max(1, len(edge))
+    candidates = [rgb for rgb in edge if tuple((c//16)*16 for c in rgb) == key]
+    bg = tuple(sum(rgb[i] for rgb in candidates)//len(candidates) for i in range(3))
+    if dominance >= 0.38:
+        seen = set()
+        queue = deque()
+        for x in range(w): queue.append((x,0)); queue.append((x,h-1))
+        for y in range(h): queue.append((0,y)); queue.append((w-1,y))
+        while queue:
+            x,y = queue.popleft()
+            if (x,y) in seen: continue
+            seen.add((x,y))
+            r,g,b,a = px[x,y]
+            if (r-bg[0])**2 + (g-bg[1])**2 + (b-bg[2])**2 > 42**2: continue
+            if a:
+                px[x,y] = (r,g,b,0); changed += 1
+            if x: queue.append((x-1,y))
+            if x+1<w: queue.append((x+1,y))
+            if y: queue.append((x,y-1))
+            if y+1<h: queue.append((x,y+1))
+
+alpha = im.getchannel("A")
+bbox = alpha.getbbox()
+trimmed = False
+if bbox:
+    left, top, right, bottom = bbox
+    pad = max(2, round(max(right-left, bottom-top) * 0.025))
+    box = (max(0,left-pad), max(0,top-pad), min(w,right+pad), min(h,bottom+pad))
+    if box != (0,0,w,h):
+        im = im.crop(box); trimmed = True
+im.save(path)
+print(json.dumps({"ok": True, "path": str(path), "changedPixels": changed, "trimmed": trimmed, "size": list(im.size)}))
+`;
+  const { stdout } = await execFileAsync(EDITPPT_PYTHON, ["-c", code, filePath], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 120000,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  return JSON.parse(String(stdout || "{}"));
+}
+
 function normalizeEditpptApiEnv(env = {}) {
   const next = { ...env };
   if (!next.OPENAI_API_KEY && next.PROVIDER_API_KEY) next.OPENAI_API_KEY = next.PROVIDER_API_KEY;
@@ -571,11 +770,6 @@ function normalizeEditpptApiEnv(env = {}) {
     next.OPENAI_BASE_URL = normalizeOpenAiCompatibleBaseUrl(next.OPENAI_BASE_URL);
   } else if (next.PROVIDER_BASE_URL) {
     next.OPENAI_BASE_URL = normalizeOpenAiCompatibleBaseUrl(next.PROVIDER_BASE_URL);
-  }
-  if (next.OPENAI_API_KEY && next.OPENAI_BASE_URL && !next.PPT_TOOL_ALLOW_CODEX_OAUTH_IMAGE_BACKEND) {
-    // Keep Route B visual assets on the configured API backend; the desktop OAuth
-    // image backend can reject batch image_generation tool calls in this runtime.
-    next.CODEX_AUTH_FILE = path.join(PROJECT_ROOT, ".editppt-api-backend-only", "codex-auth.disabled.json");
   }
   return next;
 }

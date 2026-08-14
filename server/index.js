@@ -24,11 +24,12 @@ import { buildSceneGraphRepairRecord, buildVisualTargetSamplePrompt, compareRend
 import { buildAssetManifest, validateAssetManifest } from "./assetManifest.js";
 import { ensureVisualProjectForJob, generateVisualProjectSlides } from "./visualProject.js";
 import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
-import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobs, previewWorkflowJobCleanup, readWorkflowJob, restoreWorkflowJob, saveWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
+import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobSummaries, previewWorkflowJobCleanup, readWorkflowJob, readWorkflowJobsByIds, restoreWorkflowJob, saveWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
 import { getProviderConfig, listLlmModels, testImageProvider, testLlmProvider, testOcrProvider } from "./providers.js";
 import { renderWorkflowSource } from "./sourceRenderer.js";
-import { assembleWorkflowImageDeck, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, parsePageSelection, writeVisualQualityReport } from "./workflowVisuals.js";
-import { correctWorkflowOcrTextHint, runWorkflowOcr } from "./workflowOcr.js";
+import { assembleWorkflowImageDeck, assertVisualSampleSelectionAllowed, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, parsePageSelection, resolveWorkflowVisualSampleSelection, writeVisualQualityReport } from "./workflowVisuals.js";
+import { correctWorkflowOcrTextHint, getWorkflowOcrCoverage, runWorkflowOcr } from "./workflowOcr.js";
+import { writeWorkflowVisualTextQualityReport } from "./workflowVisualTextQa.js";
 import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, repairWorkflowEditablePageOpenability, testEditableRuntime, isImageDeckReviewApproved } from "./workflowEditable.js";
 import { claimWorkflowEditableWorkerTask, completeWorkflowEditableWorkerTask, heartbeatWorkflowEditableWorkerTask, listWorkflowEditableWorkerTasks, resetWorkflowEditableWorkerTask, syncWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { buildWorkflowWorkerBriefs, getWorkflowWorkerBriefs } from "./workflowWorkerBriefs.js";
@@ -37,8 +38,8 @@ import { listWorkflowArtifactLinks, resolveWorkflowArtifact } from "./workflowAr
 import { buildWorkflowLogBundle } from "./workflowLogBundle.js";
 import { getWorkflowComplianceStatus } from "./workflowCompliance.js";
 import { approveWorkflowManualReview, approveWorkflowVisualQualityReview, recordWorkflowPageVisualReview, resetWorkflowManualReview } from "./workflowManualReview.js";
-import { approveWorkflowImageDeckReview, assertWorkflowImageDeckReviewReady, recordWorkflowImageDeckPageReview } from "./workflowImageDeckReview.js";
-import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, CODEX_PPT_VISUAL_TEST_GATES, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
+import { approveWorkflowImageDeckReview, assertWorkflowImageDeckReviewReady, recordWorkflowImageDeckPageReview, recordWorkflowImageDeckPagesForRerun } from "./workflowImageDeckReview.js";
+import { approveCodexPptGate, assertCodexPptApprovals, CODEX_PPT_VISUAL_DECK_GATES, CODEX_PPT_VISUAL_SAMPLE_GATES, CODEX_PPT_VISUAL_TEST_GATES, isCodexPptSampleApprovalCurrent, preflightCodexPptGate, resetCodexPptGate } from "./workflowApprovals.js";
 import { buildSkillFirstOutlineDraft, recordWorkflowCodexPptOutline } from "./workflowOutline.js";
 import { recordWorkflowCodexPptBackendDecision, recordWorkflowCodexPptStyle } from "./workflowCodexPptDecisions.js";
 import { assertWorkflowInformationAssetMapReady, buildWorkflowInformationAssetMap } from "./workflowInformationAssets.js";
@@ -55,6 +56,9 @@ import { getV1AcceptanceRunStatus, preflightV1AcceptanceRun, startV1AcceptanceRu
 import { approveProductVisualFullDeck, approveProductVisualSample, getLatestProductVisualReadiness, getProductVisualFullDeckApprovalPreflight, getProductVisualFullDeckPreflight, getProductVisualSampleApprovalPreflight, getProductVisualSamplePreflight, getProductVisualSamplePromptPreview, runProductVisualFullDeck, runProductVisualReadinessNoCost, runProductVisualSample } from "./workflowProductVisualReadinessRunner.js";
 import { authorizeExternalImageSpend, getExternalImageAuthorizationStatus, listWorkflowAuthorizations } from "./workflowAuthorizations.js";
 import { getWorkflowContinuationPreflight, runWorkflowContinuation } from "./workflowContinuation.js";
+import { requestIdempotency, resolveIdempotencyRecord } from "./requestIdempotency.js";
+import { cleanupAbandonedWorkflowJobLocks } from "./workflowJobLock.js";
+import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -78,6 +82,21 @@ const DEFAULT_PRIMARY_WORKFLOW_JOB_ID = "";
 await ensureDirs();
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
+app.use(requestIdempotency);
+
+app.post("/api/system/idempotency/resolve", (req, res, next) => {
+  try {
+    if (req.body?.confirmation !== "verified-no-side-effect") {
+      const error = new Error("Explicit confirmation is required after checking current workflow state");
+      error.status = 400;
+      error.code = "IDEMPOTENCY_RESOLUTION_CONFIRMATION_REQUIRED";
+      throw error;
+    }
+    res.json({ ok: true, ...resolveIdempotencyRecord(req.body || {}) });
+  } catch (error) {
+    next(error);
+  }
+});
 app.use("/outputs", express.static(outputDir));
 app.use("/uploads", express.static(uploadDir));
 
@@ -443,12 +462,19 @@ app.get("/api/workflow-jobs", async (req, res, next) => {
   try {
     const includeInternal = isTruthyQuery(req.query?.includeInternal);
     const includeArchived = isTruthyQuery(req.query?.includeArchived);
-    const allJobs = await listWorkflowJobs();
-    const primaryJob = findPrimaryWorkflowJob(allJobs);
+    const requestedLimit = Number(req.query?.limit || 120);
+    const requestedOffset = Number(req.query?.offset || 0);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 120;
+    const offset = Number.isFinite(requestedOffset) ? Math.max(0, Math.floor(requestedOffset)) : 0;
+    const allJobs = await listWorkflowJobSummaries();
+    const primaryJobId = getPrimaryWorkflowJobId();
+    const primaryJob = primaryJobId ? await readWorkflowJob(primaryJobId).catch(() => null) : null;
     const visibleByInternal = includeInternal ? allJobs : allJobs.filter((job) => !isInternalWorkflowJob(job));
     const jobs = includeArchived ? visibleByInternal : visibleByInternal.filter((job) => !isArchivedWorkflowJob(job));
+    const pagedSummaries = jobs.slice(offset, offset + limit);
+    const pagedJobs = await readWorkflowJobsByIds(pagedSummaries.map((job) => job.id));
     const primaryWorkflow = buildPrimaryWorkflowPayload(primaryJob);
-    const clientJobs = jobs.map((job) => toClientWorkflowJob(job, { primaryWorkflow }));
+    const clientJobs = pagedJobs.map((job) => toClientWorkflowJob(job, { primaryWorkflow }));
     const shouldAddPrimarySummary = primaryWorkflow.found
       && !includeInternal
       && (!isArchivedWorkflowJob(primaryJob) || includeArchived)
@@ -458,7 +484,13 @@ app.get("/api/workflow-jobs", async (req, res, next) => {
       jobs: publicJobs,
       primaryWorkflow,
       hiddenInternalCount: allJobs.length - visibleByInternal.length,
-      hiddenArchivedCount: visibleByInternal.length - jobs.length
+      hiddenArchivedCount: visibleByInternal.length - jobs.length,
+      totalCount: jobs.length,
+      returnedCount: pagedSummaries.length,
+      offset,
+      limit,
+      hasMore: offset + pagedSummaries.length < jobs.length,
+      nextOffset: offset + pagedSummaries.length
     });
   } catch (error) {
     next(error);
@@ -502,6 +534,7 @@ app.post("/api/workflow-jobs", async (req, res, next) => {
       sourceMimeType: req.body?.sourceMimeType || "",
       sourceSize: req.body?.sourceSize || 0,
       sourceBrief: req.body?.sourceBrief || req.body?.brief || "",
+      projectName: req.body?.projectName || "",
       mode: req.body?.mode || "ppt-rebuild",
       notes: req.body?.notes || "",
       internal: req.body?.internal === true
@@ -522,8 +555,8 @@ app.get("/api/workflow-jobs/:id", async (req, res, next) => {
       res.status(404).json({ error: "Workflow job not found" });
       return;
     }
-    const allJobs = await listWorkflowJobs();
-    const primaryJob = findPrimaryWorkflowJob(allJobs);
+    const primaryJobId = getPrimaryWorkflowJobId();
+    const primaryJob = primaryJobId ? await readWorkflowJob(primaryJobId).catch(() => null) : null;
     if (!canExposeWorkflowJob(job, primaryJob)) {
       res.status(404).json({ error: "Workflow job not found" });
       return;
@@ -1134,10 +1167,14 @@ async function rebuildVisualQualityFromExisting(jobId) {
       summary: visualQuality.summary
     }
   };
+  const visualTextQuality = job.artifacts?.visualOcrTextHints?.path
+    ? await writeWorkflowVisualTextQualityReport(job)
+    : null;
   addEvent(job, "visual_quality.rebuilt", "Rebuilt visual quality report from existing visual images", {
     pageCount: visualQuality.summary?.pageCount || visualImages.length,
     reviewCount: visualQuality.summary?.reviewCount || 0,
-    failedCount: visualQuality.summary?.failedCount || 0
+    failedCount: visualQuality.summary?.failedCount || 0,
+    semanticBlockedCount: visualTextQuality?.report?.summary?.blockedCount || 0
   });
   const saved = await saveWorkflowJob(job);
   return {
@@ -1539,24 +1576,53 @@ app.post("/api/workflow-jobs/:id/review/pages/:pageId", async (req, res) => {
 
 app.post("/api/workflow-jobs/:id/image-deck/review/pages/:pageId", async (req, res) => {
   try {
-    const job = await recordWorkflowImageDeckPageReview(req.params.id, {
+    const job = await runWithCurrentVisualQuality(req.params.id, () => recordWorkflowImageDeckPageReview(req.params.id, {
       ...(req.body || {}),
       pageId: req.params.pageId
-    });
+    }));
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
     res.status(error.status || 400).json({ ok: false, error: error.message || "Image deck page review failed", code: error.code || "" });
   }
 });
 
+app.post("/api/workflow-jobs/:id/image-deck/review/rerun-pages", async (req, res) => {
+  try {
+    const job = await recordWorkflowImageDeckPagesForRerun(req.params.id, req.body || {});
+    res.json(toClientWorkflowJob(job, { includeEvents: true }));
+  } catch (error) {
+    res.status(error.status || 400).json({
+      ok: false,
+      error: error.message || "Image deck pages rerun reset failed",
+      code: error.code || "",
+      pages: error.pages || []
+    });
+  }
+});
+
 app.post("/api/workflow-jobs/:id/image-deck/review/approve", async (req, res) => {
   try {
-    const job = await approveWorkflowImageDeckReview(req.params.id, req.body || {});
+    const job = await runWithCurrentVisualQuality(req.params.id, () => approveWorkflowImageDeckReview(req.params.id, req.body || {}));
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
     res.status(error.status || 400).json({ ok: false, error: error.message || "Image deck review approval failed", code: error.code || "", summary: error.summary || null });
   }
 });
+
+async function runWithCurrentVisualQuality(jobId, action) {
+  try {
+    return await action();
+  } catch (error) {
+    const recoverableCodes = new Set([
+      "IMAGE_DECK_VISUAL_QUALITY_REQUIRED",
+      "IMAGE_DECK_VISUAL_QUALITY_INVALID",
+      "IMAGE_DECK_VISUAL_QUALITY_STALE"
+    ]);
+    if (!recoverableCodes.has(error?.code)) throw error;
+    await rebuildVisualQualityFromExisting(jobId);
+    return action();
+  }
+}
 
 app.post("/api/workflow-jobs/:id/visual-quality/review/approve", async (req, res) => {
   try {
@@ -1738,21 +1804,46 @@ app.post("/api/workflow-jobs/:id/source/render", async (req, res, next) => {
 
 app.post("/api/workflow-jobs/:id/visual/sample", async (req, res, next) => {
   try {
-    const currentJob = await readWorkflowJob(req.params.id);
+    let currentJob = await readWorkflowJob(req.params.id);
     const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, { scope: "visual-sample", imageCalls: 1 }));
     await assertCodexPptApprovals(req.params.id, CODEX_PPT_VISUAL_SAMPLE_GATES);
     assertWorkflowInformationAssetMapReady(currentJob);
-    assertWorkflowOcrTextHintsReady(currentJob);
+    const sampleSelection = resolveWorkflowVisualSampleSelection(currentJob, body);
+    assertVisualSampleSelectionAllowed(sampleSelection);
+    const samplePageNumber = sampleSelection?.pageNumber || 1;
+    const samplePageId = `page_${String(samplePageNumber).padStart(3, "0")}`;
+    const sampleOcrCoverage = getWorkflowOcrCoverage(currentJob, { pages: [samplePageId] });
+    if (!sampleOcrCoverage.complete) {
+      currentJob = await runWorkflowOcr(req.params.id, {
+        source: "rendered",
+        pages: samplePageId,
+        maxPages: 1,
+        preserveWorkflowStage: true,
+        requestedBy: "visual-sample-source-ocr"
+      });
+    }
+    assertWorkflowOcrTextHintsReady(currentJob, { pages: [samplePageId] });
     assertWorkflowVisualGenerationAllowed(body);
+    const sampleOptions = { ...body, pageNumber: samplePageNumber };
     await updateWorkflowStage(req.params.id, {
       stage: "visual_sample_ready",
       status: "running",
       message: "Generating visual sample",
-      details: { pageNumber: body?.pageNumber || body?.page || 1, dryRun: Boolean(body?.dryRun) }
+      details: { pageNumber: samplePageNumber, sampleSelection: sampleSelection?.mode || "", dryRun: Boolean(body?.dryRun) }
     });
-    const job = await generateWorkflowVisualSample(req.params.id, body);
+    const job = await generateWorkflowVisualSample(req.params.id, sampleOptions);
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
+    if (["CODEX_PPT_NON_REPRESENTATIVE_SAMPLE_REQUIRES_OPT_IN", "CODEX_PPT_SAMPLE_PAGE_NOT_FOUND"].includes(error.code || "")) {
+      res.status(409).json({
+        ok: false,
+        error: error.message || "Visual sample page selection is blocked",
+        code: error.code,
+        pageNumber: error.pageNumber || null,
+        recommendedPageNumber: error.recommendedPageNumber || null
+      });
+      return;
+    }
     if (isCodexPptApprovalError(error)) {
       res.status(409).json(formatCodexPptApprovalError(error));
       return;
@@ -1762,7 +1853,7 @@ app.post("/api/workflow-jobs/:id/visual/sample", async (req, res, next) => {
         stage: "visual_sample_ready",
         status: "failed",
         message: error.message || "Visual sample generation failed",
-        details: { requestedBy: "api" }
+        details: { requestedBy: "api", code: error.code || "", coverage: error.coverage || null }
       });
       res.status(400).json(toClientWorkflowJob(job, { includeEvents: true }));
     } catch {
@@ -1799,15 +1890,23 @@ app.post("/api/workflow-jobs/:id/visual/generate", async (req, res, next) => {
   try {
     const currentJob = await readWorkflowJob(req.params.id);
     const pageCount = Array.isArray(currentJob.artifacts?.renderedPages) ? currentJob.artifacts.renderedPages.length : 0;
-    const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, { scope: "full-deck", imageCalls: pageCount }));
-    const requestedPages = parsePageSelection(body.pages || body.pageNumbers || "", pageCount);
+    const requestedPages = parsePageSelection(req.body?.pages || req.body?.pageNumbers || "", pageCount);
+    const sample = currentJob.artifacts?.visualSample || {};
+    const samplePageNumber = Number(sample.pageNumber || String(sample.pageId || "").match(/\d+/)?.[0] || 0);
+    const retainedSampleReady = Boolean(samplePageNumber && sample.path && sample.sha256 && isCodexPptSampleApprovalCurrent(currentJob));
+    const externalImageCalls = requestedPages.filter((pageNumber) => !retainedSampleReady || pageNumber !== samplePageNumber).length;
+    const body = withExternalImageAuthorization(req.body || {}, getExternalImageAuthorizationStatus(currentJob, {
+      scope: "full-deck",
+      imageCalls: externalImageCalls,
+      pages: requestedPages
+    }));
     const isTwoPageTest = requestedPages.length > 0 && requestedPages.length <= 2;
     await assertCodexPptApprovals(
       req.params.id,
       isTwoPageTest ? CODEX_PPT_VISUAL_TEST_GATES : CODEX_PPT_VISUAL_DECK_GATES
     );
     assertWorkflowInformationAssetMapReady(currentJob);
-    assertWorkflowOcrTextHintsReady(currentJob);
+    assertWorkflowOcrTextHintsReady(currentJob, { pages: requestedPages });
     assertWorkflowVisualGenerationAllowed(body);
     await updateWorkflowStage(req.params.id, {
       stage: "visual_generating",
@@ -1989,17 +2088,21 @@ app.post("/api/workflow-jobs/:id/image-deck/assemble", async (req, res, next) =>
 });
 
 app.post("/api/workflow-jobs/:id/ocr/run", async (req, res, next) => {
+  const preserveWorkflowStage = req.body?.preserveWorkflowStage === true;
   try {
-    await updateWorkflowStage(req.params.id, {
-      stage: "ocr_ready",
-      status: "running",
-      message: "Running OCR",
-      details: { minConfidence: req.body?.minConfidence || 0.35 }
-    });
+    if (!preserveWorkflowStage) {
+      await updateWorkflowStage(req.params.id, {
+        stage: "ocr_ready",
+        status: "running",
+        message: "Running OCR",
+        details: { minConfidence: req.body?.minConfidence || 0.35 }
+      });
+    }
     const job = await runWorkflowOcr(req.params.id, req.body || {});
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
     try {
+      if (preserveWorkflowStage) return next(error);
       const job = await updateWorkflowStage(req.params.id, {
         stage: "ocr_ready",
         status: "failed",
@@ -2320,7 +2423,7 @@ app.post("/api/workflow-jobs/:id/editable/worker-runs/preflight", async (req, re
     const result = await getWorkflowEditableWorkerBatchPreflight(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
-    res.status(400).json({ ok: false, error: error.message || "Worker batch preflight failed" });
+    res.status(Number(error.status || 400)).json({ ok: false, code: error.code || "", error: error.message || "Worker batch preflight failed" });
   }
 });
 
@@ -2356,7 +2459,7 @@ app.post("/api/workflow-jobs/:id/editable/worker-runs", async (req, res) => {
     const result = await startWorkflowEditableWorkerBatch(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
-    res.status(400).json({ ok: false, error: error.message || "Worker batch start failed" });
+    res.status(Number(error.status || 400)).json({ ok: false, code: error.code || "", error: error.message || "Worker batch start failed" });
   }
 });
 
@@ -2479,6 +2582,17 @@ app.post("/api/workflow-jobs/:id/final-visual-qa/retry-preflight", async (req, r
 app.post("/api/workflow-jobs/:id/final-visual-qa/retry", async (req, res) => {
   try {
     const result = await retryFinalVisualQaWorkflowPages(req.params.id, req.body || {});
+    if (result.ok === false) {
+      const failedPages = (result.results || []).filter((item) => item?.ok === false);
+      const detail = failedPages.length
+        ? failedPages.map((item) => `${item.pageId}: ${item.error || "reset failed"}`).join("; ")
+        : "one or more pages were not reset";
+      res.status(409).json({
+        ...result,
+        error: `Final visual QA retry was only partially applied: ${detail}`
+      });
+      return;
+    }
     res.json(result);
   } catch (error) {
     res.status(400).json({
@@ -2509,15 +2623,13 @@ app.post("/api/workflow-jobs/:id/pages/retry-stale-evidence", async (req, res) =
 
 app.post("/api/workflow-jobs/:id/editable/dispatch", async (req, res, next) => {
   try {
-    await updateWorkflowStage(req.params.id, {
-      stage: "pages_running",
-      status: "running",
-      message: "Dispatching editable page worker",
-      details: { pageId: req.body?.pageId || req.body?.page, agentId: req.body?.agentId || "" }
-    });
     const job = await dispatchWorkflowEditablePage(req.params.id, req.body || {});
     res.json(toClientWorkflowJob(job, { includeEvents: true }));
   } catch (error) {
+    if (Number(error.status || 0) === 409) {
+      res.status(409).json({ ok: false, code: error.code || "WORKFLOW_GATE_BLOCKED", error: error.message || "Workflow gate blocked editable page dispatch" });
+      return;
+    }
     try {
       const job = await updateWorkflowStage(req.params.id, {
         stage: "pages_running",
@@ -2544,7 +2656,13 @@ app.post("/api/workflow-jobs/:id/editable/record", async (req, res, next) => {
         message: error.message || "Editable page record failed",
         details: { pageId: req.body?.pageId || req.body?.page, agentId: req.body?.agentId || "" }
       });
-      res.status(400).json(toClientWorkflowJob(job, { includeEvents: true }));
+      res.status(error.code === "EDITABLE_VISUAL_FIDELITY_FAILED" ? 409 : 400).json({
+        ...toClientWorkflowJob(job, { includeEvents: true }),
+        ok: false,
+        error: error.message || "Editable page record failed",
+        code: error.code || "EDITABLE_PAGE_RECORD_FAILED",
+        details: error.details || null
+      });
     } catch {
       next(error);
     }
@@ -4802,6 +4920,10 @@ app.use((error, _req, res, _next) => {
   });
 });
 
+await cleanupAbandonedWorkflowJobLocks().catch((error) => {
+  console.warn(`Workflow lock cleanup skipped: ${error?.message || error}`);
+});
+
 app.listen(port, () => {
   console.log("PPT Design Tool running at http://127.0.0.1:" + port);
 });
@@ -4956,23 +5078,20 @@ function getPrimaryWorkflowJobId() {
   return configured || DEFAULT_PRIMARY_WORKFLOW_JOB_ID;
 }
 
-function findPrimaryWorkflowJob(jobs = []) {
-  const primaryId = getPrimaryWorkflowJobId();
-  return jobs.find((job) => job?.id === primaryId) || null;
-}
-
 function canExposeWorkflowJob(job = null, primaryJob = null) {
   if (!job?.id) return false;
   if (!isInternalWorkflowJob(job)) return true;
   return Boolean(primaryJob?.id && job.id === primaryJob.id);
 }
 
-function assertWorkflowOcrTextHintsReady(job = {}) {
+function assertWorkflowOcrTextHintsReady(job = {}, options = {}) {
   const artifact = job.artifacts?.ocrTextHints || {};
-  if (artifact.path || artifact.relativePath) return;
+  const coverage = getWorkflowOcrCoverage(job, options);
+  if ((artifact.path || artifact.relativePath) && coverage.complete) return;
   const error = new Error("Source-page OCR text hints are required before visual image generation.");
   error.status = 409;
   error.code = "OCR_TEXT_HINTS_REQUIRED";
+  error.coverage = coverage;
   throw error;
 }
 
@@ -5096,6 +5215,7 @@ function buildPrimaryWorkflowDeliveryLevel({ sourcePages = 0, finalPages = 0, re
   if (!sourcePages) return "unknown";
   if (!finalPages) return recordedEditablePages ? "editable-pages-recorded" : "not-finalized";
   if (finalPages < sourcePages) return "sample-draft";
+  if (finalPages > sourcePages) return "page-count-mismatch";
   return "needs-delivery-review";
 }
 
@@ -5105,6 +5225,7 @@ function primaryWorkflowDeliveryHint(level = "") {
     "not-finalized": "还没有生成最终可编辑 PPT。",
     "editable-pages-recorded": "页面已重建，等待合成最终 PPT。",
     "sample-draft": "已生成小样本 final，完整交付还没覆盖全部页面。",
+    "page-count-mismatch": "最终 PPT 页数与源文件不一致，请移除重复或异常页面后重新合成。",
     "needs-delivery-review": "20/20 已合成，但还需要交付门禁和人工视觉复核。"
   };
   return hints[level] || "请打开交付复核查看当前状态。";
@@ -5157,17 +5278,6 @@ function readWorkflowCleanupOptions(input = {}) {
     olderThanHours: Number(input.olderThanHours || 0),
     limit: Number(input.limit || 200)
   };
-}
-
-function isInternalWorkflowJob(job = {}) {
-  if (job.internal === true || job.input?.internal === true) return true;
-  const text = [
-    job.input?.mode,
-    job.input?.sourceOriginalName,
-    job.input?.notes,
-    ...(Array.isArray(job.events) ? job.events.map((event) => `${event.type || ""} ${event.message || ""}`) : [])
-  ].filter(Boolean).join(" ");
-  return /\b(regression|smoke-e2e|product-visual-readiness|codex-slide-negative)\b/i.test(text);
 }
 
 function isArchivedWorkflowJob(job = {}) {

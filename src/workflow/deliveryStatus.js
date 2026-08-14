@@ -1,1 +1,1 @@
-export { deriveWorkflowDeliveryStatus } from "../../shared/workflowDeliveryStatus.js";
+export { deriveWorkflowDeliveryStatus, isWorkflowImageDeckReviewReady } from "../../shared/workflowDeliveryStatus.js";

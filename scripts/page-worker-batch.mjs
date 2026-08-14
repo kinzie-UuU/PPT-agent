@@ -36,10 +36,10 @@ async function main() {
   const bundle = await apiClient.sync(jobId);
   const allowedPages = selectedPages.length ? new Set(selectedPages) : null;
   const tasks = (bundle.tasks || [])
-    .filter((task) => task.status === "ready" || task.status === "failed")
+    .filter((task) => task.status === "ready")
     .filter((task) => !allowedPages || allowedPages.has(task.pageId))
     .slice(0, maxPages);
-  if (!tasks.length) throw new Error("No ready or failed worker tasks matched the requested pages.");
+  if (!tasks.length) throw new Error("No ready worker tasks matched the requested pages. Reset failed pages after reviewing their failure reason before retrying.");
 
   const results = [];
   for (const task of tasks) {
@@ -52,9 +52,13 @@ async function main() {
     } catch (error) {
       results.push({ pageId: task.pageId, agentId, ok: false, error: error.message || String(error), startedAt, finishedAt: new Date().toISOString() });
       if (resetOnError) {
-        await apiClient.reset(jobId, task.pageId, error.message || String(error)).catch((resetError) => {
-          results.push({ pageId: task.pageId, agentId, ok: false, error: `reset after failure failed: ${resetError.message || resetError}`, startedAt, finishedAt: new Date().toISOString() });
-        });
+        const currentBundle = await apiClient.list(jobId).catch(() => null);
+        const currentTask = (currentBundle?.tasks || []).find((item) => item.pageId === task.pageId);
+        if (currentTask?.status !== "failed") {
+          await apiClient.reset(jobId, task.pageId, error.message || String(error)).catch((resetError) => {
+            results.push({ pageId: task.pageId, agentId, ok: false, error: `reset after failure failed: ${resetError.message || resetError}`, startedAt, finishedAt: new Date().toISOString() });
+          });
+        }
       }
       if (!continueOnError) break;
     }
@@ -89,12 +93,20 @@ function makeHttpClient(baseUrl) {
     complete(jobId, pageId, options) {
       return api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${pageId}/complete`, { method: "POST", body: options });
     },
-    reset(jobId, pageId, reason) {
+    reset(jobId, pageId, reason, attempt = {}) {
+      const preserveGeneratedAssets = shouldPreserveGeneratedAssets(reason);
       return api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${pageId}/reset`, {
         method: "POST",
         body: {
           reason: `batch failure: ${String(reason || "").slice(0, 180)}`,
-          allowQueueOnlyReset: true
+          allowQueueOnlyReset: false,
+          forceEditpptReset: true,
+          confirmLost: true,
+          clearGeneratedArtifacts: true,
+          failureRelease: true,
+          failureReason: String(reason || "worker execution failed"),
+          ...attempt,
+          preserveGeneratedAssets
         }
       });
     }
@@ -116,10 +128,18 @@ async function makeDirectClient() {
     complete(jobId, pageId, options) {
       return queue.completeWorkflowEditableWorkerTask(jobId, pageId, options);
     },
-    reset(jobId, pageId, reason) {
+    reset(jobId, pageId, reason, attempt = {}) {
+      const preserveGeneratedAssets = shouldPreserveGeneratedAssets(reason);
       return queue.resetWorkflowEditableWorkerTask(jobId, pageId, {
         reason: `batch failure: ${String(reason || "").slice(0, 180)}`,
-        allowQueueOnlyReset: true
+        allowQueueOnlyReset: false,
+        forceEditpptReset: true,
+        confirmLost: true,
+        clearGeneratedArtifacts: true,
+        failureRelease: true,
+        failureReason: String(reason || "worker execution failed"),
+        ...attempt,
+        preserveGeneratedAssets
       });
     }
   };
@@ -129,32 +149,42 @@ async function runDirectTask({ apiClient, bundle, jobId, pageId, agentId, worker
   const prompt = (bundle.prompts || []).find((item) => item.pageId === pageId);
   const task = (bundle.tasks || []).find((item) => item.pageId === pageId);
   if (!prompt) throw new Error(`No prompt found for ${pageId}`);
-  await apiClient.claim(jobId, pageId, { agentId, workerName: agentId, agentNickname: agentId, acceptOfflineTextHints, offlineTextHintsReason });
-  const { stdout, stderr } = await execFileAsync("cmd.exe", ["/d", "/s", "/c", workerCommand], {
-    cwd: PROJECT_ROOT,
-    windowsHide: true,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 1024 * 1024 * 20,
-    env: {
-      ...process.env,
-      PPT_TOOL_BASE_URL: DEFAULT_BASE_URL,
-      PPT_WORKFLOW_JOB_ID: jobId,
-      PPT_WORKER_AGENT_ID: agentId,
-      PPT_WORKER_PAGE_ID: pageId,
-      PPT_WORKER_PROMPT_FILE: prompt.promptFile || task?.promptFile || "",
-      PPT_WORKER_PAGE_DIR: prompt.pageDir || task?.pageDir || "",
-      PPT_WORKER_RUN_DIR: bundle.runDir || "",
-      PPT_WORKER_PROMPT_RELATIVE_PATH: prompt.relativePath || task?.relativePath || "",
-      PPT_TOOL_PROJECT_ROOT: PROJECT_ROOT,
-      PYTHONIOENCODING: "utf-8",
-      PPT_ACCEPT_OFFLINE_TEXT_HINTS: acceptOfflineTextHints ? "1" : "",
-      PPT_OFFLINE_TEXT_HINTS_REASON: offlineTextHintsReason
-    }
-  });
-  if (stdout) process.stdout.write(stdout);
-  if (stderr) process.stderr.write(stderr);
-  await apiClient.complete(jobId, pageId, { agentId });
+  const claimBundle = await apiClient.claim(jobId, pageId, { agentId, workerName: agentId, agentNickname: agentId, acceptOfflineTextHints, offlineTextHintsReason });
+  const claimedTask = (claimBundle.tasks || []).find((item) => item.pageId === pageId) || {};
+  const attempt = { attemptId: claimedTask.attemptId || "", leaseToken: claimedTask.leaseToken || "" };
+  if (!attempt.attemptId || !attempt.leaseToken) throw new Error(`Claim did not return an attempt lease for ${pageId}.`);
+  try {
+    const { stdout, stderr } = await execFileAsync("cmd.exe", ["/d", "/s", "/c", workerCommand], {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024 * 20,
+      env: {
+        ...process.env,
+        PPT_TOOL_BASE_URL: DEFAULT_BASE_URL,
+        PPT_WORKFLOW_JOB_ID: jobId,
+        PPT_WORKER_AGENT_ID: agentId,
+        PPT_WORKER_PAGE_ID: pageId,
+        PPT_WORKER_ATTEMPT_ID: attempt.attemptId,
+        PPT_WORKER_LEASE_TOKEN: attempt.leaseToken,
+        PPT_WORKER_PROMPT_FILE: prompt.promptFile || task?.promptFile || "",
+        PPT_WORKER_PAGE_DIR: prompt.pageDir || task?.pageDir || "",
+        PPT_WORKER_RUN_DIR: bundle.runDir || "",
+        PPT_WORKER_PROMPT_RELATIVE_PATH: prompt.relativePath || task?.relativePath || "",
+        PPT_TOOL_PROJECT_ROOT: PROJECT_ROOT,
+        PYTHONIOENCODING: "utf-8",
+        PPT_ACCEPT_OFFLINE_TEXT_HINTS: acceptOfflineTextHints ? "1" : "",
+        PPT_OFFLINE_TEXT_HINTS_REASON: offlineTextHintsReason
+      }
+    });
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+    await apiClient.complete(jobId, pageId, { agentId, ...attempt });
+  } catch (error) {
+    await apiClient.reset(jobId, pageId, error.message || String(error), attempt).catch(() => null);
+    throw error;
+  }
 }
 
 async function runOnce({ jobId, pageId, agentId, workerCommand, baseUrl, timeoutMs, acceptOfflineTextHints = false, offlineTextHintsReason = "" }) {
@@ -214,13 +244,19 @@ async function runStreaming(command, args, { timeoutMs, env }) {
         resolve();
         return;
       }
-      const error = new Error(`Worker command exited with code ${code ?? ""}${signal ? ` signal ${signal}` : ""}`.trim());
+      const detail = stderrTail.replace(/\s+/g, " ").trim().slice(-800);
+      const error = new Error(`${`Worker command exited with code ${code ?? ""}${signal ? ` signal ${signal}` : ""}`.trim()}${detail ? `: ${detail}` : ""}`);
       error.code = code;
       error.signal = signal;
       error.stderr = stderrTail;
       reject(error);
     });
   });
+}
+
+function shouldPreserveGeneratedAssets(reason = "") {
+  const text = String(reason || "");
+  return /model-page-spec-worker|visual-asset-helper|needed_visual_asset_jobs|complex background visual|matching positioned shape or image|product visual fidelity QA|visual similarity|structure-loss|output already exists|generated image/i.test(text);
 }
 
 async function api(baseUrl, route, { method = "GET", body = null } = {}) {

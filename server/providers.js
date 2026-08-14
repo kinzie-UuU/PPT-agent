@@ -533,7 +533,28 @@ export async function requestOpenAiCompatible(baseUrl, endpoint, options = {}) {
   }
   const last = errors.at(-1);
   if (last?.response) return last;
-  throw new Error(last?.error?.message || "Provider connection failed");
+  throw buildProviderConnectionError(last?.error, last?.url || `${normalizeBaseUrl(baseUrl)}${endpoint}`);
+}
+
+export function buildProviderConnectionError(error, url = "") {
+  const causeCode = String(error?.cause?.code || "").trim();
+  const proxyConfigured = Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.ALL_PROXY);
+  const envProxyEnabled = process.execArgv.includes("--use-env-proxy") || process.env.NODE_USE_ENV_PROXY === "1";
+  const target = (() => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return "image provider";
+    }
+  })();
+  const proxyHint = proxyConfigured && !envProxyEnabled
+    ? " \u5df2\u68c0\u6d4b\u5230\u7cfb\u7edf\u4ee3\u7406\uff0c\u4f46\u5f53\u524d Node \u8fdb\u7a0b\u672a\u542f\u7528\u73af\u5883\u4ee3\u7406\u3002\u8bf7\u4f7f\u7528 npm start \u6216 scripts/start-local.ps1 \u542f\u52a8\u670d\u52a1\u3002"
+    : "";
+  const detail = causeCode ? ` (${causeCode})` : "";
+  const connectionError = new Error(`\u56fe\u7247\u670d\u52a1 ${target} \u8fde\u63a5\u5931\u8d25${detail}\u3002${proxyHint}`);
+  connectionError.code = "PROVIDER_CONNECTION_FAILED";
+  connectionError.cause = error;
+  return connectionError;
 }
 
 export function normalizeBaseUrl(value) {
@@ -553,18 +574,15 @@ export function stripEndpoint(url, endpoint) {
 }
 
 export async function readProviderError(response) {
-  const contentType = response.headers.get("content-type") || "";
-  const text = await response.text();
-  if (/application\/json/i.test(contentType)) {
-    try {
-      const data = JSON.parse(text);
-      return data.error?.message || data.message || text.slice(0, 240);
-    } catch {
-      return text.slice(0, 240);
-    }
-  }
-  if (/^\s*</.test(text)) return "Provider returned HTML instead of JSON. Check whether Base URL needs /v1.";
-  return text.slice(0, 240);
+  const status = Number(response?.status || 0);
+  await response.text().catch(() => "");
+  if (status === 401 || status === 403) return "Provider authentication failed. Check the API key and model permissions.";
+  if (status === 408 || status === 504) return "Provider request timed out.";
+  if (status === 429) return "Provider rate limit or quota was reached.";
+  if (status >= 500) return "Provider service is temporarily unavailable.";
+  if (status === 400 || status === 422) return "Provider rejected the request parameters or input image.";
+  if (status === 404 || status === 405) return "Provider endpoint was not found. Check whether the Base URL needs /v1.";
+  return "Provider request failed. Raw response details were hidden.";
 }
 
 function mergeLlmConfig(overrides = {}) {

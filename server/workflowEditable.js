@@ -3,11 +3,14 @@ import fsSync from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
+import JSZip from "jszip";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
 import { inspectEditablePptx, inspectPowerPointOpenability } from "./pptxEditability.js";
 import { runWorkflowOcr } from "./workflowOcr.js";
+import { comparePngVisualFidelity, EDITABLE_VISUAL_SIMILARITY_MINIMUM, evaluateEditableVisualFidelity } from "./workflowFinalEvidence.js";
+import { isWorkflowImageDeckReviewReady } from "../shared/workflowDeliveryStatus.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,6 +30,15 @@ const REPAIR_HASH_KEYS = [
   "validation",
   "page_result"
 ];
+const RECOVERABLE_EDITABLE_PAGE_OUTPUTS = Object.freeze({
+  page_manifest: "manifest.json",
+  imagegen_jobs: "imagegen-jobs.json",
+  page_pptx: "page.pptx",
+  preview: "preview.png",
+  contact_sheet: "split_assets_contact.png",
+  validation: "validation.json",
+  page_result: "page_result.json"
+});
 
 export async function testEditableRuntime(overrides = {}) {
   const runtime = getEditableRuntimeConfig(overrides);
@@ -80,8 +92,8 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
   const visualQuality = artifacts.visualQuality || {};
   const qualitySummary = normalizeVisualQualitySummary(visualQuality);
   const visualReviewCurrent = isVisualQualityReviewCurrent(artifacts);
-  const imageDeckReviewReady = isImageDeckReviewApproved(artifacts);
-  const textHintEvidence = getEditableTextHintEvidence(artifacts);
+  const imageDeckReviewReady = isWorkflowJobImageDeckReviewApproved(job);
+  const textHintEvidence = getEditableTextHintEvidence(artifacts, inputs.map((input) => input.pageId));
   const imageDeckPath = artifacts.imageDeck?.path || "";
   const checks = [
     {
@@ -94,7 +106,7 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
       id: "image-deck-review",
       label: "图片版人工复核",
       ok: imageDeckReviewReady,
-      detail: imageDeckReviewReady ? "approved" : "必须先通过整套图片版人工复核"
+      detail: describeImageDeckReviewGate(artifacts, imageDeckReviewReady)
     },
     {
       id: "visual-pages",
@@ -105,9 +117,13 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
     {
       id: "visual-quality",
       label: "视觉质量证据",
-      ok: Boolean(visualQuality.path) && qualitySummary.failedCount === 0 && (qualitySummary.reviewCount === 0 || visualReviewCurrent),
-      warning: Boolean(qualitySummary.reviewCount && visualReviewCurrent),
-      detail: visualQuality.path ? `review ${qualitySummary.reviewCount || 0}, failed ${qualitySummary.failedCount || 0}, approved ${visualReviewCurrent ? "yes" : "no"}` : "尚未生成视觉质量报告"
+      ok: Boolean(visualQuality.path) && (qualitySummary.failedCount === 0 || imageDeckReviewReady) && (qualitySummary.reviewCount === 0 || visualReviewCurrent || imageDeckReviewReady),
+      warning: Boolean(imageDeckReviewReady && (qualitySummary.failedCount > 0 || qualitySummary.reviewCount > 0)),
+      detail: visualQuality.path
+        ? imageDeckReviewReady && (qualitySummary.failedCount > 0 || qualitySummary.reviewCount > 0)
+          ? `人工已复核并接受自动检查提示：风险 ${qualitySummary.failedCount || 0} 页，提醒 ${qualitySummary.reviewCount || 0} 页`
+          : `review ${qualitySummary.reviewCount || 0}, failed ${qualitySummary.failedCount || 0}, approved ${visualReviewCurrent ? "yes" : "no"}`
+        : "尚未生成视觉质量报告"
     },
     {
       id: "text-hints",
@@ -180,6 +196,23 @@ export async function getWorkflowEditablePreparePreflight(jobId, options = {}) {
   };
 }
 
+export function describeImageDeckReviewGate(artifacts = {}, ready = false) {
+  if (ready) return "整套图片版已按当前证据完成人工复核";
+  const review = artifacts.imageDeckReview || {};
+  const summary = review.summary || {};
+  const total = Number(summary.totalPages || 0);
+  const marked = Number(summary.markedCount || 0);
+  const semanticRisks = Number(summary.semanticBlockedCount || 0);
+  const styleRisks = Number(summary.styleDriftCount || 0);
+  if (total && marked === 0 && Object.keys(review.marks || {}).length) {
+    return `质量证据已更新，原通过记录需要重新确认；${semanticRisks} 页有内容保真提示，${styleRisks} 页有风格提示`;
+  }
+  if (total) {
+    return `已按当前证据确认 ${marked}/${total} 页；内容保真提示 ${semanticRisks} 页，风格提示 ${styleRisks} 页`;
+  }
+  return "必须先完成整套图片版人工复核";
+}
+
 export async function prepareWorkflowEditableRun(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
   const runtime = getEditableRuntimeConfig(options);
@@ -192,6 +225,7 @@ export async function prepareWorkflowEditableRun(jobId, options = {}) {
       source: "visual",
       maxPages: inputs.length,
       requestedBy: "editable-prepare",
+      preserveWorkflowStage: true,
       note: "auto-run local RapidOCR before image-to-editable-ppt prepare"
     });
     job = await readWorkflowJob(jobId);
@@ -202,6 +236,14 @@ export async function prepareWorkflowEditableRun(jobId, options = {}) {
   const runDir = layout.runDir;
   const deckManifestPath = path.join(runDir, "deck_manifest.json");
   const force = Boolean(options.force);
+  const staleVisualPageIds = normalizePages(job.artifacts?.editableRun?.staleVisualPageIds || []);
+  if (fsSync.existsSync(deckManifestPath) && !force && staleVisualPageIds.length) {
+    const error = new Error(`Editable prepare inputs are stale for ${staleVisualPageIds.join(", ")}. Refresh the editable run before dispatching page workers.`);
+    error.status = 409;
+    error.code = "EDITABLE_PREPARE_REFRESH_REQUIRED";
+    error.pages = staleVisualPageIds;
+    throw error;
+  }
   if (fsSync.existsSync(deckManifestPath) && !force) {
     const status = await getWorkflowEditableStatus(jobId, options).catch(() => null);
     const rapidOcrHints = await linkRapidOcrHints(job, runDir);
@@ -225,58 +267,76 @@ export async function prepareWorkflowEditableRun(jobId, options = {}) {
     };
     return saveWorkflowJob(markEditablePrepared(job, { runDir, inputs, runtime, status, rapidOcrHints, reused: true }));
   }
-  if (force) await clearGeneratedEditableRun(layout, job);
-  await fs.mkdir(layout.inputDir, { recursive: true });
-  await fs.mkdir(layout.runDir, { recursive: true });
-  const preparedInputs = await copyInputsToAsciiScratch(inputs, layout.inputDir);
+  let refreshArchive = null;
+  if (force) {
+    refreshArchive = staleVisualPageIds.length
+      ? await archiveGeneratedEditableRun(layout, job)
+      : null;
+    if (!refreshArchive) await clearGeneratedEditableRun(layout, job);
+  }
+  try {
+    await fs.mkdir(layout.inputDir, { recursive: true });
+    await fs.mkdir(layout.runDir, { recursive: true });
+    const preparedInputs = await copyInputsToAsciiScratch(inputs, layout.inputDir);
 
-  const args = [
-    "prepare",
-    ...preparedInputs.map((input) => input.path),
-    "--job-dir",
-    runDir,
-    "--max-concurrent-pages",
-    String(clampInteger(options.maxConcurrentPages, 1, 12, 6))
-  ];
-  if (options.noTextHints) args.push("--no-text-hints");
-
-  const prepare = await runEditppt(args, { runtime, timeoutMs: runtime.timeoutMs });
-  const status = await getEditableStatusForRun(runDir, runtime);
-  const next = await getEditableNextForRun(runDir, runtime);
-  const rapidOcrHints = await linkRapidOcrHints(job, runDir);
-  const pointer = await writeEditableRunPointer(job, { layout, runtime, inputs, preparedInputs, status, next, rapidOcrHints });
-  const deckManifest = await readJson(path.join(runDir, "deck_manifest.json")).catch(() => null);
-  const pageJobs = await readJson(path.join(runDir, "page_jobs.json")).catch(() => null);
-  const textHintsSummary = await collectTextHintSummary(runDir);
-
-  job.artifacts = {
-    ...(job.artifacts || {}),
-    editableHints: artifactRecord("editable_text_hints", runDir, {
+    const args = [
+      "prepare",
+      ...preparedInputs.map((input) => input.path),
+      "--job-dir",
       runDir,
-      summary: textHintsSummary,
-      command: summarizeCommand(prepare),
-      updatedAt: new Date().toISOString(),
-      source: "prepare"
-    }),
-    editableRun: artifactRecord("editable_run", runDir, {
-      prepared: true,
-      reused: false,
-      runtime: publicRuntime(runtime),
-      runRoot: layout.runRoot,
-      workspacePointerPath: pointer.path,
-      inputCount: inputs.length,
-      inputs: preparedInputs.map((input) => ({ pageId: input.pageId, pageNumber: input.pageNumber, path: input.path, sourcePath: input.sourcePath })),
-      pageCount: Array.isArray(deckManifest?.pages) ? deckManifest.pages.length : pageJobs?.pages?.length || inputs.length,
-      deckManifestPath: path.join(runDir, "deck_manifest.json"),
-      pageJobsPath: path.join(runDir, "page_jobs.json"),
-      rapidOcrHintsPath: rapidOcrHints?.path || null,
-      editpptPrepare: summarizeCommand(prepare),
-      textHints: textHintsSummary,
-      status,
-      next
-    })
-  };
-  return saveWorkflowJob(markEditablePrepared(job, { runDir, inputs, runtime, status, next, rapidOcrHints }));
+      "--max-concurrent-pages",
+      String(clampInteger(options.maxConcurrentPages, 1, 12, 6))
+    ];
+    if (options.noTextHints) args.push("--no-text-hints");
+
+    const prepare = await runEditppt(args, { runtime, timeoutMs: runtime.timeoutMs });
+    const preservedPageIds = refreshArchive
+      ? await restoreRecordedEditablePages(refreshArchive, layout, staleVisualPageIds)
+      : [];
+    const status = await getEditableStatusForRun(runDir, runtime);
+    const next = await getEditableNextForRun(runDir, runtime);
+    const rapidOcrHints = await linkRapidOcrHints(job, runDir);
+    const pointer = await writeEditableRunPointer(job, { layout, runtime, inputs, preparedInputs, status, next, rapidOcrHints });
+    const deckManifest = await readJson(path.join(runDir, "deck_manifest.json")).catch(() => null);
+    const pageJobs = await readJson(path.join(runDir, "page_jobs.json")).catch(() => null);
+    const textHintsSummary = await collectTextHintSummary(runDir);
+
+    job.artifacts = {
+      ...(job.artifacts || {}),
+      editableHints: artifactRecord("editable_text_hints", runDir, {
+        runDir,
+        summary: textHintsSummary,
+        command: summarizeCommand(prepare),
+        updatedAt: new Date().toISOString(),
+        source: "prepare"
+      }),
+      editableRun: artifactRecord("editable_run", runDir, {
+        prepared: true,
+        reused: false,
+        runtime: publicRuntime(runtime),
+        runRoot: layout.runRoot,
+        workspacePointerPath: pointer.path,
+        inputCount: inputs.length,
+        inputs: preparedInputs.map((input) => ({ pageId: input.pageId, pageNumber: input.pageNumber, path: input.path, sourcePath: input.sourcePath })),
+        pageCount: Array.isArray(deckManifest?.pages) ? deckManifest.pages.length : pageJobs?.pages?.length || inputs.length,
+        deckManifestPath: path.join(runDir, "deck_manifest.json"),
+        pageJobsPath: path.join(runDir, "page_jobs.json"),
+        rapidOcrHintsPath: rapidOcrHints?.path || null,
+        editpptPrepare: summarizeCommand(prepare),
+        textHints: textHintsSummary,
+        refreshedVisualPageIds: staleVisualPageIds,
+        preservedRecordedPageIds: preservedPageIds,
+        status,
+        next
+      })
+    };
+    const saved = await saveWorkflowJob(markEditablePrepared(job, { runDir, inputs, runtime, status, next, rapidOcrHints }));
+    if (refreshArchive) await fs.rm(refreshArchive.archiveRoot, { recursive: true, force: true });
+    return saved;
+  } catch (error) {
+    if (refreshArchive) await rollbackArchivedEditableRun(refreshArchive, layout).catch(() => null);
+    throw error;
+  }
 }
 
 export async function invalidateWorkflowEditableRebuildEvidence(jobId, options = {}) {
@@ -351,6 +411,7 @@ export async function getWorkflowEditableNext(jobId, options = {}) {
       checkedAt: new Date().toISOString()
     }
   };
+  await syncEditableRunState(job, null, next);
   job.events = appendEvent(job.events, "editable.next", `editppt next: ${next.stage || "unknown"}`, { runDir, next });
   return saveWorkflowJob(job);
 }
@@ -397,6 +458,7 @@ export async function regenerateWorkflowEditableHints(jobId, options = {}) {
       textHints: summary
     } : job.artifacts?.editableRun
   };
+  await syncEditableRunState(job, status, next);
   job.events = appendEvent(job.events, "editable.hints_regenerated", `Regenerated editppt text hints for ${summary.pageCount || 0} page(s)`, {
     runDir,
     textHintsBackend: doctor.doctor?.text_hints?.selection || summary.backend || "",
@@ -526,6 +588,12 @@ function mergePromptArtifacts(existing = [], additions = []) {
 
 export async function dispatchWorkflowEditablePage(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
+  if (!isWorkflowJobImageDeckReviewApproved(job)) {
+    const error = new Error("请先完成整套图片内容与视觉复核，再启动可编辑页面重建。");
+    error.status = 409;
+    error.code = "IMAGE_DECK_REVIEW_REQUIRED";
+    throw error;
+  }
   const runtime = getEditableRuntimeConfig(options);
   const runDir = getPreparedRunDir(job);
   const pageId = normalizePageId(options.pageId || options.page || "");
@@ -566,6 +634,7 @@ export async function dispatchWorkflowEditablePage(jobId, options = {}) {
     }].slice(-200),
     editableNext: { kind: "editable_next", runDir, next, checkedAt: new Date().toISOString() }
   };
+  await syncEditableRunState(job, status, next);
   job.events = appendEvent(job.events, "editable.dispatched", localMode ? `Claimed ${pageId} for local rebuild` : `Dispatched ${pageId} to worker`, { pageId, agentId, promptFile, nextStage: next.stage, executionMode: localMode ? "local" : "worker" });
   return saveWorkflowJob(job);
 }
@@ -671,12 +740,34 @@ function getLocalOcrTextHintsCheckpoint(job = {}) {
 
 export async function recordWorkflowEditablePage(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
+  if (!isWorkflowJobImageDeckReviewApproved(job)) {
+    const error = new Error("Image deck review must be current and approved before recording editable page results.");
+    error.status = 409;
+    error.code = "IMAGE_DECK_REVIEW_REQUIRED";
+    throw error;
+  }
   const runtime = getEditableRuntimeConfig(options);
   const runDir = getPreparedRunDir(job);
   const pageId = normalizePageId(options.pageId || options.page || "");
   const agentId = cleanString(options.agentId || "");
   if (!pageId) throw new Error("pageId is required");
   if (!agentId) throw new Error("agentId is required");
+  const pageDir = path.join(runDir, "pages", pageId);
+  const productVisualQa = await inspectEditablePageVisualFidelity(pageDir, pageId);
+  if (!productVisualQa.passed) {
+    const percent = Math.round(Number(productVisualQa.comparison?.score || 0) * 1000) / 10;
+    const minimumPercent = EDITABLE_VISUAL_SIMILARITY_MINIMUM * 100;
+    const reasons = [];
+    if (productVisualQa.issues.includes("preview-visual-similarity-low")) {
+      reasons.push(`visual similarity ${percent}% is below the ${minimumPercent}% product threshold`);
+    }
+    const structuralIssues = productVisualQa.issues.filter((issue) => issue !== "preview-visual-similarity-low");
+    if (structuralIssues.length) reasons.push(`visual structure checks failed: ${structuralIssues.join(", ")}`);
+    const error = new Error(`Editable page ${pageId} failed product visual fidelity QA: ${reasons.join("; ")}. Rebuild the page with source-locked coordinates and masked/local background repair; do not record this preview.`);
+    error.code = "EDITABLE_VISUAL_FIDELITY_FAILED";
+    error.details = productVisualQa;
+    throw error;
+  }
   const args = ["run", "record", runDir, "--page", pageId, "--agent-id", agentId];
   if (options.pageResult) args.push("--page-result", cleanString(options.pageResult));
   const record = await runEditppt(args, { runtime, timeoutMs: runtime.timeoutMs });
@@ -692,10 +783,13 @@ export async function recordWorkflowEditablePage(jobId, options = {}) {
     job.stages.finalizing = markStage(job.stages.finalizing, "pending", "Editable pages recorded; final assembly pending", { runDir });
   }
   const recordCreatedAt = new Date().toISOString();
+  const promptFile = path.join(pageDir, "worker-prompt.md");
   const editableWorkerTasks = syncEditableWorkerTaskAfterRecord(job.artifacts?.editableWorkerTasks, {
     pageId,
     agentId,
-    recordCreatedAt
+    recordCreatedAt,
+    pageDir,
+    promptFile
   });
   job.artifacts = {
     ...(job.artifacts || {}),
@@ -712,11 +806,33 @@ export async function recordWorkflowEditablePage(jobId, options = {}) {
     editableWorkerTasks,
     editableNext: { kind: "editable_next", runDir, next, checkedAt: new Date().toISOString() }
   };
+  await syncEditableRunState(job, status, next);
   job.events = appendEvent(job.events, "editable.recorded", `Recorded ${pageId}`, { pageId, agentId, nextStage: next.stage });
   return saveWorkflowJob(job);
 }
 
-function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, recordCreatedAt } = {}) {
+export async function inspectEditablePageVisualFidelity(pageDir, pageId = "") {
+  const sourcePath = path.join(pageDir, "source.png");
+  const previewPath = path.join(pageDir, "preview.png");
+  const comparison = comparePngVisualFidelity(sourcePath, previewPath);
+  const issues = evaluateEditableVisualFidelity(comparison);
+  const result = {
+    version: 1,
+    kind: "product_editable_visual_qa",
+    pageId: normalizePageId(pageId || path.basename(pageDir)),
+    sourcePath,
+    previewPath,
+    minimumSimilarity: EDITABLE_VISUAL_SIMILARITY_MINIMUM,
+    comparison,
+    issues,
+    passed: issues.length === 0,
+    checkedAt: new Date().toISOString()
+  };
+  await fs.writeFile(path.join(pageDir, "product-visual-qa.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  return result;
+}
+
+function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, pageDir = "", promptFile = "", recordCreatedAt } = {}) {
   const normalizedPageId = normalizePageId(pageId);
   if (!normalizedPageId) return Array.isArray(tasks) ? tasks : [];
   const now = recordCreatedAt || new Date().toISOString();
@@ -726,6 +842,9 @@ function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, record
     pageId: normalizedPageId,
     status: "recorded",
     agentId: cleanString(agentId || ""),
+    pageDir: cleanString(pageDir),
+    promptFile: cleanString(promptFile),
+    relativePath: cleanString(promptFile),
     heartbeatAt: now,
     recordedAt: now,
     error: "",
@@ -742,9 +861,6 @@ function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, record
   }
   return [...normalizedTasks, {
     ...update,
-    promptFile: "",
-    pageDir: "",
-    relativePath: "",
     workerName: "",
     attempts: 0,
     claimedAt: "",
@@ -793,7 +909,8 @@ export async function rebuildWorkflowEditableLocalPage(jobId, options = {}) {
       ...process.env,
       EDITPPT_SKILL_ROOT: runtime.skillRoot,
       EDITPPT_PYTHON_PATH: runtime.pythonPath,
-      PYTHONIOENCODING: "utf-8"
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1"
     }
   });
 
@@ -831,33 +948,53 @@ export async function resetWorkflowEditablePage(jobId, options = {}) {
   const agentId = cleanString(options.agentId || "");
   if (agentId) args.push("--agent-id", agentId);
   if (options.confirmLost || options.confirm_lost) args.push("--confirm-lost");
-  const reset = await runEditppt(args, { runtime, timeoutMs: runtime.timeoutMs });
+  const pageJobs = await readJson(path.join(runDir, "page_jobs.json")).catch(() => null);
+  const pageState = (Array.isArray(pageJobs?.pages) ? pageJobs.pages : [])
+    .find((page) => normalizePageId(page?.page_id || page?.pageId || "") === pageId);
+  const alreadyPending = String(pageState?.status || "").toLowerCase() === "pending";
+  const resetTransactionId = cleanString(options.resetTransactionId || "");
+  const reset = alreadyPending
+    ? { stdout: `${pageId} is already pending; reset is idempotently satisfied.`, stderr: "", alreadyPending: true }
+    : await runEditppt(args, { runtime, timeoutMs: runtime.timeoutMs });
   const status = await getEditableStatusForRun(runDir, runtime);
   const next = await getEditableNextForRun(runDir, runtime);
   job.currentStage = "pages_running";
   job.status = "pages_running";
   job.stageStatus = "running";
   job.stages.pages_running = markStage(job.stages.pages_running, "running", `Reset ${pageId} for editable retry`, { pageId, status, next });
+  const existingResets = Array.isArray(job.artifacts?.editableResets) ? job.artifacts.editableResets : [];
+  const resetAlreadyRecorded = Boolean(resetTransactionId && existingResets.some((item) => item.resetTransactionId === resetTransactionId));
   job.artifacts = {
     ...(job.artifacts || {}),
     editableDispatches: (Array.isArray(job.artifacts?.editableDispatches) ? job.artifacts.editableDispatches : []).filter((item) => normalizePageId(item.pageId) !== pageId),
     editableRecords: (Array.isArray(job.artifacts?.editableRecords) ? job.artifacts.editableRecords : []).filter((item) => normalizePageId(item.pageId) !== pageId),
-    editableResets: [...(Array.isArray(job.artifacts?.editableResets) ? job.artifacts.editableResets : []), {
+    editableResets: resetAlreadyRecorded ? existingResets : [...existingResets, {
       kind: "editable_reset",
       pageId,
       runDir,
+      resetTransactionId,
       stdout: reset.stdout,
       stderr: reset.stderr,
+      alreadyPending,
       createdAt: new Date().toISOString()
     }].slice(-200),
     editableNext: { kind: "editable_next", runDir, next, checkedAt: new Date().toISOString() }
   };
-  job.events = appendEvent(job.events, "editable.reset", `Reset ${pageId} for retry`, { pageId, nextStage: next.stage });
+  await syncEditableRunState(job, status, next);
+  if (!resetAlreadyRecorded) {
+    job.events = appendEvent(job.events, "editable.reset", `Reset ${pageId} for retry`, { pageId, nextStage: next.stage, resetTransactionId });
+  }
   return saveWorkflowJob(job);
 }
 
 export async function finalizeWorkflowEditableRun(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
+  if (!isWorkflowJobImageDeckReviewApproved(job)) {
+    const error = new Error("Image deck review must be current and approved before finalizing the editable PPTX.");
+    error.status = 409;
+    error.code = "IMAGE_DECK_REVIEW_REQUIRED";
+    throw error;
+  }
   const runtime = getEditableRuntimeConfig(options);
   const runDir = getPreparedRunDir(job);
   const finalize = await runEditppt(["run", "finalize", runDir], { runtime, timeoutMs: runtime.timeoutMs });
@@ -917,8 +1054,40 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
       warnings: ["powerpoint-open-check-failed"],
       error: error.message || "PowerPoint open check failed"
     }));
+    const validateScript = path.join(runtime.cliPath, "editppt", "runtime", "validate_pptx.py");
+    const deckManifestPath = path.join(runDir, "deck_manifest.json");
+    if (!fsSync.existsSync(validateScript)) throw new Error(`editppt validation script not found: ${validateScript}`);
+    await fs.copyFile(finalPath, outputPath);
+    await execFileAsync(runtime.pythonPath, [
+      validateScript,
+      outputPath,
+      "--deck-manifest",
+      deckManifestPath,
+      "--report",
+      validationSource
+    ], {
+      cwd: runDir,
+      timeout: runtime.timeoutMs || DEFAULT_TIMEOUT_MS,
+      windowsHide: true,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8"
+      }
+    });
+    const targetValidation = path.join(job.dirs.final, "editable-validation.json");
+    await fs.copyFile(validationSource, targetValidation);
+    validationRecord = artifactRecord("editable_validation", targetValidation);
   }
+  const finalSha256 = await hashFile(finalPath);
+  powerPointOpenability = {
+    ...powerPointOpenability,
+    finalSha256,
+    finalSize: fsSync.statSync(finalPath).size
+  };
   const finalRecord = artifactRecord("editable_final_pptx", finalPath, {
+    sha256: finalSha256,
     runDir,
     sourceOutputPath: outputPath,
     summary,
@@ -931,6 +1100,9 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     ...(job.artifacts || {}),
     editableFinal: finalRecord
   };
+  const finalizedStatus = await getEditableStatusForRun(runDir, runtime).catch(() => null);
+  const finalizedNext = await getEditableNextForRun(runDir, runtime).catch(() => null);
+  await syncEditableRunState(job, finalizedStatus, finalizedNext);
   job.currentStage = "finalizing";
   job.status = "review_pending";
   job.stageStatus = "complete";
@@ -1146,22 +1318,33 @@ async function inspectEditableSkillContract(runtime = {}) {
   const skillRoot = path.resolve(runtime.skillRoot || DEFAULT_SKILL_ROOT);
   const skillPath = path.join(skillRoot, "SKILL.md");
   const source = await fs.readFile(skillPath, "utf8");
+  const backendConfigSource = await fs.readFile(path.join(skillRoot, "cli", "editppt", "runtime", "configure_image_backend.py"), "utf8").catch(() => "");
+  const imageRecordSource = await fs.readFile(path.join(skillRoot, "cli", "editppt", "runtime", "record_imagegen_result.py"), "utf8").catch(() => "");
+  const assetSheetSource = await fs.readFile(path.join(skillRoot, "cli", "editppt", "runtime", "process_asset_sheet.py"), "utf8").catch(() => "");
   const singlePageLocalMode = /single-page[\s\S]{0,220}local|rebuild_page_locally|--local/i.test(source);
   const multiPageWorkerDispatch = /multi-page[\s\S]{0,220}(page workers|worker dispatch|dispatch)|dispatch_pages/i.test(source);
   const serialImageEdit = /serial[\s\S]{0,120}editppt image generate\/edit|editppt image generate\/edit/i.test(source);
   const noFullSlideFallback = /full-slide[\s\S]{0,180}(not acceptable|not an acceptable fallback)|source\.png[\s\S]{0,160}not acceptable/i.test(source);
+  const builtinImagegenPreferred = /builtin-imagegen/.test(backendConfigSource) && /image_gen\.imagegen/.test(backendConfigSource);
+  const backendProvenance = /fallback_reason/.test(imageRecordSource) && /producing backend/i.test(imageRecordSource);
+  const jobScopedAssetSheets = /args\.job_id/.test(assetSheetSource) && /asset-sheet-alpha\.png/.test(assetSheetSource) && /split-report\.json/.test(assetSheetSource);
+  const v032Compatible = Boolean(builtinImagegenPreferred && backendProvenance && jobScopedAssetSheets);
   const agentsSkillRoot = /[\\\/]\.agents[\\\/]skills[\\\/]image-to-editable-ppt/i.test(skillRoot);
   const ok = Boolean(singlePageLocalMode && multiPageWorkerDispatch && serialImageEdit && noFullSlideFallback);
   return {
     ok,
-    mode: ok ? "v0.3-compatible" : "legacy-or-unknown",
+    mode: ok ? (v032Compatible ? "v0.3.2-compatible" : "v0.3-compatible") : "legacy-or-unknown",
     skillRoot,
     skillPath,
+    skillSha256: crypto.createHash("sha256").update(source).digest("hex"),
     agentsSkillRoot,
     singlePageLocalMode,
     multiPageWorkerDispatch,
     serialImageEdit,
     noFullSlideFallback,
+    builtinImagegenPreferred,
+    backendProvenance,
+    jobScopedAssetSheets,
     checkedAt: new Date().toISOString()
   };
 }
@@ -1227,7 +1410,8 @@ async function runEditppt(args, { runtime = getEditableRuntimeConfig(), timeoutM
     env: {
       ...process.env,
       PYTHONPATH: [runtime.cliPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-      PYTHONIOENCODING: "utf-8"
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1"
     }
   });
   return { ok: true, stdout, stderr, args };
@@ -1245,7 +1429,8 @@ async function runSkillScript(relativeScript, args, { runtime = getEditableRunti
     env: {
       ...process.env,
       PYTHONPATH: [runtime.cliPath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
-      PYTHONIOENCODING: "utf-8"
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1"
     }
   });
   return { ok: true, stdout, stderr, args };
@@ -1266,7 +1451,7 @@ function getEditablePrepareInputs(job, options = {}) {
   const selectedPages = normalizePages(options.pages || options.pageIds || options.pageId || []);
   const selectedSet = new Set(selectedPages);
   return visualImages
-    .filter((item) => item?.path && fsSync.existsSync(item.path))
+    .filter((item) => item?.path && item.staleStyleReference !== true && fsSync.existsSync(item.path))
     .filter((item, index) => !selectedSet.size || selectedSet.has(normalizePageId(item.pageId || index + 1)))
     .map((item, index) => ({
       pageId: item.pageId || `page_${String(index + 1).padStart(3, "0")}`,
@@ -1411,6 +1596,27 @@ async function writeEditableRunPointer(job, details = {}) {
   return artifactRecord("editable_run_pointer", pointerPath);
 }
 
+async function syncEditableRunState(job, status = null, next = null) {
+  if (!job?.artifacts?.editableRun) return;
+  job.artifacts.editableRun = {
+    ...job.artifacts.editableRun,
+    ...(status ? { status } : {}),
+    ...(next ? { next } : {}),
+    stateUpdatedAt: new Date().toISOString()
+  };
+  const pointerPath = job.artifacts.editableRun.workspacePointerPath
+    || path.join(job.dirs?.editableRun || "", "editable_run_pointer.json");
+  if (!pointerPath || !fsSync.existsSync(pointerPath)) return;
+  const pointer = await readJson(pointerPath).catch(() => null);
+  if (!pointer) return;
+  await fs.writeFile(pointerPath, JSON.stringify({
+    ...pointer,
+    ...(status ? { status } : {}),
+    ...(next ? { next } : {}),
+    updatedAt: new Date().toISOString()
+  }, null, 2), "utf8");
+}
+
 function markEditablePrepared(job, { runDir, inputs, runtime, status = null, next = null, rapidOcrHints = null, reused = false } = {}) {
   job.currentStage = "editable_prepared";
   job.status = "editable_prepared";
@@ -1439,6 +1645,147 @@ async function clearGeneratedEditableRun(layout, job) {
   }
   await fs.rm(resolvedRunRoot, { recursive: true, force: true });
   await fs.mkdir(layout.runDir, { recursive: true });
+}
+
+async function archiveGeneratedEditableRun(layout, job) {
+  const resolvedRunRoot = path.resolve(layout.runRoot);
+  const resolvedBase = path.resolve(layout.base);
+  if (path.basename(resolvedRunRoot) !== job.id || !resolvedRunRoot.startsWith(resolvedBase + path.sep)) {
+    throw new Error("Refusing to archive editable run outside the configured run root");
+  }
+  if (!fsSync.existsSync(resolvedRunRoot)) return null;
+  const archiveBase = path.join(resolvedBase, ".refresh-backups");
+  const archiveRoot = path.join(archiveBase, `${job.id}-${Date.now()}`);
+  await fs.mkdir(archiveBase, { recursive: true });
+  await fs.rename(resolvedRunRoot, archiveRoot);
+  return { archiveRoot, runDir: path.join(archiveRoot, "run") };
+}
+
+export async function restoreRecordedEditablePages(archive = {}, layout = {}, stalePageIds = []) {
+  const stale = new Set(normalizePages(stalePageIds));
+  const oldJobsPath = path.join(archive.runDir || "", "page_jobs.json");
+  const newJobsPath = path.join(layout.runDir, "page_jobs.json");
+  const oldJobs = await readJson(oldJobsPath).catch(() => null);
+  const newJobs = await readJson(newJobsPath).catch(() => null);
+  if (!Array.isArray(oldJobs?.pages) || !Array.isArray(newJobs?.pages)) return [];
+  const preserved = oldJobs.pages.filter((page) => {
+    const pageId = normalizePageId(page?.page_id || page?.pageId || page?.page_index);
+    return pageId && !stale.has(pageId) && ["recorded", "accepted"].includes(String(page?.status || "").toLowerCase());
+  });
+  if (!preserved.length) return [];
+  const preservedById = new Map();
+  for (const page of preserved) {
+    const pageId = normalizePageId(page?.page_id || page?.pageId || page?.page_index);
+    const sourceDir = path.join(archive.runDir, "pages", pageId);
+    const targetDir = path.join(layout.runDir, "pages", pageId);
+    if (!(await isRecoverableRecordedEditablePage(sourceDir, targetDir, pageId, page))) continue;
+    await fs.rm(targetDir, { recursive: true, force: true });
+    await fs.cp(sourceDir, targetDir, { recursive: true, force: true });
+    preservedById.set(pageId, page);
+  }
+  if (!preservedById.size) return [];
+  newJobs.pages = newJobs.pages.map((page) => {
+    const pageId = normalizePageId(page?.page_id || page?.pageId || page?.page_index);
+    return preservedById.get(pageId) || page;
+  });
+  await fs.writeFile(newJobsPath, JSON.stringify(newJobs, null, 2), "utf8");
+  return [...preservedById.keys()];
+}
+
+async function isRecoverableRecordedEditablePage(pageDir = "", freshPageDir = "", expectedPageId = "", recordedPage = {}) {
+  if (!pageDir || !fsSync.existsSync(pageDir)) return false;
+  try {
+    for (const fileName of Object.values(RECOVERABLE_EDITABLE_PAGE_OUTPUTS)) {
+      const filePath = path.join(pageDir, fileName);
+      if (!fsSync.existsSync(filePath) || !fsSync.statSync(filePath).isFile()) return false;
+    }
+    const manifest = JSON.parse(fsSync.readFileSync(path.join(pageDir, "manifest.json"), "utf8").replace(/^\uFEFF/, ""));
+    const validation = JSON.parse(fsSync.readFileSync(path.join(pageDir, "validation.json"), "utf8").replace(/^\uFEFF/, ""));
+    const pageResult = JSON.parse(fsSync.readFileSync(path.join(pageDir, "page_result.json"), "utf8").replace(/^\uFEFF/, ""));
+    const productVisualQa = JSON.parse(fsSync.readFileSync(path.join(pageDir, "product-visual-qa.json"), "utf8").replace(/^\uFEFF/, ""));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return false;
+    if (manifest.page_id && normalizePageId(manifest.page_id) !== expectedPageId) return false;
+    if (validation?.passed !== true) return false;
+    if (productVisualQa?.passed !== true || normalizePageId(productVisualQa?.pageId) !== expectedPageId) return false;
+    if (!(await isPptxContainer(path.join(pageDir, "page.pptx")))) return false;
+    for (const fileName of ["source.png", "preview.png", "split_assets_contact.png"]) {
+      if (!isPngFile(path.join(pageDir, fileName))) return false;
+    }
+    const freshSource = path.join(freshPageDir, "source.png");
+    if (!isPngFile(freshSource) || fileSha256Sync(path.join(pageDir, "source.png")) !== fileSha256Sync(freshSource)) return false;
+    const hashes = recordedPage?.result?.hashes || {};
+    for (const [key, fileName] of Object.entries(RECOVERABLE_EDITABLE_PAGE_OUTPUTS)) {
+      if (pageResult?.[key] !== fileName) return false;
+      if (!hashes[key] || hashes[key] !== fileSha256Sync(path.join(pageDir, fileName))) return false;
+    }
+    const manifestAssetPaths = [
+      ...(Array.isArray(manifest.images) ? manifest.images.map((item) => item?.path) : []),
+      ...(Array.isArray(manifest.asset_provenance) ? manifest.asset_provenance.map((item) => item?.path) : [])
+    ].filter(Boolean);
+    return manifestAssetPaths.every((assetPath) => isExistingPageFile(pageDir, assetPath));
+  } catch {
+    return false;
+  }
+}
+
+async function isPptxContainer(filePath = "") {
+  if (!fsSync.existsSync(filePath)) return false;
+  try {
+    const zip = await JSZip.loadAsync(fsSync.readFileSync(filePath));
+    return Boolean(
+      zip.file("[Content_Types].xml")
+      && zip.file("ppt/presentation.xml")
+      && Object.keys(zip.files).some((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPngFile(filePath = "") {
+  if (!filePath || !fsSync.existsSync(filePath)) return false;
+  const buffer = fsSync.readFileSync(filePath);
+  if (buffer.length < 57 || !buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return false;
+  let offset = 8;
+  let hasIhdr = false;
+  let hasIdat = false;
+  let hasIend = false;
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const chunkEnd = offset + 12 + length;
+    if (chunkEnd > buffer.length) return false;
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    if (!hasIhdr && type !== "IHDR") return false;
+    if (type === "IHDR") {
+      if (hasIhdr || length !== 13 || buffer.readUInt32BE(offset + 8) <= 0 || buffer.readUInt32BE(offset + 12) <= 0) return false;
+      hasIhdr = true;
+    } else if (type === "IDAT") {
+      hasIdat = hasIdat || length > 0;
+    } else if (type === "IEND") {
+      if (length !== 0) return false;
+      hasIend = true;
+      return hasIhdr && hasIdat && chunkEnd === buffer.length;
+    }
+    offset = chunkEnd;
+  }
+  return hasIhdr && hasIdat && hasIend;
+}
+
+function isExistingPageFile(pageDir = "", filePath = "") {
+  if (!filePath || path.isAbsolute(filePath)) return false;
+  const root = path.resolve(pageDir);
+  const resolved = path.resolve(root, filePath);
+  return resolved.startsWith(`${root}${path.sep}`) && fsSync.existsSync(resolved) && fsSync.statSync(resolved).isFile();
+}
+
+function fileSha256Sync(filePath = "") {
+  return crypto.createHash("sha256").update(fsSync.readFileSync(filePath)).digest("hex");
+}
+
+async function rollbackArchivedEditableRun(archive = {}, layout = {}) {
+  if (!archive.archiveRoot || !fsSync.existsSync(archive.archiveRoot)) return;
+  await fs.rm(layout.runRoot, { recursive: true, force: true });
+  await fs.rename(archive.archiveRoot, layout.runRoot);
 }
 
 function getPreparedRunDir(job) {
@@ -1492,10 +1839,10 @@ function assertVisualQualityGate(job = {}, options = {}) {
     if (isNonProductEditableGateBypassAllowed(options)) return;
     throw new Error("Visual quality report is required before editable prepare.");
   }
-  if (summary.failedCount > 0) {
+  if (summary.failedCount > 0 && !isWorkflowJobImageDeckReviewApproved(job)) {
     throw new Error(`Visual quality report has ${summary.failedCount} failed page(s). Retry or repair visual pages before editable prepare.`);
   }
-  if (summary.reviewCount > 0 && !isVisualQualityReviewCurrent(artifacts)) {
+  if (summary.reviewCount > 0 && !isVisualQualityReviewCurrent(artifacts) && !isWorkflowJobImageDeckReviewApproved(job)) {
     throw new Error(`Visual quality report requires manual review for ${summary.reviewCount} page(s). Approve visual quality review before editable prepare.`);
   }
 }
@@ -1505,40 +1852,98 @@ function assertImageDeckReviewGate(job = {}, options = {}) {
   if (options.confirmRouteB !== true) {
     throw new Error("Route B requires explicit user confirmation before editable prepare.");
   }
-  if (isImageDeckReviewApproved(job.artifacts || {})) return;
+  if (isWorkflowJobImageDeckReviewApproved(job, options)) return;
   throw new Error("Image deck review must be approved before editable prepare.");
 }
 
-export function isImageDeckReviewApproved(artifacts = {}) {
-  const review = artifacts.imageDeckReview || {};
-  const summary = review.summary || {};
-  if (review.status !== "approved") return false;
-  if (summary.readyForApproval !== true) return false;
-  if (summary.allPagesReviewed !== true || summary.allMarksCurrent !== true) return false;
-  const visualImages = Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [];
-  const expectedPages = visualImages
-    .map((image, index) => image.pageId || (Number.isFinite(Number(image.pageNumber)) ? `page_${String(Number(image.pageNumber)).padStart(3, "0")}` : `page_${String(index + 1).padStart(3, "0")}`))
-    .filter(Boolean);
-  const uniquePages = Array.from(new Set(expectedPages));
-  if (!uniquePages.length) return false;
-  const marks = review.marks || {};
-  const markEntries = uniquePages.map((pageId) => marks[pageId]);
-  if (markEntries.some((mark) => !mark || String(mark.status || "").toLowerCase() !== "pass")) return false;
-  const visualByPage = new Map(visualImages.map((image, index) => [
-    image.pageId || `page_${String(Number(image.pageNumber || index + 1)).padStart(3, "0")}`,
-    image
-  ]));
-  const marksMatchCurrentImages = uniquePages.every((pageId) => {
-    const mark = marks[pageId] || {};
-    const image = visualByPage.get(pageId) || {};
-    if (!image.path || mark.visualImagePath !== image.path) return false;
-    if (image.sha256 && mark.visualImageSha256 !== image.sha256) return false;
-    return true;
+function isWorkflowJobImageDeckReviewApproved(job = {}, options = {}) {
+  return isImageDeckReviewApproved(job.artifacts || {}, {
+    ...options,
+    expectedPages: Number(options.expectedPages || 0) || getExpectedWorkflowPageCount(job)
   });
-  if (!marksMatchCurrentImages) return false;
-  const total = Number(summary.totalPages ?? summary.pageCount ?? review.pageCount ?? 0) || 0;
-  const passed = Number(summary.passCount ?? summary.passedCount ?? summary.approvedPages ?? 0) || 0;
-  return Boolean(total === uniquePages.length && passed === uniquePages.length);
+}
+
+function getExpectedWorkflowPageCount(job = {}) {
+  const artifacts = job.artifacts || {};
+  return Number(
+    job.sourceMeta?.pageCount
+    || artifacts.sourceMeta?.pageCount
+    || job.input?.sourcePageCount
+    || artifacts.source?.pageCount
+    || 0
+  ) || Math.max(
+    Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
+    Number(artifacts.imageDeck?.pageCount || 0),
+    Number(artifacts.ocrTextHints?.pageCount || 0),
+    (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+      .filter((image) => image?.path && image.staleStyleReference !== true).length
+  );
+}
+
+export function isImageDeckReviewApproved(artifacts = {}, options = {}) {
+  const qualityReport = readCurrentVisualQualityReport(artifacts);
+  if (!qualityReport) return false;
+  const pageImageSha256ByPage = Object.fromEntries((Array.isArray(qualityReport.pages) ? qualityReport.pages : []).map((page) => [
+    normalizePageId(page.pageId || pageIdFromNumber(page.pageNumber)),
+    String(page.sha256 || "").trim()
+  ]).filter(([pageId]) => Boolean(pageId)));
+  const pageEvidenceSha256ByPage = {
+    ...(artifacts.visualTextQuality?.pageEvidenceSha256ByPage || {}),
+    ...Object.fromEntries((Array.isArray(qualityReport.pages) ? qualityReport.pages : []).map((page) => [
+      normalizePageId(page.pageId || pageIdFromNumber(page.pageNumber)),
+      String(page.semanticQuality?.evidenceSha256 || "").trim()
+    ]).filter(([pageId, evidenceSha256]) => Boolean(pageId && evidenceSha256)))
+  };
+  const hydratedArtifacts = {
+    ...artifacts,
+    visualTextQuality: {
+      ...(artifacts.visualTextQuality || {}),
+      summary: qualityReport.summary?.semanticQuality || artifacts.visualTextQuality?.summary || {},
+      pageEvidenceSha256ByPage
+    },
+    visualQuality: {
+      ...(artifacts.visualQuality || {}),
+      summary: qualityReport.summary || {},
+      semanticQuality: qualityReport.summary?.semanticQuality || {},
+      pageImageSha256ByPage,
+      approvedSampleSha256: String(qualityReport.summary?.styleConsistency?.approvedSampleSha256 || "").trim()
+    }
+  };
+  return isWorkflowImageDeckReviewReady(hydratedArtifacts, {
+    expectedPages: Number(options.expectedPages || 0) || Math.max(
+      Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
+      Number(artifacts.imageDeck?.pageCount || 0),
+      Number(artifacts.ocrTextHints?.pageCount || 0),
+      (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+        .filter((image) => image?.path && image.staleStyleReference !== true).length
+    )
+  });
+}
+
+function readCurrentVisualQualityReport(artifacts = {}) {
+  const reportPath = String(artifacts.visualQuality?.path || "").trim();
+  if (!reportPath) return null;
+  if (!fsSync.existsSync(reportPath)) return null;
+  try {
+    const report = JSON.parse(fsSync.readFileSync(reportPath, "utf8"));
+    const currentSampleSha256 = String(artifacts.visualSample?.sha256 || "").trim();
+    const reportSampleSha256 = String(report?.summary?.styleConsistency?.approvedSampleSha256 || "").trim();
+    if (!currentSampleSha256 || !reportSampleSha256 || reportSampleSha256 !== currentSampleSha256) return null;
+    const reportPages = new Map((Array.isArray(report?.pages) ? report.pages : [])
+      .map((page) => [normalizePageId(page.pageId || pageIdFromNumber(page.pageNumber)), page]));
+    const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+      .filter((image) => image?.path && image.staleStyleReference !== true);
+    const current = Boolean(visualImages.length) && visualImages.every((image) => {
+      const pageId = normalizePageId(image.pageId || pageIdFromNumber(image.pageNumber));
+      const reportPage = reportPages.get(pageId);
+      const imageSha256 = String(image.sha256 || "").trim();
+      const reportSha256 = String(reportPage?.sha256 || "").trim();
+      return Boolean(pageId && reportPage && imageSha256 && reportSha256 && reportSha256 === imageSha256);
+    });
+    return current ? report : null;
+  } catch {
+    return null;
+  }
 }
 
 function isNonProductEditableGateBypassAllowed(options = {}) {
@@ -1570,23 +1975,33 @@ function normalizeVisualQualitySummary(visualQuality = {}) {
   };
 }
 
-function getEditableTextHintEvidence(artifacts = {}) {
+function getEditableTextHintEvidence(artifacts = {}, expectedPageIds = []) {
   const ocr = artifacts.ocrTextHints || {};
   const editable = artifacts.editableHints || {};
   const editableSummary = editable.summary || editable.textHints || {};
   const ocrReady = Boolean(ocr.path && (ocr.pageCount || ocr.textCount || fsSync.existsSync(ocr.path)));
+  const expectedPages = [...new Set((Array.isArray(expectedPageIds) ? expectedPageIds : []).map(normalizePageId).filter(Boolean))];
+  const ocrPageIds = new Set((Array.isArray(artifacts.ocrPages) ? artifacts.ocrPages : [])
+    .map((page) => normalizePageId(page?.pageId || page?.pageNumber))
+    .filter(Boolean));
+  const coveredPages = expectedPages.length
+    ? expectedPages.filter((pageId) => ocrPageIds.has(pageId)).length
+    : Number(ocr.pageCount || 0) || 0;
+  const ocrPartial = Boolean(expectedPages.length && coveredPages < expectedPages.length);
   const editableReadyPages = Number(editableSummary.readyPages || 0) || 0;
   const editablePageCount = Number(editableSummary.pageCount || 0) || 0;
   const editableReady = Boolean(editable.path && editableReadyPages > 0);
   if (ocrReady) {
     return {
       ready: true,
-      partial: false,
+      partial: ocrPartial,
       source: "ocrTextHints",
       pageCount: Number(ocr.pageCount || 0) || 0,
       textLineCount: Number(ocr.textCount || 0) || 0,
-      detail: `OCR ${ocr.pageCount || 0} page(s), ${ocr.textCount || 0} text line(s)`,
-      warning: ""
+      detail: expectedPages.length
+        ? `OCR coverage ${coveredPages}/${expectedPages.length} selected page(s), ${ocr.textCount || 0} text line(s)`
+        : `OCR ${ocr.pageCount || 0} page(s), ${ocr.textCount || 0} text line(s)`,
+      warning: ocrPartial ? `OCR only covers ${coveredPages}/${expectedPages.length} selected page(s); uncovered pages will use editppt fallback hints.` : ""
     };
   }
   if (editableReady) {

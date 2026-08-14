@@ -15,7 +15,7 @@ export async function getWorkflowContinuationPreflight(jobId, options = {}) {
       warnings: []
     };
   }
-  const pageNumbers = pageRange(partial.startPage, partial.endPage);
+  const pageNumbers = partial.missingVisualPageNumbers;
   const pageSelection = pageNumbers.join(",");
   const authorization = getExternalImageAuthorizationStatus(job, {
     scope: "full-deck",
@@ -27,7 +27,7 @@ export async function getWorkflowContinuationPreflight(jobId, options = {}) {
     forceSync: true,
     pages: pageSelection,
     maxPages: pageNumbers.length,
-    confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend || authorization.persisted),
+    confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend && !authorization.persisted),
     assembleImageDeck: true,
     prepareEditable: true,
     buildEditablePrompts: true,
@@ -89,7 +89,7 @@ export async function getWorkflowContinuationPreflight(jobId, options = {}) {
     startBody: {
       pages: pageSelection,
       maxPages: pageNumbers.length,
-      confirmExternalImageSpend: Boolean(authorization.persisted || options.confirmExternalImageSpend),
+      confirmExternalImageSpend: Boolean(options.confirmExternalImageSpend && !authorization.persisted),
       assembleImageDeck: true,
       prepareEditable: true,
       buildEditablePrompts: true,
@@ -136,17 +136,29 @@ export async function runWorkflowContinuation(jobId, options = {}) {
   const result = await runWorkflowCodexPptSlideBatch(jobId, {
     ...confirmedPreflight.startBody,
     forceSync: true,
-    confirmExternalImageSpend: true,
     agentPrefix: options.agentPrefix || "product-continuation-codex-slide",
     requestedBy: options.requestedBy || "workflow-continuation",
     note: options.note || "continue remaining pages after partial final"
   });
+  if (!isContinuationBatchSuccess(result)) {
+    const firstFailure = result.run?.errors?.[0];
+    const failedCount = Number(result.run?.failed || 0);
+    const error = new Error(
+      `\u5269\u4f59\u9875\u751f\u6210\u5df2\u5728\u7b2c ${failedCount || 1} \u4e2a\u5931\u8d25\u5904\u505c\u6b62\uff1a${firstFailure?.error || "\u672a\u77e5\u6279\u5904\u7406\u9519\u8bef"}`
+    );
+    error.code = "WORKFLOW_CONTINUATION_BATCH_FAILED";
+    throw withPreflight(error, confirmedPreflight);
+  }
   return {
-    ok: Boolean(result.ok),
+    ok: true,
     action: "continue-remaining-pages",
     preflight: confirmedPreflight,
     result
   };
+}
+
+export function isContinuationBatchSuccess(result = {}) {
+  return ["complete", "review_required", "partial"].includes(String(result.run?.status || ""));
 }
 
 export function buildPartialFinalCoverage(job = {}) {
@@ -157,7 +169,15 @@ export function buildPartialFinalCoverage(job = {}) {
     || numberOrZero(artifacts.sourceMeta?.pageCount)
     || countArray(artifacts.renderedPages);
   const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || job.finalValidation?.slides);
-  const visualPages = countArray(artifacts.visualImages);
+  const sourcePageIds = workflowSourcePageIds(artifacts, sourcePages);
+  const visualPageIds = workflowArtifactPageIds((Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
+    .filter((image) => image?.staleStyleReference !== true));
+  const editablePageIds = workflowEditablePageIds(artifacts.editableWorkerTasks);
+  const missingVisualPageIds = sourcePageIds.filter((pageId) => !visualPageIds.has(pageId));
+  const missingEditablePageIds = sourcePageIds.filter((pageId) => !editablePageIds.has(pageId));
+  const missingVisualPageNumbers = missingVisualPageIds.map(pageNumberFromPageId).filter(Boolean);
+  const missingEditablePageNumbers = missingEditablePageIds.map(pageNumberFromPageId).filter(Boolean);
+  const visualPages = visualPageIds.size;
   const hasFinal = Boolean(final.path);
   if (!hasFinal) {
     return {
@@ -179,22 +199,25 @@ export function buildPartialFinalCoverage(job = {}) {
       reason: sourcePages && finalPages >= sourcePages ? "当前 final 已覆盖全部源页面。" : "无法判断源文件页数或 final 页数。"
     };
   }
-  const remainingPages = Math.max(0, sourcePages - finalPages);
-  const startPage = finalPages + 1;
-  const endPage = sourcePages;
+  const remainingPages = missingVisualPageIds.length;
   return {
     sourcePages,
     finalPages,
     visualPages,
     remainingPages,
-    startPage,
-    endPage,
-    pageSelection: `page_${String(startPage).padStart(3, "0")}-page_${String(endPage).padStart(3, "0")}`,
-    numericPageSelection: `${startPage}-${endPage}`,
+    missingVisualPageIds,
+    missingVisualPageNumbers,
+    missingEditablePageIds,
+    missingEditablePageNumbers,
+    pageSelection: missingVisualPageIds.join(","),
+    numericPageSelection: missingVisualPageNumbers.join(","),
     finalPath: final.path || "",
     canReviewCurrentSample: true,
-    canContinueRemainingPages: remainingPages > 0,
-    reason: `当前 final 只覆盖 ${finalPages}/${sourcePages} 页，可以复核当前样例，或继续生成剩余 ${remainingPages} 页。`
+    canContinueRemainingPages: missingVisualPageIds.length > 0,
+    canContinueEditablePages: missingVisualPageIds.length === 0 && missingEditablePageIds.length > 0,
+    reason: missingVisualPageIds.length
+      ? `当前 final 只覆盖 ${finalPages}/${sourcePages} 页，可以复核当前样例，或继续生成缺失的 ${missingVisualPageIds.length} 个图片页。`
+      : `图片版已覆盖 ${visualPages}/${sourcePages} 页，下一步应继续重建缺失的 ${missingEditablePageIds.length} 个可编辑页，不要重复生成图片。`
   };
 }
 
@@ -203,12 +226,42 @@ function withPreflight(error, preflight) {
   return error;
 }
 
-function pageRange(start, end) {
-  const pages = [];
-  for (let page = Number(start || 0); page <= Number(end || 0); page += 1) {
-    if (page > 0) pages.push(page);
+function workflowSourcePageIds(artifacts = {}, sourcePages = 0) {
+  const rendered = workflowArtifactPageIds(artifacts.renderedPages);
+  if (sourcePages > 0) {
+    return Array.from({ length: sourcePages }, (_item, index) => `page_${String(index + 1).padStart(3, "0")}`);
   }
-  return pages;
+  return [...rendered].sort(comparePageIds);
+}
+
+function workflowArtifactPageIds(items = []) {
+  return new Set((Array.isArray(items) ? items : [])
+    .map((item) => cleanPageId(item?.pageId || item?.page_id || item?.pageNumber || item?.page_number))
+    .filter(Boolean));
+}
+
+function workflowEditablePageIds(tasks = []) {
+  const completed = (Array.isArray(tasks) ? tasks : []).filter((task) => {
+    const status = String(task?.status || "").toLowerCase();
+    return task?.accepted === true || task?.recorded === true || ["accepted", "recorded", "complete", "completed"].includes(status);
+  });
+  return workflowArtifactPageIds(completed);
+}
+
+function cleanPageId(value = "") {
+  const match = String(value || "").match(/(?:page[_-]?)?(\d+)/i);
+  if (!match) return "";
+  const number = Number(match[1]);
+  return Number.isFinite(number) && number > 0 ? `page_${String(number).padStart(3, "0")}` : "";
+}
+
+function pageNumberFromPageId(value = "") {
+  const match = String(value || "").match(/page_(\d+)/i);
+  return match ? Number(match[1]) : 0;
+}
+
+function comparePageIds(left = "", right = "") {
+  return pageNumberFromPageId(left) - pageNumberFromPageId(right);
 }
 
 function countArray(value) {

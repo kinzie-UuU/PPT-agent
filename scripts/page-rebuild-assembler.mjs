@@ -10,7 +10,10 @@ import { fileURLToPath } from "url";
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
-const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt");
+const SKILL_ROOT = process.env.EDITPPT_SKILL_ROOT || firstExistingPath([
+  path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".agents", "skills", "image-to-editable-ppt"),
+  path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", ".codex", "skills", "image-to-editable-ppt")
+]);
 const DEFAULT_EDITPPT_PYTHON = path.join(PROJECT_ROOT, "outputs", "skill-duo-test", "ocr-venv", "Scripts", "python.exe");
 const EDITPPT_PYTHON = chooseEditpptPython();
 const CLI_PATH = path.join(SKILL_ROOT, "cli");

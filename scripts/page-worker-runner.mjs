@@ -54,9 +54,56 @@ async function runOnce(args) {
     throw new Error("No worker command configured. Pass --command or set PPT_PAGE_WORKER_COMMAND.");
   }
 
-  const child = spawn(workerCommand, {
+  const localExecution = bundle.next?.stage === "rebuild_page_locally";
+  const claimBundle = await claimTask(baseUrl, jobId, task.pageId, agentId, localExecution ? { ...args, localRebuild: true } : args);
+  const claimedTask = (claimBundle.tasks || []).find((item) => item.pageId === task.pageId) || {};
+  const attempt = { attemptId: claimedTask.attemptId || "", leaseToken: claimedTask.leaseToken || "" };
+  if (!attempt.attemptId || !attempt.leaseToken) throw new Error(`Claim did not return an attempt lease for ${task.pageId}.`);
+  let heartbeat = null;
+  try {
+    const child = spawnWorkerCommand(workerCommand, workerSpawnOptions({ args, baseUrl, jobId, agentId, attempt, task, prompt, bundle }));
+    child.stdout?.on("data", (chunk) => process.stdout.write(chunk));
+    child.stderr?.on("data", (chunk) => process.stderr.write(chunk));
+    const exitPromise = waitForExit(child);
+
+    await onceSpawned(child);
+    heartbeat = startHeartbeat(baseUrl, jobId, task.pageId, agentId, attempt, Number(args["heartbeat-ms"] || 30000));
+    const exitCode = await exitPromise;
+    if (exitCode !== 0) {
+      throw new Error(`Worker command exited with code ${exitCode}. Page artifacts were not recorded.`);
+    }
+  } catch (error) {
+    await releaseClaimAfterWorkerFailure(baseUrl, jobId, task.pageId, agentId, attempt, error);
+    throw error;
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
+
+  const complete = await api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${task.pageId}/complete`, {
+    method: "POST",
+    body: { agentId, ...attempt, pageResult: args["page-result"] || "" }
+  });
+  console.log(JSON.stringify({ ok: true, jobId, pageId: task.pageId, agentId, summary: complete.summary }, null, 2));
+}
+
+function spawnWorkerCommand(workerCommand, options = {}) {
+  if (process.platform === "win32") {
+    const parts = splitCommandLine(workerCommand);
+    if (!parts.length) throw new Error("Worker command is empty.");
+    return spawn(parts[0], parts.slice(1), {
+      ...options,
+      shell: false
+    });
+  }
+  return spawn(workerCommand, {
+    ...options,
+    shell: true
+  });
+}
+
+function workerSpawnOptions({ args, baseUrl, jobId, agentId, attempt, task, prompt, bundle }) {
+  return {
     cwd: args.cwd ? path.resolve(String(args.cwd)) : PROJECT_ROOT,
-    shell: true,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     env: {
@@ -64,6 +111,8 @@ async function runOnce(args) {
       PPT_TOOL_BASE_URL: baseUrl,
       PPT_WORKFLOW_JOB_ID: jobId,
       PPT_WORKER_AGENT_ID: agentId,
+      PPT_WORKER_ATTEMPT_ID: attempt.attemptId,
+      PPT_WORKER_LEASE_TOKEN: attempt.leaseToken,
       PPT_WORKER_PAGE_ID: task.pageId,
       PPT_WORKER_PROMPT_FILE: prompt.promptFile || task.promptFile || "",
       PPT_WORKER_PAGE_DIR: prompt.pageDir || task.pageDir || "",
@@ -71,26 +120,16 @@ async function runOnce(args) {
       PPT_WORKER_PROMPT_RELATIVE_PATH: prompt.relativePath || task.relativePath || "",
       PPT_TOOL_PROJECT_ROOT: PROJECT_ROOT
     }
-  });
-  child.stdout?.on("data", (chunk) => process.stdout.write(chunk));
-  child.stderr?.on("data", (chunk) => process.stderr.write(chunk));
-  const exitPromise = waitForExit(child);
+  };
+}
 
-  await onceSpawned(child);
-  await claimTask(baseUrl, jobId, task.pageId, agentId, args);
-
-  const heartbeat = startHeartbeat(baseUrl, jobId, task.pageId, agentId, Number(args["heartbeat-ms"] || 30000));
-  const exitCode = await exitPromise;
-  clearInterval(heartbeat);
-  if (exitCode !== 0) {
-    throw new Error(`Worker command exited with code ${exitCode}. Page artifacts were not recorded.`);
+function splitCommandLine(command = "") {
+  const parts = [];
+  const tokenPattern = /"([^"]*)"|'([^']*)'|([^\s]+)/g;
+  for (const match of String(command).matchAll(tokenPattern)) {
+    parts.push(match[1] ?? match[2] ?? match[3] ?? "");
   }
-
-  const complete = await api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${task.pageId}/complete`, {
-    method: "POST",
-    body: { agentId, pageResult: args["page-result"] || "" }
-  });
-  console.log(JSON.stringify({ ok: true, jobId, pageId: task.pageId, agentId, summary: complete.summary }, null, 2));
+  return parts.filter(Boolean);
 }
 
 async function claimTask(baseUrl, jobId, pageId, agentId, args) {
@@ -101,17 +140,38 @@ async function claimTask(baseUrl, jobId, pageId, agentId, args) {
       workerName: args["worker-name"] || "",
       agentNickname: args["worker-name"] || "",
       acceptOfflineTextHints: Boolean(args["accept-offline-text-hints"] || args.acceptOfflineTextHints || process.env.PPT_ACCEPT_OFFLINE_TEXT_HINTS === "1"),
-      offlineTextHintsReason: args["offline-text-hints-reason"] || process.env.PPT_OFFLINE_TEXT_HINTS_REASON || ""
+      offlineTextHintsReason: args["offline-text-hints-reason"] || process.env.PPT_OFFLINE_TEXT_HINTS_REASON || "",
+      localRebuild: Boolean(args.localRebuild)
     }
   });
 }
 
-function startHeartbeat(baseUrl, jobId, pageId, agentId, heartbeatMs) {
+async function releaseClaimAfterWorkerFailure(baseUrl, jobId, pageId, agentId, attempt, error) {
+  try {
+    await api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${pageId}/reset`, {
+      method: "POST",
+      body: {
+        agentId,
+        ...attempt,
+        confirmLost: true,
+        allowQueueOnlyReset: true,
+        reason: `worker command failed before completion: ${String(error?.message || error || "unknown error")}`,
+        failureReason: String(error?.message || error || "unknown error"),
+        failureRelease: true,
+        clearGeneratedArtifacts: true
+      }
+    });
+  } catch (resetError) {
+    console.warn(`worker claim reset failed: ${resetError.message}`);
+  }
+}
+
+function startHeartbeat(baseUrl, jobId, pageId, agentId, attempt, heartbeatMs) {
   const intervalMs = Math.max(5000, Math.min(300000, heartbeatMs || 30000));
   return setInterval(() => {
     api(baseUrl, `/api/workflow-jobs/${jobId}/editable/worker-tasks/${pageId}/heartbeat`, {
       method: "POST",
-      body: { agentId, message: "worker command running" }
+      body: { agentId, ...attempt, message: "worker command running" }
     }).catch((error) => {
       console.warn(`heartbeat failed: ${error.message}`);
     });
@@ -133,9 +193,9 @@ async function api(baseUrl, route, { method = "GET", body = null } = {}) {
 
 function pickTask(tasks, selectedPageId) {
   const normalized = normalizePageId(selectedPageId);
-  const candidates = tasks.filter((task) => task.status === "ready" || task.status === "failed");
-  if (normalized) return tasks.find((task) => task.pageId === normalized) || null;
-  return candidates[0] || tasks.find((task) => task.status !== "recorded") || null;
+  const candidates = tasks.filter((task) => task.status === "ready");
+  if (normalized) return candidates.find((task) => task.pageId === normalized) || null;
+  return candidates[0] || null;
 }
 
 function onceSpawned(child) {
@@ -147,7 +207,7 @@ function onceSpawned(child) {
 
 function waitForExit(child) {
   return new Promise((resolve) => {
-    child.once("exit", (code) => resolve(Number(code || 0)));
+    child.once("exit", (code) => resolve(Number.isInteger(code) ? code : 1));
   });
 }
 

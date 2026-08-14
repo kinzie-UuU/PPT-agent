@@ -9,6 +9,7 @@ import { getProviderConfig, testImageProvider, testOcrProvider } from "./provide
 import { rootDir, outputDir, uploadDir } from "./store.js";
 import { workflowRootDir } from "./workflowJobs.js";
 import { testEditableRuntime } from "./workflowEditable.js";
+import { resolvePowerShellExecutable } from "./pptxEditability.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -63,6 +64,8 @@ export async function runProductDoctor(options = {}) {
     }
   ));
 
+  checks.push(checkCodexPptSkillContract());
+
   const ocrProbe = providers.ocr.enabled
     ? await testOcrProvider().catch((error) => ({ ok: false, error: error.message || "OCR probe failed" }))
     : { ok: false, error: "OCR disabled" };
@@ -115,7 +118,7 @@ export async function runProductDoctor(options = {}) {
   checks.push(powerpoint);
   checks.push(await checkPdfRenderer());
 
-  const required = new Set(["node", "workspace-root", "outputs", "uploads", "workflow-root", "llm-provider", "image-provider", "image-edit-provider", "editppt", "image-to-editable-contract"]);
+  const required = new Set(["node", "workspace-root", "outputs", "uploads", "workflow-root", "llm-provider", "image-provider", "image-edit-provider", "codex-ppt-contract", "editppt", "image-to-editable-contract"]);
   const failedRequired = checks.filter((check) => required.has(check.id) && !check.ok);
   const warnings = checks.filter((check) => !required.has(check.id) && !check.ok);
 
@@ -142,6 +145,46 @@ export async function runProductDoctor(options = {}) {
   };
 }
 
+function checkCodexPptSkillContract() {
+  const skillRoot = firstExistingPath([
+    process.env.CODEX_PPT_SKILL_ROOT,
+    path.join(os.homedir(), ".agents", "skills", "codex-ppt"),
+    path.join(os.homedir(), ".codex", "skills", "codex-ppt")
+  ]);
+  const skillPath = path.join(skillRoot || "", "SKILL.md");
+  if (!skillRoot || !fsSync.existsSync(skillPath)) {
+    return makeCheck("codex-ppt-contract", "codex-ppt contract", false, "Official codex-ppt skill is missing", { skillRoot, skillPath });
+  }
+  const source = fsSync.readFileSync(skillPath, "utf8");
+  const agentsSkillRoot = /[\\\/]\.agents[\\\/]skills[\\\/]codex-ppt/i.test(skillRoot);
+  const customStyleLibrary = /CODEX_PPT_HOME[\s\S]{0,160}\.codex-ppt-skill[\s\S]{0,120}references/i.test(source);
+  const sampleGenerationMethod = /sample_generation_method/i.test(source);
+  const mandatorySubagents = /subagents are mandatory|must be dispatched to a slide subagent/i.test(source);
+  const generatedImageOnly = /Local drawing[\s\S]{0,220}failure modes/i.test(source);
+  const ok = Boolean(agentsSkillRoot && customStyleLibrary && sampleGenerationMethod && mandatorySubagents && generatedImageOnly);
+  return makeCheck(
+    "codex-ppt-contract",
+    "codex-ppt contract",
+    ok,
+    ok ? "v0.5.5-compatible via .agents skill" : "codex-ppt skill is not the canonical v0.5.5-compatible contract",
+    {
+      mode: ok ? "v0.5.5-compatible" : "legacy-or-unknown",
+      skillRoot,
+      skillPath,
+      agentsSkillRoot,
+      customStyleLibrary,
+      sampleGenerationMethod,
+      mandatorySubagents,
+      generatedImageOnly
+    },
+    ok ? {} : { nextAction: "Refresh codex-ppt from the official repository and point CODEX_PPT_SKILL_ROOT to .agents/skills/codex-ppt." }
+  );
+}
+
+function firstExistingPath(candidates = []) {
+  return candidates.find((candidate) => candidate && fsSync.existsSync(candidate)) || candidates.find(Boolean) || "";
+}
+
 async function checkWritableDir(id, label, dirPath) {
   try {
     await fs.mkdir(dirPath, { recursive: true });
@@ -160,7 +203,7 @@ async function checkPowerPointCom() {
   }
   const command = "$type = [type]::GetTypeFromProgID('PowerPoint.Application'); if ($type) { 'registered' } else { 'missing' }";
   try {
-    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+    const { stdout } = await execFileAsync(resolvePowerShellExecutable(), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
       timeout: 10000,
       windowsHide: true
     });
