@@ -145,6 +145,9 @@ export const api = {
     const response = await fetch(`/api/workflow-jobs/${id}/cost-estimate`, { cache: "no-store", signal });
     return readJson(response);
   },
+  async workflowCostPreview(body = {}) {
+    return this.create("/api/workflow-cost-preview", body);
+  },
   async workflowAuthorizations(id, signal) {
     const response = await fetch(`/api/workflow-jobs/${id}/authorizations`, { cache: "no-store", signal });
     return readJson(response);

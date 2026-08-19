@@ -378,6 +378,15 @@ function CreateWorkspace({ create }) {
         </ol>
 
         {create.deliveryMode === "editable" ? <div className={styles.costNote}><CircleAlert size={15} /><span>可编辑重建会增加耗时和模型调用，真实执行前仍需确认。</span></div> : null}
+        {create.outline.length ? (
+          <div className={cx(styles.costPreview, create.costPreview?.predictability?.ready ? styles.readyCostPreview : styles.blockedCostPreview)}>
+            <div><b>任务费用上限</b><span>{create.costPreviewLoading ? "计算中" : create.costPreview?.upperBoundUsd !== null && create.costPreview?.upperBoundUsd !== undefined ? `$${Number(create.costPreview.upperBoundUsd).toFixed(2)}` : "待配置"}</span></div>
+            <small>{create.costPreviewLoading
+              ? "正在按页数和交付目标计算费用。"
+              : create.costPreview?.predictability?.reason || "费用报价包含 20% 风险缓冲。"}</small>
+            {create.costPreview?.plannedImageCalls ? <em>最多 {create.costPreview.plannedImageCalls} 次图片调用，达到上限自动停止</em> : null}
+          </div>
+        ) : null}
 
         <div className={styles.createSubmit}>
           <small>{removingFileId ? "正在删除文件，请稍候..." : create.hint}</small>

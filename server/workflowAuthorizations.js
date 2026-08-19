@@ -1,5 +1,6 @@
 import { getProviderConfig } from "./providers.js";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
+import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
 
 const AUTHORIZATION_LIMIT = 50;
 const AUTHORIZATION_TTL_MS = 30 * 60 * 1000;
@@ -104,6 +105,7 @@ export async function authorizeExternalImageSpend(jobId, options = {}) {
 async function authorizeExternalImageSpendUnlocked(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
   const record = buildExternalImageSpendAuthorization(options);
+  await assertPredictableSpendBudget(jobId, job, record);
   const externalImageSpend = [...getExternalImageAuthorizations(job), record].slice(-AUTHORIZATION_LIMIT);
   job.artifacts = {
     ...(job.artifacts || {}),
@@ -131,6 +133,47 @@ async function authorizeExternalImageSpendUnlocked(jobId, options = {}) {
     job: saved,
     authorization: record,
     summary: summarizeExternalImageSpend(externalImageSpend)
+  };
+}
+
+async function assertPredictableSpendBudget(jobId, job = {}, requested = {}) {
+  const policy = job.constraints?.spendBudget || {};
+  if (policy.enforcePredictableCost !== true) return;
+  const estimate = await getWorkflowCostEstimate(jobId);
+  if (!estimate.pricingConfigured || !estimate.budget?.ready) {
+    const error = new Error("付费授权已停止：当前任务尚未形成完整、未超上限的费用报价。请先配置模型单价并刷新费用预估。");
+    error.status = 409;
+    error.code = "PREDICTABLE_COST_BUDGET_REQUIRED";
+    error.details = { budget: estimate.budget, unknownCostItems: estimate.unknownCostItems };
+    throw error;
+  }
+  const callBudget = evaluatePredictableImageCallBudget(policy, getExternalImageAuthorizations(job), requested);
+  if (!callBudget.ready) {
+    const error = new Error(`付费授权已停止：累计图片调用将达到 ${callBudget.projectedCalls} 次，超过任务上限 ${callBudget.maxImageCalls} 次。`);
+    error.status = 409;
+    error.code = "PREDICTABLE_COST_IMAGE_CALL_LIMIT";
+    error.details = callBudget;
+    throw error;
+  }
+}
+
+export function evaluatePredictableImageCallBudget(policy = {}, records = [], requested = {}, now = Date.now()) {
+  const consumedCalls = records.reduce((sum, item) => sum + (cleanString(item.consumedAt) ? normalizeImageCalls(item.consumedImageCalls || item.imageCalls) : 0), 0);
+  const reservedCalls = records.reduce((sum, item) => {
+    if (cleanString(item.consumedAt)) return sum;
+    const expiresAt = Date.parse(item.expiresAt || "");
+    return sum + (Number.isFinite(expiresAt) && expiresAt > now ? normalizeImageCalls(item.imageCalls) : 0);
+  }, 0);
+  const requestedCalls = normalizeImageCalls(requested.imageCalls);
+  const maxImageCalls = normalizeImageCalls(policy.maxImageCalls);
+  const projectedCalls = consumedCalls + reservedCalls + requestedCalls;
+  return {
+    ready: maxImageCalls > 0 && projectedCalls <= maxImageCalls,
+    consumedCalls,
+    reservedCalls,
+    requestedCalls,
+    projectedCalls,
+    maxImageCalls
   };
 }
 

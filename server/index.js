@@ -49,7 +49,7 @@ import { runProductDoctor } from "./doctor.js";
 import { getFinalVisualQaRetryPreflight, getVisualQualityRetryPreflight, retryFailedWorkflowPages, retryFinalVisualQaWorkflowPages, retryStaleWorkflowPageEvidence, retryWorkflowPage } from "./workflowPageRetry.js";
 import { getWorkflowNextActionPreflight, runWorkflowNextAction } from "./workflowNextAction.js";
 import { cancelWorkflowEditableWorkerRun, getWorkflowEditableWorkerBatchPreflight, getWorkflowEditableWorkerRunLog, getWorkflowPageSpecProviderProbe, listWorkflowEditableWorkerRuns, startWorkflowEditableWorkerBatch } from "./workflowWorkerBatchRunner.js";
-import { getWorkflowCostEstimate } from "./workflowCostEstimate.js";
+import { getWorkflowCostEstimate, getWorkflowCostPreview } from "./workflowCostEstimate.js";
 import { getWorkflowV1Readiness } from "./workflowV1Readiness.js";
 import { getLatestV1AcceptanceReport } from "./workflowV1AcceptanceReport.js";
 import { getV1AcceptanceRunStatus, preflightV1AcceptanceRun, startV1AcceptanceRun } from "./workflowV1AcceptanceRunner.js";
@@ -59,6 +59,7 @@ import { getWorkflowContinuationPreflight, runWorkflowContinuation } from "./wor
 import { requestIdempotency, resolveIdempotencyRecord } from "./requestIdempotency.js";
 import { cleanupAbandonedWorkflowJobLocks } from "./workflowJobLock.js";
 import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
+import { getWorkflowBusinessReadiness } from "./workflowBusinessReadiness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -536,10 +537,24 @@ app.post("/api/workflow-jobs", async (req, res, next) => {
       sourceBrief: req.body?.sourceBrief || req.body?.brief || "",
       projectName: req.body?.projectName || "",
       mode: req.body?.mode || "ppt-rebuild",
+      deliveryMode: req.body?.deliveryMode || "visual",
+      spendBudget: req.body?.spendBudget || {},
       notes: req.body?.notes || "",
       internal: req.body?.internal === true
     });
     res.json(toClientWorkflowJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/workflow-cost-preview", (req, res, next) => {
+  try {
+    res.json(getWorkflowCostPreview({
+      pageCount: req.body?.pageCount,
+      deliveryMode: req.body?.deliveryMode,
+      contingencyRate: 0.2
+    }));
   } catch (error) {
     next(error);
   }
@@ -617,6 +632,14 @@ app.get("/api/workflow-jobs/:id/v1-readiness", async (req, res, next) => {
   try {
     const readiness = await getWorkflowV1Readiness(req.params.id);
     res.json(readiness);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/business-readiness", async (_req, res, next) => {
+  try {
+    res.json(await getWorkflowBusinessReadiness());
   } catch (error) {
     next(error);
   }

@@ -81,6 +81,7 @@ npm run dev
 ```powershell
 npm run check
 npm run regression:skill-first
+npm run business:readiness
 npm run build
 npm run smoke
 ```
@@ -133,6 +134,8 @@ POST /api/workflow-jobs/:id/editable/prompts
 POST /api/workflow-jobs/:id/editable/finalize
 GET  /api/workflow-jobs/:id/delivery-status
 GET  /api/workflow-jobs/:id/cost-estimate
+POST /api/workflow-cost-preview
+GET  /api/business-readiness
 GET  /api/workflow-jobs/:id/v1-readiness
 GET  /api/workflow-jobs/:id/events
 GET  /api/workflow-jobs/:id/logs/download

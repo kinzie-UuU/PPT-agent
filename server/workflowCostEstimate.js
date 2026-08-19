@@ -36,9 +36,14 @@ export async function getWorkflowCostEstimate(jobId, options = {}) {
   };
   const llm = estimateLlmUsage(pageCount, artifacts);
   const pricing = readPricing(options.env || globalThis.process?.env || {});
+  const editableImageCallsPerPage = readEditableImageCallsPerPage(options.env || globalThis.process?.env || {});
+  const editableAssetImageCalls = job.input?.deliveryMode === "editable" || job.constraints?.spendBudget?.deliveryMode === "editable"
+    ? editablePages.remaining * editableImageCallsPerPage
+    : 0;
   const costItems = [
     makeCostItem("codex-ppt visual sample", imageGenerations.sampleRemaining, pricing.imageUsdPerGeneration, "image generation"),
     makeCostItem("codex-ppt full visual deck", imageGenerations.deckRemaining, pricing.imageUsdPerGeneration, "image generation"),
+    makeCostItem("editable visual assets", editableAssetImageCalls, pricing.imageUsdPerGeneration, "image generation"),
     makeCostItem("OCR text hints", ocrPages.remaining, pricing.ocrUsdPerPage, providers.ocr.provider === "rapidocr-local" ? "local OCR page" : "OCR page"),
     makeCostItem("editable page rebuild", editablePages.remaining, pricing.editableUsdPerPage, "editable page"),
     makeTokenCostItem("LLM planning and prompts", llm.inputTokens, llm.outputTokens, pricing.llmInputUsdPer1k, pricing.llmOutputUsdPer1k)
@@ -46,6 +51,16 @@ export async function getWorkflowCostEstimate(jobId, options = {}) {
   const knownItems = costItems.filter((item) => item.known);
   const unknownItems = costItems.filter((item) => !item.known && item.quantity > 0);
   const knownTotalUsd = roundMoney(knownItems.reduce((sum, item) => sum + item.estimatedUsd, 0));
+  const contingencyRate = normalizeContingencyRate(job.constraints?.spendBudget?.contingencyRate);
+  const upperBoundUsd = unknownItems.length ? null : roundMoney(knownTotalUsd * (1 + contingencyRate));
+  const plannedImageCalls = imageGenerations.sampleRemaining + imageGenerations.deckRemaining + editableAssetImageCalls;
+  const budget = buildBudgetStatus(job.constraints?.spendBudget, {
+    knownTotalUsd,
+    upperBoundUsd,
+    plannedImageCalls,
+    pricingConfigured: unknownItems.length === 0,
+    contingencyRate
+  });
   const duration = estimateDurationMinutes({ imageGenerations, editablePages, ocrPages, providers });
   const warnings = [];
   if (!providers.image.configured || !providers.image.enabled) warnings.push("Image provider is not ready; visual generation cannot run on the product path.");
@@ -58,6 +73,10 @@ export async function getWorkflowCostEstimate(jobId, options = {}) {
     currency: "USD",
     pricingConfigured: unknownItems.length === 0,
     knownTotalUsd,
+    upperBoundUsd,
+    contingencyRate,
+    plannedImageCalls,
+    budget,
     unknownCostItems: unknownItems.map((item) => item.id),
     pageCount,
     operations: {
@@ -83,6 +102,51 @@ export async function getWorkflowCostEstimate(jobId, options = {}) {
       "Unit prices are read from local environment variables and never exposed as API keys."
     ],
     updatedAt: new Date().toISOString()
+  };
+}
+
+export function getWorkflowCostPreview(options = {}) {
+  const pageCount = clampCount(options.pageCount);
+  const deliveryMode = options.deliveryMode === "editable" ? "editable" : "visual";
+  const env = options.env || globalThis.process?.env || {};
+  const pricing = readPricing(env);
+  const editableImageCallsPerPage = readEditableImageCallsPerPage(env);
+  const visualImageCalls = pageCount ? pageCount + 1 : 0;
+  const editableAssetImageCalls = deliveryMode === "editable" ? pageCount * editableImageCallsPerPage : 0;
+  const llm = estimateLlmUsage(pageCount, {});
+  const costItems = [
+    makeCostItem("codex-ppt visual generation", visualImageCalls, pricing.imageUsdPerGeneration, "image generation"),
+    makeCostItem("editable visual assets", editableAssetImageCalls, pricing.imageUsdPerGeneration, "image generation"),
+    makeCostItem("OCR text hints", pageCount, pricing.ocrUsdPerPage, "OCR page"),
+    makeCostItem("editable page rebuild", deliveryMode === "editable" ? pageCount : 0, pricing.editableUsdPerPage, "editable page"),
+    makeTokenCostItem("LLM planning and prompts", llm.inputTokens, llm.outputTokens, pricing.llmInputUsdPer1k, pricing.llmOutputUsdPer1k)
+  ];
+  const unknownItems = costItems.filter((item) => !item.known && item.quantity > 0);
+  const knownTotalUsd = roundMoney(costItems.filter((item) => item.known).reduce((sum, item) => sum + item.estimatedUsd, 0));
+  const contingencyRate = normalizeContingencyRate(options.contingencyRate);
+  const upperBoundUsd = unknownItems.length ? null : roundMoney(knownTotalUsd * (1 + contingencyRate));
+  const plannedImageCalls = visualImageCalls + editableAssetImageCalls;
+  return {
+    ok: true,
+    currency: "USD",
+    pageCount,
+    deliveryMode,
+    pricingConfigured: unknownItems.length === 0,
+    knownTotalUsd,
+    upperBoundUsd,
+    contingencyRate,
+    plannedImageCalls,
+    editableImageCallsPerPage,
+    unknownCostItems: unknownItems.map((item) => item.id),
+    costItems,
+    predictability: {
+      ready: pageCount > 0 && unknownItems.length === 0,
+      reason: !pageCount
+        ? "请先生成大纲以确定页数。"
+        : unknownItems.length
+          ? "尚未配置全部模型单价；可以继续整理材料和大纲，但不能创建付费任务。"
+          : `费用上限已包含 ${Math.round(contingencyRate * 100)}% 风险缓冲。`
+    }
   };
 }
 
@@ -135,6 +199,37 @@ function readPricing(env = {}) {
     ocrUsdPerPage: optionalMoney(env.COST_OCR_PAGE_USD, 0),
     llmInputUsdPer1k: optionalMoney(env.COST_LLM_INPUT_USD_PER_1K),
     llmOutputUsdPer1k: optionalMoney(env.COST_LLM_OUTPUT_USD_PER_1K)
+  };
+}
+
+function readEditableImageCallsPerPage(env = {}) {
+  const number = Number(env.PPT_EXTERNAL_IMAGE_CALL_BUDGET || 8);
+  if (!Number.isFinite(number)) return 8;
+  return Math.max(0, Math.min(50, Math.round(number)));
+}
+
+function normalizeContingencyRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0.2;
+  return Math.max(0, Math.min(1, number));
+}
+
+function buildBudgetStatus(policy = null, estimate = {}) {
+  const enabled = policy?.enforcePredictableCost === true;
+  const maxTotalUsd = optionalMoney(policy?.maxTotalUsd);
+  const maxImageCalls = clampCount(policy?.maxImageCalls);
+  const reasons = [];
+  if (enabled && !estimate.pricingConfigured) reasons.push("pricing-not-configured");
+  if (enabled && (maxTotalUsd === null || estimate.upperBoundUsd > maxTotalUsd)) reasons.push("usd-budget-exceeded");
+  if (enabled && (!maxImageCalls || estimate.plannedImageCalls > maxImageCalls)) reasons.push("image-call-budget-exceeded");
+  return {
+    enabled,
+    ready: !enabled || reasons.length === 0,
+    maxTotalUsd,
+    maxImageCalls,
+    estimatedUpperBoundUsd: estimate.upperBoundUsd,
+    plannedImageCalls: estimate.plannedImageCalls,
+    reasons
   };
 }
 

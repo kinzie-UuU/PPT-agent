@@ -66,6 +66,7 @@ async function readProjectFiles() {
     workflowSelectionGuard: await readText("src/workflow/workflowSelectionGuard.js"),
     workflowArtifacts: await readText("server/workflowArtifacts.js"),
     workflowCostEstimate: await readText("server/workflowCostEstimate.js"),
+    workflowBusinessReadiness: await readText("server/workflowBusinessReadiness.js"),
     providers: await readText("server/providers.js"),
     pageRebuildAssembler: await readText("scripts/page-rebuild-assembler.mjs"),
     visualAssetHelper: await readText("scripts/visual-asset-helper.mjs"),
@@ -378,7 +379,9 @@ function checkFrontendButtonContracts(files) {
     mustInclude(files.frontend, "onDeliveryModeChange={setPendingDeliveryMode}");
     mustInclude(files.frontend, "onOpenSampleReview={openSampleReviewPanel}");
     mustInclude(files.frontend, "onOpenImageDeckReview={openImageDeckReviewPanel}");
-    mustInclude(files.frontend, "onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode })");
+    mustInclude(files.frontend, "onCreateWorkflow?.({");
+    mustInclude(files.frontend, "enforcePredictableCost: true");
+    mustInclude(files.frontend, "maxImageCalls: costPreview?.plannedImageCalls");
     mustInclude(files.frontend, "onRemoveFile={removeUploadedFile}");
     mustInclude(files.frontend, "return { ok: false, error: message }");
     mustInclude(files.frontend, 'const uploadDeleteBusyRef = useRef("")');
@@ -401,6 +404,11 @@ function checkApiSurface(files) {
     mustNotInclude(files.workflowVisuals, "applyProgramTextOverlayToVisualImage");
     mustInclude(files.apiClient, "workflowDeliveryStatus");
     mustInclude(files.apiClient, "workflowCostEstimate");
+    mustInclude(files.apiClient, "workflowCostPreview");
+    mustInclude(files.workflowCostEstimate, "upperBoundUsd");
+    mustInclude(files.workflowCostEstimate, "plannedImageCalls");
+    mustInclude(files.workflowBusinessReadiness, "minimumSuccessRate: 0.9");
+    mustInclude(files.workflowBusinessReadiness, "minimumTasks: 20");
     mustInclude(files.apiClient, "latestV1Acceptance");
     mustInclude(files.serverIndex, "primaryWorkflowState");
     mustInclude(files.serverIndex, "primaryJobId");

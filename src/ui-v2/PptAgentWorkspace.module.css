@@ -467,6 +467,14 @@
 .createSteps span { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #d5dae2; border-radius: 50%; background: #fff; color: #697386; font-size: 11px; }
 .createSteps b { color: #4d5563; font-size: 12px; }
 .costNote { display: flex; gap: 8px; margin: 0 18px; padding: 11px; border: 1px solid #f1cf9d; border-radius: 6px; background: #fff9ed; color: #8c5d13; font-size: 11px; line-height: 1.5; }
+.costPreview { display: grid; gap: 6px; margin: 10px 18px 0; padding: 11px; border: 1px solid #dce1e8; border-radius: 6px; background: #fff; }
+.costPreview > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.costPreview b { color: #303642; font-size: 12px; }
+.costPreview span { color: #155eef; font-size: 14px; font-weight: 900; }
+.costPreview small { color: #667085; font-size: 11px; line-height: 1.45; }
+.costPreview em { color: #667085; font-size: 10px; font-style: normal; }
+.readyCostPreview { border-color: #b9dfca; background: #f2fbf6; }
+.blockedCostPreview { border-color: #f1cf9d; background: #fff9ed; }
 .createSubmit { display: grid; gap: 10px; margin-top: auto; padding: 18px; border-top: 1px solid var(--line); }
 .createSubmit small { color: #7d8695; font-size: 11px; line-height: 1.5; }
 .createSubmit button { min-height: 42px; border: 1px solid var(--blue); border-radius: 6px; background: var(--blue); color: #fff; font-size: 13px; font-weight: 850; cursor: pointer; }

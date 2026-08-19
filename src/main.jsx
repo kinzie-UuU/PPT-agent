@@ -805,6 +805,8 @@ function App() {
         sourceUploadId,
         projectName: getEffectiveProjectName(form, files),
         mode: "ppt-rebuild",
+        deliveryMode,
+        spendBudget: options.spendBudget || {},
         notes: routeNote
       });
       const selection = claimWorkflowSelection(next.id);
@@ -860,6 +862,8 @@ function App() {
         sourceOriginalName: getEffectiveProjectName(form, files) + "-brief.md",
         sourceMimeType: "text/markdown",
         mode: "codex-ppt-brief",
+        deliveryMode,
+        spendBudget: options.spendBudget || {},
         notes: routeNote
       });
       const selection = claimWorkflowSelection(next.id);
@@ -4122,6 +4126,8 @@ function DualRouteDashboard({
   const previousVisualCountRef = useRef(0);
   const previousEditableCountRef = useRef(0);
   const [editableWorkerRunBundle, setEditableWorkerRunBundle] = useState(null);
+  const [costPreview, setCostPreview] = useState(null);
+  const [costPreviewLoading, setCostPreviewLoading] = useState(false);
   const state = buildDualRouteState(job, deliveryBundle);
   const currentEditableWorkerTasks = Array.isArray(job?.artifacts?.editableWorkerTasks?.tasks)
     ? job.artifacts.editableWorkerTasks.tasks
@@ -4208,8 +4214,30 @@ function DualRouteDashboard({
   const filteredTaskRows = searchedTaskRows.filter((item) => taskFilter === "all" || getTaskBucket(item) === taskFilter);
   const displayedTaskRows = taskListExpanded ? filteredTaskRows : filteredTaskRows.slice(0, 5);
   const hasCreateInput = Boolean(files.length || notes.trim());
-  const canCreateFromPanel = !busy && !uploadDeleteBusyId && hasCreateInput;
+  const hasPricedOutline = !outlineReady || (!costPreviewLoading && costPreview?.predictability?.ready === true);
+  const canCreateFromPanel = !busy && !uploadDeleteBusyId && hasCreateInput && hasPricedOutline;
   const selectedDeliveryMode = pendingDeliveryMode === "editable" ? "editable" : "visual";
+  const outlinePageCount = Array.isArray(outlinePlan?.layoutSequence) ? outlinePlan.layoutSequence.length : 0;
+  useEffect(() => {
+    if (!createOpen || !outlinePageCount) {
+      setCostPreview(null);
+      setCostPreviewLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setCostPreviewLoading(true);
+    api.workflowCostPreview({ pageCount: outlinePageCount, deliveryMode: selectedDeliveryMode })
+      .then((result) => {
+        if (!cancelled) setCostPreview(result);
+      })
+      .catch((previewError) => {
+        if (!cancelled) setCostPreview({ ok: false, predictability: { ready: false, reason: getErrorMessage(previewError) } });
+      })
+      .finally(() => {
+        if (!cancelled) setCostPreviewLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [createOpen, outlinePageCount, selectedDeliveryMode]);
   const visualImages = useMemo(() => (
     Array.isArray(job?.artifacts?.visualImages)
       ? [...job.artifacts.visualImages]
@@ -4496,7 +4524,14 @@ function DualRouteDashboard({
         : window.confirm(createModeCopy.confirm);
       if (!confirmed) return;
     }
-    onCreateWorkflow?.({ deliveryMode: selectedDeliveryMode });
+    onCreateWorkflow?.({
+      deliveryMode: selectedDeliveryMode,
+      spendBudget: {
+        enforcePredictableCost: true,
+        maxTotalUsd: costPreview?.upperBoundUsd,
+        maxImageCalls: costPreview?.plannedImageCalls
+      }
+    });
   }
 
   const useLegacyDashboard = new URLSearchParams(window.location.search).get("ui") === "legacy";
@@ -4584,11 +4619,15 @@ function DualRouteDashboard({
           errorMessage: error,
           deliveryMode: selectedDeliveryMode,
           onDeliveryModeChange,
+          costPreview,
+          costPreviewLoading,
           steps: ["分析内容", "确认视觉样张", "生成整套图片", selectedDeliveryMode === "editable" ? "可编辑重建" : "下载图片版"],
           canSubmit: canCreateFromPanel,
-          hint: canCreateFromPanel
-            ? outlineReady ? createModeCopy.ready : "第一步先生成大纲，确认页数、标题和每页要点。"
-            : createModeCopy.pending,
+          hint: outlineReady && !hasPricedOutline
+            ? costPreviewLoading ? "正在计算任务费用上限。" : costPreview?.predictability?.reason || "费用报价未完成，暂不能创建付费任务。"
+            : canCreateFromPanel
+              ? outlineReady ? createModeCopy.ready : "第一步先生成大纲，确认页数、标题和每页要点。"
+              : createModeCopy.pending,
           submitLabel: busy && hasCreateInput ? createModeCopy.busy : outlineReady ? createModeCopy.label : "生成大纲",
           onSubmit: handleCreateWorkflow
         }}

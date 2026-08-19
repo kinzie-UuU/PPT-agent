@@ -93,6 +93,7 @@ export async function createWorkflowJob(input = {}) {
       sourceBrief: cleanString(input.sourceBrief || ""),
       projectName: cleanString(input.projectName || ""),
       mode: cleanString(input.mode || "ppt-rebuild"),
+      deliveryMode: input.deliveryMode === "editable" ? "editable" : "visual",
       notes: cleanString(input.notes || ""),
       visibility: cleanString(input.visibility || ""),
       internal: Boolean(input.internal)
@@ -106,13 +107,29 @@ export async function createWorkflowJob(input = {}) {
       asciiRuntimePath: true,
       noOriginalOverwrite: true,
       resumableState: true,
-      perPageRetry: true
+      perPageRetry: true,
+      spendBudget: normalizeSpendBudget(input.spendBudget, input.deliveryMode)
     }
   };
 
   await writeWorkflowState(job);
   await writeWorkflowManifest(job);
   return job;
+}
+
+function normalizeSpendBudget(value = {}, deliveryMode = "visual") {
+  if (value?.enforcePredictableCost !== true) return { enforcePredictableCost: false };
+  const maxTotalUsd = Number(value.maxTotalUsd);
+  const maxImageCalls = Number(value.maxImageCalls);
+  return {
+    enforcePredictableCost: true,
+    deliveryMode: deliveryMode === "editable" ? "editable" : "visual",
+    currency: "USD",
+    maxTotalUsd: Number.isFinite(maxTotalUsd) && maxTotalUsd >= 0 ? Math.round(maxTotalUsd * 10000) / 10000 : null,
+    maxImageCalls: Number.isFinite(maxImageCalls) && maxImageCalls >= 0 ? Math.min(500, Math.round(maxImageCalls)) : 0,
+    contingencyRate: 0.2,
+    source: "user-create-preview"
+  };
 }
 
 export async function listWorkflowJobs(options = {}) {

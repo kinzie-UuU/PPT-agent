@@ -29,6 +29,8 @@
     "performance:acceptance": "node scripts/performance-acceptance.mjs",
     "evidence:strict-ui": "node scripts/strict-ui-e2e.mjs",
     "acceptance:delivery-candidate": "node scripts/delivery-candidate-acceptance.mjs",
+    "business:readiness": "node scripts/business-capability-readiness.mjs",
+    "check:business": "node --check server/workflowBusinessReadiness.js && node --check scripts/business-capability-readiness.mjs",
     "worker:briefs": "node scripts/build-worker-briefs.mjs",
     "audit:mojibake": "node scripts/audit-mojibake.mjs",
     "audit:entrypoints": "node scripts/audit-entrypoints.mjs",
