@@ -27,7 +27,7 @@ import { buildFinalExportGate, buildHybridQa } from "./hybridQa.js";
 import { appendWorkflowEvent, archiveWorkflowJob, archiveWorkflowJobCleanup, createWorkflowJob, listWorkflowJobSummaries, previewWorkflowJobCleanup, readWorkflowJob, readWorkflowJobsByIds, restoreWorkflowJob, saveWorkflowJob, updateWorkflowPage, updateWorkflowStage, WORKFLOW_PAGE_STATUS, WORKFLOW_STAGE_ORDER, WORKFLOW_STAGE_STATUS, workflowRootDir } from "./workflowJobs.js";
 import { getProviderConfig, listLlmModels, testImageProvider, testLlmProvider, testOcrProvider } from "./providers.js";
 import { renderWorkflowSource } from "./sourceRenderer.js";
-import { assembleWorkflowImageDeck, assertVisualSampleSelectionAllowed, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, parsePageSelection, resolveWorkflowVisualSampleSelection, writeVisualQualityReport } from "./workflowVisuals.js";
+import { assembleWorkflowImageDeck, assertVisualSampleSelectionAllowed, assertWorkflowVisualGenerationAllowed, discoverVisualImages, generateWorkflowVisualImages, generateWorkflowVisualSample, getWorkflowVisualSourceOcrPageIds, getWorkflowVisualTargetPages, parsePageSelection, resolveWorkflowVisualSampleSelection, writeVisualQualityReport } from "./workflowVisuals.js";
 import { correctWorkflowOcrTextHint, getWorkflowOcrCoverage, runWorkflowOcr } from "./workflowOcr.js";
 import { writeWorkflowVisualTextQualityReport } from "./workflowVisualTextQa.js";
 import { buildWorkflowEditableWorkerPrompts, configureEditpptPaddleOcrToken, dispatchWorkflowEditablePage, finalizeWorkflowEditableRun, getWorkflowEditableNext, getWorkflowEditablePreparePreflight, getWorkflowEditableStatus, invalidateWorkflowEditableRebuildEvidence, listWorkflowEditableWorkerPrompts, prepareWorkflowEditableRun, rebuildWorkflowEditableLocalPage, recordWorkflowEditablePage, regenerateWorkflowEditableHints, repairWorkflowEditablePageOpenability, testEditableRuntime, isImageDeckReviewApproved } from "./workflowEditable.js";
@@ -59,11 +59,15 @@ import { getWorkflowContinuationPreflight, runWorkflowContinuation } from "./wor
 import { requestIdempotency, resolveIdempotencyRecord } from "./requestIdempotency.js";
 import { cleanupAbandonedWorkflowJobLocks } from "./workflowJobLock.js";
 import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
+import { PRESENTATION_ROUTES, testPptMasterRuntime } from "./workflowPptMaster.js";
 import { getWorkflowBusinessReadiness } from "./workflowBusinessReadiness.js";
+import { createLocalCorsOptions, createLocalRequestBoundary, localSecurityHeaders, resolveLocalAccessConfig } from "./localAccess.js";
+import { createRuntimeIdentityTracker } from "./runtimeIdentity.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(globalThis.process?.env?.PORT || 4180);
+const localAccess = resolveLocalAccessConfig(globalThis.process?.env || {}, port);
 const envPath = path.join(rootDir, ".env");
 const serverStartedAt = new Date();
 const appVersion = "0.2.0";
@@ -81,7 +85,11 @@ const upload = multer({ storage, limits: { fileSize: 600 * 1024 * 1024 } });
 const DEFAULT_PRIMARY_WORKFLOW_JOB_ID = "";
 
 await ensureDirs();
-app.use(cors());
+const runtimeIdentity = await createRuntimeIdentityTracker(rootDir);
+app.disable("x-powered-by");
+app.use(localSecurityHeaders);
+app.use(createLocalRequestBoundary(localAccess));
+app.use(cors(createLocalCorsOptions(localAccess)));
 app.use(express.json({ limit: "20mb" }));
 app.use(requestIdempotency);
 
@@ -101,40 +109,49 @@ app.post("/api/system/idempotency/resolve", (req, res, next) => {
 app.use("/outputs", express.static(outputDir));
 app.use("/uploads", express.static(uploadDir));
 
-app.get("/api/health", (_req, res) => {
-  const providers = getProviderConfig();
-  res.json({
-    ok: true,
-    status: "online",
-    version: appVersion,
-    pid: globalThis.process?.pid || null,
-    port,
-    uptime: globalThis.process?.uptime ? Math.round(globalThis.process.uptime()) : null,
-    startedAt: serverStartedAt.toISOString(),
-    rootDir,
-    workflowRootDir,
-    hasApiKey: Boolean(globalThis.process?.env?.OPENAI_API_KEY),
-    model: globalThis.process?.env?.OPENAI_MODEL || "gpt-4.1-mini",
-    providers: {
-      llm: { configured: providers.llm.configured, baseUrl: providers.llm.baseUrl, model: providers.llm.model, pageSpecModel: providers.llm.pageSpecModel },
-      image: {
-        configured: providers.image.configured,
-        enabled: providers.image.enabled,
-        baseUrl: providers.image.baseUrl,
-        model: providers.image.model,
-        supportsImageEdit: Boolean(providers.image.supportsImageEdit),
-        editEndpoint: providers.image.editEndpoint || "/images/edits",
-        requiredInputMode: providers.image.requiredInputMode || "source-page-edit"
+app.get("/api/health", async (_req, res, next) => {
+  try {
+    const providers = getProviderConfig();
+    const identity = await runtimeIdentity.current();
+    res.json({
+      ok: true,
+      status: "online",
+      version: appVersion,
+      pid: globalThis.process?.pid || null,
+      port,
+      host: localAccess.host,
+      accessMode: localAccess.accessMode,
+      uptime: globalThis.process?.uptime ? Math.round(globalThis.process.uptime()) : null,
+      startedAt: serverStartedAt.toISOString(),
+      runtime: identity,
+      restartRequired: identity.restartRequired,
+      rootDir,
+      workflowRootDir,
+      hasApiKey: Boolean(globalThis.process?.env?.OPENAI_API_KEY),
+      model: globalThis.process?.env?.OPENAI_MODEL || "gpt-4.1-mini",
+      providers: {
+        llm: { configured: providers.llm.configured, baseUrl: providers.llm.baseUrl, model: providers.llm.model, pageSpecModel: providers.llm.pageSpecModel },
+        image: {
+          configured: providers.image.configured,
+          enabled: providers.image.enabled,
+          baseUrl: providers.image.baseUrl,
+          model: providers.image.model,
+          supportsImageEdit: Boolean(providers.image.supportsImageEdit),
+          editEndpoint: providers.image.editEndpoint || "/images/edits",
+          requiredInputMode: providers.image.requiredInputMode || "source-page-edit"
+        },
+        ocr: {
+          enabled: providers.ocr.enabled,
+          provider: providers.ocr.provider,
+          fallbackProvider: providers.ocr.fallbackProvider || "",
+          pythonPath: providers.ocr.pythonPath
+        }
       },
-      ocr: {
-        enabled: providers.ocr.enabled,
-        provider: providers.ocr.provider,
-        fallbackProvider: providers.ocr.fallbackProvider || "",
-        pythonPath: providers.ocr.pythonPath
-      }
-    },
-    time: new Date().toISOString()
-  });
+      time: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/doctor", async (_req, res, next) => {
@@ -150,6 +167,18 @@ app.get("/api/doctor", async (_req, res, next) => {
       });
       return;
     }
+    next(error);
+  }
+});
+
+app.get("/api/providers/ppt-master", async (_req, res, next) => {
+  try {
+    res.json({
+      ok: true,
+      routes: PRESENTATION_ROUTES,
+      provider: await testPptMasterRuntime()
+    });
+  } catch (error) {
     next(error);
   }
 });
@@ -537,6 +566,7 @@ app.post("/api/workflow-jobs", async (req, res, next) => {
       sourceBrief: req.body?.sourceBrief || req.body?.brief || "",
       projectName: req.body?.projectName || "",
       mode: req.body?.mode || "ppt-rebuild",
+      generationRoute: req.body?.generationRoute || "image-fidelity",
       deliveryMode: req.body?.deliveryMode || "visual",
       spendBudget: req.body?.spendBudget || {},
       notes: req.body?.notes || "",
@@ -1835,17 +1865,18 @@ app.post("/api/workflow-jobs/:id/visual/sample", async (req, res, next) => {
     assertVisualSampleSelectionAllowed(sampleSelection);
     const samplePageNumber = sampleSelection?.pageNumber || 1;
     const samplePageId = `page_${String(samplePageNumber).padStart(3, "0")}`;
-    const sampleOcrCoverage = getWorkflowOcrCoverage(currentJob, { pages: [samplePageId] });
-    if (!sampleOcrCoverage.complete) {
+    const sampleSourceOcrPages = getWorkflowVisualSourceOcrPageIds(currentJob, [samplePageNumber]);
+    const sampleOcrCoverage = sampleSourceOcrPages.length ? getWorkflowOcrCoverage(currentJob, { pages: sampleSourceOcrPages }) : null;
+    if (sampleOcrCoverage && !sampleOcrCoverage.complete) {
       currentJob = await runWorkflowOcr(req.params.id, {
         source: "rendered",
-        pages: samplePageId,
+        pages: sampleSourceOcrPages.join(","),
         maxPages: 1,
         preserveWorkflowStage: true,
         requestedBy: "visual-sample-source-ocr"
       });
     }
-    assertWorkflowOcrTextHintsReady(currentJob, { pages: [samplePageId] });
+    if (sampleSourceOcrPages.length) assertWorkflowOcrTextHintsReady(currentJob, { pages: sampleSourceOcrPages });
     assertWorkflowVisualGenerationAllowed(body);
     const sampleOptions = { ...body, pageNumber: samplePageNumber };
     await updateWorkflowStage(req.params.id, {
@@ -1912,7 +1943,7 @@ app.post("/api/workflow-jobs/:id/codex-ppt/information-assets", async (req, res,
 app.post("/api/workflow-jobs/:id/visual/generate", async (req, res, next) => {
   try {
     const currentJob = await readWorkflowJob(req.params.id);
-    const pageCount = Array.isArray(currentJob.artifacts?.renderedPages) ? currentJob.artifacts.renderedPages.length : 0;
+    const pageCount = getWorkflowVisualTargetPages(currentJob).length;
     const requestedPages = parsePageSelection(req.body?.pages || req.body?.pageNumbers || "", pageCount);
     const sample = currentJob.artifacts?.visualSample || {};
     const samplePageNumber = Number(sample.pageNumber || String(sample.pageId || "").match(/\d+/)?.[0] || 0);
@@ -1929,7 +1960,8 @@ app.post("/api/workflow-jobs/:id/visual/generate", async (req, res, next) => {
       isTwoPageTest ? CODEX_PPT_VISUAL_TEST_GATES : CODEX_PPT_VISUAL_DECK_GATES
     );
     assertWorkflowInformationAssetMapReady(currentJob);
-    assertWorkflowOcrTextHintsReady(currentJob, { pages: requestedPages });
+    const sourceOcrPages = getWorkflowVisualSourceOcrPageIds(currentJob, requestedPages);
+    if (sourceOcrPages.length) assertWorkflowOcrTextHintsReady(currentJob, { pages: sourceOcrPages });
     assertWorkflowVisualGenerationAllowed(body);
     await updateWorkflowStage(req.params.id, {
       stage: "visual_generating",
@@ -4947,8 +4979,8 @@ await cleanupAbandonedWorkflowJobLocks().catch((error) => {
   console.warn(`Workflow lock cleanup skipped: ${error?.message || error}`);
 });
 
-app.listen(port, () => {
-  console.log("PPT Design Tool running at http://127.0.0.1:" + port);
+app.listen(port, localAccess.host, () => {
+  console.log(`PPT Design Tool running at http://${localAccess.host}:${port} (${localAccess.accessMode})`);
 });
 
 function isCodexPptApprovalError(error) {
@@ -5485,12 +5517,13 @@ function buildPipelineSnapshot(job = {}, quality = {}, previewImages = []) {
         completed: sceneGraphRepair.completed?.length || 0
       }
     }),
-    stage("pptx-editability", "PPTX editability", pptxEditability.status === "warn" ? "warn" : "pass", pptxEditability.slideCount ? "Text boxes " + (pptxEditability.nativeTextBoxes || 0) + " / shapes " + (pptxEditability.nativeShapes || 0) + " / pictures " + (pptxEditability.nativePictures || 0) : "Waiting for PPTX OpenXML inspection", {
+    stage("pptx-editability", "PPTX editability", pptxEditability.status === "warn" ? "warn" : "pass", pptxEditability.slideCount ? "Text boxes " + (pptxEditability.nativeTextBoxes || 0) + " / structural shapes " + (pptxEditability.nativeNonTextShapes || 0) + " / pictures " + (pptxEditability.nativePictures || 0) : "Waiting for PPTX OpenXML inspection", {
       warnings: pptxEditability.warnings || [],
       metrics: {
         slides: pptxEditability.slideCount || 0,
         textBoxes: pptxEditability.nativeTextBoxes || 0,
         shapes: pptxEditability.nativeShapes || 0,
+        nonTextShapes: pptxEditability.nativeNonTextShapes || 0,
         pictures: pptxEditability.nativePictures || 0,
         fullSlidePictures: pptxEditability.fullSlidePictures || 0
       }
@@ -5730,6 +5763,7 @@ function buildEditReadiness(job = {}, quality = {}, previewImages = []) {
       visualCompareScore: visualCompare.score || 0,
       pptxTextBoxes: pptxEditability.nativeTextBoxes || 0,
       pptxShapes: pptxEditability.nativeShapes || 0,
+      pptxNonTextShapes: pptxEditability.nativeNonTextShapes || 0,
       pptxPictures: pptxEditability.nativePictures || 0,
       pptxFullSlidePictures: pptxEditability.fullSlidePictures || 0
     }

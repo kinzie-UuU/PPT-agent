@@ -41,7 +41,7 @@ const VISUAL_QUALITY_REPORT = "visual_quality_report.json";
 export async function generateWorkflowVisualSample(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
   assertWorkflowVisualGenerationAllowed(options);
-  const renderedPages = mergeOutlineMetadata(job, getRenderedPages(job));
+  const renderedPages = getWorkflowVisualTargetPages(job);
   if (!renderedPages.length) throw new Error("No rendered source pages. Run source/render first.");
   const sampleSelection = resolveVisualSampleSelection(
     addSourceOcrForSampleSelection(job, renderedPages),
@@ -137,7 +137,7 @@ export async function generateWorkflowVisualSample(jobId, options = {}) {
 }
 
 export function resolveWorkflowVisualSampleSelection(job = {}, options = {}) {
-  const renderedPages = mergeOutlineMetadata(job, getRenderedPages(job));
+  const renderedPages = getWorkflowVisualTargetPages(job);
   if (!renderedPages.length) return null;
   return resolveVisualSampleSelection(
     addSourceOcrForSampleSelection(job, renderedPages),
@@ -157,7 +157,7 @@ export function assertVisualSampleSelectionAllowed(selection = null) {
 export async function generateWorkflowVisualImages(jobId, options = {}) {
   let job = await readWorkflowJob(jobId);
   assertWorkflowVisualGenerationAllowed(options);
-  const renderedPages = getRenderedPages(job);
+  const renderedPages = getWorkflowVisualTargetPages(job);
   if (!renderedPages.length) throw new Error("No rendered source pages. Run source/render first.");
   await ensureVisualDirs(job);
   const prompts = await writeVisualPrompts(job, renderedPages, options);
@@ -362,7 +362,7 @@ export async function assembleWorkflowImageDeck(jobId, options = {}) {
     slide.addNotes(`Image-based intermediate page ${image.pageNumber}. Final editable rebuild should use OCR and image-to-editable reconstruction.`);
   }
   await pptx.writeFile({ fileName: outPath });
-  const sourcePages = Number(job.sourceMeta?.pageCount || 0) || (Array.isArray(job.artifacts?.renderedPages) ? job.artifacts.renderedPages.length : 0);
+  const sourcePages = getWorkflowVisualTargetPages(job).length;
   const fullCoverage = Boolean(sourcePages > 0 && visualImages.length >= sourcePages);
   job.artifacts = {
     ...(job.artifacts || {}),
@@ -417,6 +417,31 @@ async function createVisualImageForPage(job, page, promptRecord, options = {}) {
       height: VISUAL_IMAGE_H,
       prefix: options.prefix || `workflow_visual_${job.id}_${page.pageId}`
     });
+  }
+  const approvedSample = job.artifacts?.visualSample || {};
+  const approvedSamplePath = cleanText(approvedSample.path || "");
+  if (
+    job.artifacts?.source?.kind === "brief_source"
+    && approvedSamplePath
+    && approvedSample.sha256
+    && fsSync.existsSync(approvedSamplePath)
+    && isCodexPptSampleApprovalCurrent(job)
+  ) {
+    const result = await editImageWithProvider({
+      prompt: promptRecord.prompt,
+      sourceImagePath: approvedSamplePath,
+      referenceImagePaths: [],
+      width: VISUAL_IMAGE_W,
+      height: VISUAL_IMAGE_H,
+      prefix: options.prefix || `workflow_visual_${job.id}_${page.pageId}`
+    });
+    return {
+      ...result,
+      imageInputMode: "approved-sample-edit",
+      sourceImagePath: approvedSamplePath,
+      referenceImagePaths: [approvedSamplePath],
+      approvedSampleSha256: approvedSample.sha256
+    };
   }
   return generateImageWithProvider({
     prompt: promptRecord.prompt,
@@ -534,6 +559,7 @@ export function buildVisualPromptsPayload(job = {}, renderedPages = [], options 
       });
       const typography = resolvePromptTypography(styleLock, role);
       const pageNumberPrompt = buildPageNumberPrompt(styleLock.designContract, page, role, renderedPages.length);
+      const briefOutlineWithoutSourceImage = isBriefSource && !isVisualSourceImage(page.path);
       const rerunGuidance = rerunGuidanceByPage[page.pageId] || rerunGuidanceByPage[String(page.pageNumber)] || null;
       return {
         pageId: page.pageId,
@@ -571,7 +597,9 @@ export function buildVisualPromptsPayload(job = {}, renderedPages = [], options 
             ? "Treat the user's brief as the content authority. Use its exact subject and requested title; create the visual composition from scratch."
             : "Respect the source page structure and approximate information density, but redraw with a consistent visual system.",
         styleLock.locked
-          ? "INPUT ORDER: image 1 is the current source page and supplies content only; image 2 is the approved sample and supplies the deck-wide visual identity. Never treat image 1 as the style reference."
+          ? briefOutlineWithoutSourceImage
+            ? "IMAGE INPUT: the attached image is the approved sample and supplies visual identity only. Do not copy its cover wording or factual content; the approved outline and brief in this prompt are the content authority."
+            : "INPUT ORDER: image 1 is the current source page and supplies content only; image 2 is the approved sample and supplies the deck-wide visual identity. Never treat image 1 as the style reference."
           : "",
         styleLock.locked
           ? "STYLE REFERENCE CONTENT EXCLUSION: never copy words, logos, brands, products, mascots, numbers, dates, slogans, or factual objects from image 2 unless the exact same item is visibly present in image 1. Image 2 supplies visual grammar only."
@@ -655,6 +683,59 @@ export function mergeOutlineMetadata(job = {}, renderedPages = []) {
       outlineVisualIntent: sanitizeSourceVisualIntent(cleanText(page.outlineVisualIntent || step.visualIntent || ""), pageNumber, pages.length, legacyMachineOutline)
     };
   });
+}
+
+export function getWorkflowVisualTargetPages(job = {}, renderedPages = getRenderedPages(job)) {
+  const sourcePages = Array.isArray(renderedPages) ? renderedPages : [];
+  if (job.artifacts?.source?.kind !== "brief_source") return mergeOutlineMetadata(job, sourcePages);
+  const outlinePath = cleanText(job.artifacts?.codexPptOutline?.path || "");
+  let outline = {};
+  if (outlinePath && fsSync.existsSync(outlinePath)) {
+    try {
+      outline = JSON.parse(fsSync.readFileSync(outlinePath, "utf8"));
+    } catch {
+      outline = {};
+    }
+  }
+  const sequence = Array.isArray(outline.layoutSequence) ? outline.layoutSequence : [];
+  const requestedCount = Number(job.artifacts?.codexPptOutline?.slideCount || outline.slideCount || sequence.length || sourcePages.length || 0);
+  const targetCount = Math.max(sourcePages.length, Number.isFinite(requestedCount) ? Math.min(500, Math.max(1, Math.trunc(requestedCount))) : sourcePages.length);
+  const sourceByNumber = new Map(sourcePages.map((page, index) => [Number(page.pageNumber || index + 1), page]));
+  const width = sourcePages[0]?.width || VISUAL_IMAGE_W;
+  const height = sourcePages[0]?.height || VISUAL_IMAGE_H;
+  const targets = Array.from({ length: targetCount }, (_item, index) => {
+    const pageNumber = index + 1;
+    const existing = sourceByNumber.get(pageNumber);
+    if (existing) return existing;
+    const step = sequence[index] || {};
+    return {
+      pageId: `page_${String(pageNumber).padStart(3, "0")}`,
+      pageNumber,
+      kind: "outline_slide",
+      format: "codex-ppt-outline",
+      path: "",
+      sourcePagePath: "",
+      width,
+      height,
+      layout: cleanText(step.layout || "content"),
+      storyRole: cleanText(step.storyRole || ""),
+      visualIntent: cleanText(step.visualIntent || ""),
+      outlineTitle: cleanText(step.title || `Slide ${pageNumber}`),
+      outlinePurpose: cleanText(step.purpose || step.visualIntent || "Create a visually unified slide from the approved brief and outline."),
+      outlineEvidence: cleanText(step.evidence || job.input?.sourceBrief || ""),
+      outlineStoryRole: cleanText(step.storyRole || ""),
+      outlineVisualIntent: cleanText(step.visualIntent || "")
+    };
+  });
+  return mergeOutlineMetadata(job, targets);
+}
+
+export function getWorkflowVisualSourceOcrPageIds(job = {}, requestedPages = []) {
+  const requested = new Set(parsePageSelection(requestedPages, getWorkflowVisualTargetPages(job).length));
+  return getRenderedPages(job)
+    .map((page) => Number(page.pageNumber || 0))
+    .filter((pageNumber) => pageNumber > 0 && requested.has(pageNumber))
+    .map((pageNumber) => `page_${String(pageNumber).padStart(3, "0")}`);
 }
 
 function withSampleRolePreference(job = {}, options = {}) {
@@ -944,9 +1025,24 @@ function isContactCallToActionText(value = "") {
 function buildRerunGuidancePrompt(guidance = null) {
   if (!guidance || typeof guidance !== "object") return "";
   const reasons = [...new Set(Array.isArray(guidance.reasons) ? guidance.reasons.map(cleanText).filter(Boolean) : [])].slice(0, 12);
-  const requiredTexts = [...new Set(Array.isArray(guidance.requiredTexts) ? guidance.requiredTexts.map(cleanText).filter(Boolean) : [])].slice(0, 20);
+  const recordedRequiredTexts = [...new Set(Array.isArray(guidance.requiredTexts) ? guidance.requiredTexts.map(cleanText).filter(Boolean) : [])].slice(0, 20);
+  const explicitForbiddenTexts = [...new Set(Array.isArray(guidance.forbiddenTexts) ? guidance.forbiddenTexts.map(cleanText).filter(Boolean) : [])].slice(0, 20);
+  const hasRestoreReason = reasons.some((reason) => [
+    "critical-data-or-contact-missing",
+    "critical-brand-or-code-missing",
+    "substantial-source-text-loss",
+    "missing-critical-source-text",
+    "source-title-mismatch",
+    "semantic-evidence-missing"
+  ].includes(reason));
+  const legacyInventedOnly = reasons.includes("invented-critical-text") && !hasRestoreReason && !explicitForbiddenTexts.length;
+  const requiredTexts = legacyInventedOnly ? [] : recordedRequiredTexts;
+  const forbiddenTexts = [...new Set([
+    ...explicitForbiddenTexts,
+    ...(legacyInventedOnly ? recordedRequiredTexts : [])
+  ])].slice(0, 20);
   const note = cleanText(guidance.note || "");
-  if (!reasons.length && !requiredTexts.length && !note) return "";
+  if (!reasons.length && !requiredTexts.length && !forbiddenTexts.length && !note) return "";
   const instructions = reasons.map((reason) => ({
     "placeholder-text-detected": "remove every placeholder or generic brand label",
     "template-chrome-detected": "remove Slide N, Page N, and other template chrome",
@@ -968,7 +1064,7 @@ function buildRerunGuidancePrompt(guidance = null) {
     "title-scale-outlier": "match the approved sample's role-specific title hierarchy",
     "deck-style-drift": "match the approved sample's typography, palette, spacing, and component language"
   }[reason] || `correct the previous QA issue: ${reason}`));
-  return `RERUN CORRECTION: this page failed a previous product review. ${[...new Set(instructions)].join("; ")}.${requiredTexts.length ? ` Restore these exact missing or altered source strings: ${requiredTexts.join(" | ")}.` : ""}${note ? ` Reviewer note: ${note}.` : ""} Do not repeat the previous defects.`;
+  return `RERUN CORRECTION: this page failed a previous product review. ${[...new Set(instructions)].join("; ")}.${requiredTexts.length ? ` Restore these exact missing or altered source strings: ${requiredTexts.join(" | ")}.` : ""}${forbiddenTexts.length ? ` Remove these invented or unsupported strings and do not render them again: ${forbiddenTexts.join(" | ")}.` : ""}${note ? ` Reviewer note: ${note}.` : ""} Do not repeat the previous defects.`;
 }
 
 export function buildBriefSourcePrompt(job = {}) {
@@ -1338,9 +1434,20 @@ export async function writeVisualQualityReport(job, visualImages = [], renderedP
   const approvedSampleQa = approvedSamplePath && fsSync.existsSync(approvedSamplePath)
     ? await analyzeImageSafely(approvedSamplePath)
     : null;
-  const sourceOcrCoverage = getWorkflowOcrCoverage(job, {
-    pages: currentVisualImages.map((image) => image.pageId || image.pageNumber)
-  });
+  const sourceOcrPageIds = getWorkflowVisualSourceOcrPageIds(
+    job,
+    currentVisualImages.map((image) => image.pageNumber)
+  );
+  const sourceOcrCoverage = sourceOcrPageIds.length
+    ? getWorkflowOcrCoverage(job, { pages: sourceOcrPageIds })
+    : {
+      targetPageIds: [],
+      coveredPageIds: [],
+      missingPageIds: [],
+      targetCount: 0,
+      coveredCount: 0,
+      complete: true
+    };
   const missingSourceOcr = new Set(sourceOcrCoverage.missingPageIds);
   const pages = [];
   for (const image of currentVisualImages) {

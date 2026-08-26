@@ -412,10 +412,11 @@ export function buildFullDeckTestEvidence(job = {}) {
       && mark.visualImageSha256 === page.sha256
     );
   });
+  const styleReferenceModes = new Set(["source-page-edit-plus-style-reference", "approved-sample-edit"]);
   const usesStyleReference = pages.length === 2
-    && pages.every((page) => page.styleAuthority || page.imageInputMode === "source-page-edit-plus-style-reference")
+    && pages.every((page) => page.styleAuthority || styleReferenceModes.has(page.imageInputMode))
     && pages.some((page) => page.styleAuthority)
-    && pages.some((page) => page.imageInputMode === "source-page-edit-plus-style-reference");
+    && pages.some((page) => styleReferenceModes.has(page.imageInputMode));
   if (
     !sample.sha256
     || review.status !== "approved"
@@ -439,7 +440,7 @@ export function buildFullDeckTestEvidence(job = {}) {
           reviewStatus: review.status || "",
           passCount: Number(summary.passCount || 0),
           styleAuthorityPages: pages.filter((page) => page.styleAuthority).length,
-          styleReferencePages: pages.filter((page) => page.imageInputMode === "source-page-edit-plus-style-reference").length
+          styleReferencePages: pages.filter((page) => styleReferenceModes.has(page.imageInputMode)).length
         }
       }
     );

@@ -18,7 +18,7 @@ const LOCAL_WORKER_DEFAULT_MAX_PAGES = 20;
 const MODEL_WORKER_DEFAULT_TIMEOUT_MS = 1800000;
 const LOCAL_WORKER_DEFAULT_TIMEOUT_MS = 600000;
 const MODEL_PAGE_SPEC_TIMEOUT_MS = 300000;
-const MODEL_PAGE_SPEC_MAX_TOKENS = 9000;
+const MODEL_PAGE_SPEC_MAX_TOKENS = 12000;
 const MODEL_WORKER_DEFAULT_IMAGE_CALLS_PER_PAGE = 8;
 const ACTIVE_RUNNER_CHILDREN = new Map();
 
@@ -733,7 +733,8 @@ function buildWorkerBatchCostSummary(cost, { selectedCount = 0, selectedPageIds 
 }
 
 function getTextHintEvidence(artifacts = {}) {
-  const ocr = artifacts.ocrTextHints || {};
+  const useVisualOcr = Boolean(artifacts.visualOcrTextHints?.path);
+  const ocr = useVisualOcr ? artifacts.visualOcrTextHints : artifacts.ocrTextHints || {};
   const editable = artifacts.editableHints || {};
   const editableSummary = editable.summary || editable.textHints || {};
   const ocrReady = Boolean(ocr.path && fsSync.existsSync(ocr.path));
@@ -741,7 +742,7 @@ function getTextHintEvidence(artifacts = {}) {
   const editablePageCount = Number(editableSummary.pageCount || 0) || 0;
   if (ocrReady) {
     return {
-      source: "ocrTextHints",
+      source: useVisualOcr ? "visualOcrTextHints" : "ocrTextHints",
       ocrReady: true,
       backend: ocr.backend || ocr.ocrBackend?.name || "local-ocr",
       pageCount: Number(ocr.pageCount || 0) || 0,
@@ -1409,8 +1410,9 @@ async function killProcessTree(pid) {
   const numericPid = Number(pid || 0);
   if (!numericPid) throw new Error("Invalid worker run pid.");
   if (process.platform === "win32") {
+    const taskkillPath = path.join(process.env.SystemRoot || process.env.WINDIR || "C:\\Windows", "System32", "taskkill.exe");
     await new Promise((resolve, reject) => {
-      execFile("taskkill", ["/PID", String(numericPid), "/T", "/F"], { windowsHide: true }, (error) => {
+      execFile(taskkillPath, ["/PID", String(numericPid), "/T", "/F"], { windowsHide: true }, (error) => {
         if (error && isProcessAlive(numericPid)) reject(error);
         else resolve();
       });

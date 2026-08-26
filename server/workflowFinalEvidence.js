@@ -4,7 +4,7 @@ import fsSync from "fs";
 import path from "path";
 import zlib from "zlib";
 import { readWorkflowJob } from "./workflowJobs.js";
-import { inspectPowerPointOpenability } from "./pptxEditability.js";
+import { inspectEditablePptx, inspectPowerPointOpenability, inspectPowerPointTextLayout } from "./pptxEditability.js";
 
 const FINAL_VALIDATION_ARRAYS = [
   "page_manifests_missing",
@@ -21,6 +21,7 @@ const STRUCTURAL_TERMS = /native structural|结构|background|formula|divider|ru
 const VISUAL_FIDELITY_CACHE = new Map();
 const FILE_HASH_CACHE = new Map();
 const POWERPOINT_OPENABILITY_CACHE = new Map();
+const POWERPOINT_TEXT_LAYOUT_CACHE = new Map();
 const FILE_HASH_CACHE_MAX_ENTRIES = 200;
 export const EDITABLE_VISUAL_SIMILARITY_MINIMUM = 0.93;
 export const EDITABLE_VISUAL_SIMILARITY_CRITICAL = 0.82;
@@ -108,6 +109,40 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
   });
   if (powerPointOpenability?.available !== true) issues.push("final-pptx-powerpoint-check-unavailable");
   else if (powerPointOpenability.openable !== true) issues.push("final-pptx-powerpoint-open-failed");
+  if (expectedPages && Number(powerPointOpenability?.slideCount || 0) !== expectedPages) {
+    issues.push("final-pptx-powerpoint-slide-count-mismatch");
+  }
+  const powerPointTextLayout = await resolvePowerPointTextLayout({
+    cached: final.powerPointTextLayout,
+    final,
+    finalFile,
+    finalHash,
+    finalPath
+  });
+  if (powerPointTextLayout?.available !== true) issues.push("final-pptx-powerpoint-text-layout-check-unavailable");
+  else if (powerPointTextLayout.passed !== true) issues.push("final-pptx-powerpoint-text-overflow");
+  if (expectedPages && Number(powerPointTextLayout?.slideCount || 0) !== expectedPages) {
+    issues.push("final-pptx-powerpoint-text-layout-slide-count-mismatch");
+  }
+  const pptxEditability = finalFile.exists
+    ? await inspectEditablePptx(finalPath).catch((error) => ({
+        version: 1,
+        source: "pptx-openxml-inspection",
+        status: "warn",
+        editable: false,
+        flattenedStructureDeck: false,
+        warnings: ["pptx-editability-inspection-failed"],
+        error: error.message || "inspection failed"
+      }))
+    : null;
+  if (pptxEditability?.flattenedStructureDeck === true) issues.push("final-pptx-flattened-editable-structure");
+  if (pptxEditability && pptxEditability.editable !== true) issues.push("final-pptx-editability-not-passed");
+  if (expectedPages && Number(pptxEditability?.slideCount || 0) !== expectedPages) {
+    issues.push("final-pptx-openxml-slide-count-mismatch");
+  }
+  if (Number(pptxEditability?.nativeTextBoxes || 0) > 0 && Number(powerPointTextLayout?.checkedTextFrames || 0) === 0) {
+    issues.push("final-pptx-powerpoint-text-layout-empty");
+  }
 
   const complete = Boolean(
     finalFile.exists
@@ -123,6 +158,13 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
     && (!editabilitySlides || editabilitySlides === expectedPages)
     && powerPointOpenability?.available === true
     && powerPointOpenability?.openable === true
+    && (!expectedPages || Number(powerPointOpenability?.slideCount || 0) === expectedPages)
+    && powerPointTextLayout?.available === true
+    && powerPointTextLayout?.passed === true
+    && (!expectedPages || Number(powerPointTextLayout?.slideCount || 0) === expectedPages)
+    && (Number(pptxEditability?.nativeTextBoxes || 0) === 0 || Number(powerPointTextLayout?.checkedTextFrames || 0) > 0)
+    && pptxEditability?.editable === true
+    && (!expectedPages || Number(pptxEditability?.slideCount || 0) === expectedPages)
     && hashesMatch
     && issues.length === 0
   );
@@ -156,14 +198,23 @@ export async function scanWorkflowFinalEvidence(jobOrId) {
       pageJobCount,
       validationFailuresEmpty: FINAL_VALIDATION_ARRAYS.every((key) => !Array.isArray(validation[key]) || validation[key].length === 0),
       powerPointOpenable: powerPointOpenability?.openable ?? null,
+      powerPointSlideCount: Number(powerPointOpenability?.slideCount || 0),
+      powerPointTextLayoutPassed: powerPointTextLayout?.passed ?? null,
+      powerPointTextLayoutSlideCount: Number(powerPointTextLayout?.slideCount || 0),
+      powerPointCheckedTextFrames: Number(powerPointTextLayout?.checkedTextFrames || 0),
+      overflowingTextFrames: Number(powerPointTextLayout?.overflowingTextFrames || 0),
+      openXmlSlideCount: Number(pptxEditability?.slideCount || 0),
+      flattenedStructureDeck: pptxEditability?.flattenedStructureDeck ?? null,
       foregroundAssetIssues,
       visualQa
     },
-    powerPointOpenability
+    powerPointOpenability,
+    powerPointTextLayout,
+    pptxEditability
   };
 }
 
-function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
+export function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
   const artifacts = job.artifacts || {};
   const final = artifacts.editableFinal || {};
   const manualReviewCurrent = isManualReviewCurrent(artifacts.manualReview, final);
@@ -172,16 +223,20 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
   const pageIds = collectVisualQaPageIds(visualImages, pageJobs);
   const pages = pageIds.map((pageId) => {
     const target = visualImages.find((image) => cleanPageId(image.pageId || image.page_id || image.pageNumber || image.page) === pageId) || {};
-    const targetPath = resolveMaybe(target.path);
+    const visualImagePath = resolveMaybe(target.path);
     const previewPath = runDir ? path.join(runDir, "pages", pageId, "preview.png") : "";
     const contactSheetPath = runDir ? path.join(runDir, "pages", pageId, "split_assets_contact.png") : "";
+    const productVisualQa = readCurrentProductVisualQa(runDir, pageId, previewPath);
+    const targetPath = productVisualQa.current ? productVisualQa.sourcePath : visualImagePath;
     const targetFile = statFile(targetPath);
     const previewFile = statFile(previewPath);
     const contactSheetFile = statFile(contactSheetPath);
     const targetDimensions = readPngDimensions(targetPath);
     const previewDimensions = readPngDimensions(previewPath);
-    const visualSimilarity = targetFile.exists && previewFile.exists
-      ? comparePngVisualFidelity(targetPath, previewPath)
+    const visualSimilarity = productVisualQa.current
+      ? productVisualQa.comparison
+      : targetFile.exists && previewFile.exists
+        ? comparePngVisualFidelity(targetPath, previewPath)
       : { available: false };
     const assetQuality = inspectPageGeneratedAssetQuality(runDir, pageId);
     const previewToTargetBytes = targetFile.size && previewFile.size
@@ -200,10 +255,12 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
       if (Math.abs(targetRatio - previewRatio) > 0.03) issues.push("preview-aspect-ratio-mismatch");
     }
     issues.push(...evaluateEditableVisualFidelity(visualSimilarity));
+    if (productVisualQa.current) issues.push(...productVisualQa.issues);
     if (assetQuality.checkerboardAssets.length) issues.push("asset-checkerboard-background");
     const pageRecord = {
       pageId,
-      targetPath: target.path || "",
+      targetPath,
+      visualImagePath: target.path || "",
       previewPath,
       contactSheetPath,
       targetSize: targetFile.size,
@@ -215,6 +272,7 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
       previewDimensions,
       minimumSimilarity: EDITABLE_VISUAL_SIMILARITY_MINIMUM,
       visualSimilarity,
+      productVisualQa,
       assetQuality,
       contactSheetExists: contactSheetFile.exists,
       issues
@@ -257,6 +315,59 @@ function inspectFinalVisualQuality(job = {}, runDir = "", pageJobs = {}) {
     blockingIssues: [...new Set(blockingIssues)],
     pageIssues: pageIssueIds,
     pages
+  };
+}
+
+function readCurrentProductVisualQa(runDir = "", pageId = "", previewPath = "") {
+  const pageDir = runDir && pageId ? path.join(runDir, "pages", pageId) : "";
+  const qaPath = pageDir ? path.join(pageDir, "product-visual-qa.json") : "";
+  const qaFile = statFile(qaPath);
+  const unavailable = {
+    path: qaPath,
+    sourcePath: "",
+    current: false,
+    comparisonMode: "",
+    editableTextContractPassed: false,
+    comparison: { available: false },
+    issues: []
+  };
+  if (!qaFile.exists) return unavailable;
+  let qa = null;
+  try {
+    qa = JSON.parse(fsSync.readFileSync(qaPath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    return unavailable;
+  }
+  const qaSourcePath = resolveMaybe(qa?.sourcePath);
+  const qaPreviewPath = resolveMaybe(qa?.previewPath);
+  const sourceFile = statFile(qaSourcePath);
+  const previewFile = statFile(previewPath);
+  const textBoxes = Array.isArray(qa?.editableTextContract?.boxes) ? qa.editableTextContract.boxes : [];
+  const comparisonMode = String(qa?.comparisonMode || "");
+  const comparison = qa?.comparison && typeof qa.comparison === "object" ? qa.comparison : { available: false };
+  const pathsCurrent = Boolean(
+    qaSourcePath
+    && qaPreviewPath
+    && path.resolve(qaSourcePath) === path.resolve(path.join(pageDir, "source.png"))
+    && path.resolve(qaPreviewPath) === path.resolve(previewPath)
+    && sourceFile.exists
+    && previewFile.exists
+    && qaFile.mtimeMs >= sourceFile.mtimeMs
+    && qaFile.mtimeMs >= previewFile.mtimeMs
+  );
+  const contractCurrent = comparisonMode === "non-text-structure-with-validated-editable-text-mask"
+    && qa?.editableTextContract?.passed === true
+    && comparison?.available === true
+    && Number(comparison.ignoredEditableTextBoxCount || 0) === textBoxes.length;
+  return {
+    path: qaPath,
+    sourcePath: qaSourcePath,
+    current: Boolean(pathsCurrent && contractCurrent),
+    comparisonMode,
+    editableTextContractPassed: qa?.editableTextContract?.passed === true,
+    checkedAt: qa?.checkedAt || "",
+    comparison,
+    issues: Array.isArray(qa?.issues) ? qa.issues.map((issue) => String(issue || "")).filter(Boolean) : []
   };
 }
 
@@ -426,8 +537,9 @@ function readPngPixels(filePath = "") {
   }
 }
 
-export function comparePngVisualFidelity(targetPath = "", previewPath = "") {
-  const cacheKey = buildVisualFidelityCacheKey(targetPath, previewPath);
+export function comparePngVisualFidelity(targetPath = "", previewPath = "", options = {}) {
+  const ignoreBoxes = normalizeVisualIgnoreBoxes(options.ignoreBoxes);
+  const cacheKey = buildVisualFidelityCacheKey(targetPath, previewPath, ignoreBoxes);
   if (cacheKey && VISUAL_FIDELITY_CACHE.has(cacheKey)) return VISUAL_FIDELITY_CACHE.get(cacheKey);
   const target = readPngPixels(targetPath);
   const preview = readPngPixels(previewPath);
@@ -449,6 +561,7 @@ export function comparePngVisualFidelity(targetPath = "", previewPath = "") {
   const gridHeight = 54;
   const targetSamples = sampleNormalizedRgb(target, gridWidth, gridHeight);
   const previewSamples = sampleNormalizedRgb(preview, gridWidth, gridHeight);
+  maskValidatedEditableTextRegions(targetSamples, previewSamples, gridWidth, gridHeight, target.width, target.height, ignoreBoxes);
   const targetEdges = buildEdgeMap(targetSamples, gridWidth, gridHeight);
   const previewEdges = buildEdgeMap(previewSamples, gridWidth, gridHeight);
   let pixelDifference = 0;
@@ -498,10 +611,36 @@ export function comparePngVisualFidelity(targetPath = "", previewPath = "") {
     ...tileComparison,
     targetEdgeCount,
     previewEdgeCount,
-    grid: `${gridWidth}x${gridHeight}`
+    grid: `${gridWidth}x${gridHeight}`,
+    ignoredEditableTextBoxCount: ignoreBoxes.length
   };
   rememberVisualFidelity(cacheKey, result);
   return result;
+}
+
+function normalizeVisualIgnoreBoxes(boxes = []) {
+  return (Array.isArray(boxes) ? boxes : [])
+    .map((box) => Array.isArray(box) && box.length === 4 ? box.map(Number) : null)
+    .filter((box) => box && box.every(Number.isFinite) && box[2] > 0 && box[3] > 0)
+    .map((box) => [box[0] - 10, box[1] - 10, box[2] + 20, box[3] + 20]);
+}
+
+function maskValidatedEditableTextRegions(targetSamples, previewSamples, gridWidth, gridHeight, sourceWidth, sourceHeight, boxes = []) {
+  if (!boxes.length || !sourceWidth || !sourceHeight) return;
+  for (let y = 0; y < gridHeight; y += 1) {
+    const sourceY = ((y + 0.5) / gridHeight) * sourceHeight;
+    for (let x = 0; x < gridWidth; x += 1) {
+      const sourceX = ((x + 0.5) / gridWidth) * sourceWidth;
+      if (!boxes.some((box) => sourceX >= box[0] && sourceX <= box[0] + box[2] && sourceY >= box[1] && sourceY <= box[1] + box[3])) continue;
+      const offset = (y * gridWidth + x) * 3;
+      targetSamples[offset] = 246;
+      targetSamples[offset + 1] = 248;
+      targetSamples[offset + 2] = 251;
+      previewSamples[offset] = 246;
+      previewSamples[offset + 1] = 248;
+      previewSamples[offset + 2] = 251;
+    }
+  }
 }
 
 function compareVisualTiles(targetSamples, previewSamples, targetEdges, previewEdges, width, height) {
@@ -604,11 +743,11 @@ export function buildEditableVisualQaSignature(page = {}) {
   ].join(":");
 }
 
-function buildVisualFidelityCacheKey(targetPath = "", previewPath = "") {
+function buildVisualFidelityCacheKey(targetPath = "", previewPath = "", ignoreBoxes = []) {
   const target = statFile(targetPath);
   const preview = statFile(previewPath);
   if (!target.exists || !preview.exists) return "";
-  return [path.resolve(targetPath), target.size, target.mtimeMs, path.resolve(previewPath), preview.size, preview.mtimeMs].join("|");
+  return [path.resolve(targetPath), target.size, target.mtimeMs, path.resolve(previewPath), preview.size, preview.mtimeMs, JSON.stringify(ignoreBoxes)].join("|");
 }
 
 function rememberVisualFidelity(cacheKey, result) {
@@ -790,6 +929,45 @@ async function resolvePowerPointOpenability({ cached = {}, final = {}, finalFile
     POWERPOINT_OPENABILITY_CACHE.set(cacheKey, bound);
     if (POWERPOINT_OPENABILITY_CACHE.size > FILE_HASH_CACHE_MAX_ENTRIES) {
       POWERPOINT_OPENABILITY_CACHE.delete(POWERPOINT_OPENABILITY_CACHE.keys().next().value);
+    }
+  }
+  return bound;
+}
+
+async function resolvePowerPointTextLayout({ cached = {}, final = {}, finalFile = {}, finalHash = "", finalPath = "" } = {}) {
+  const cacheUsable = cached
+    && typeof cached === "object"
+    && cached.available === true
+    && (cached.passed === true || cached.passed === false)
+    && finalFile.exists
+    && (!Number(final.size || 0) || Number(final.size || 0) === Number(finalFile.size || 0))
+    && Boolean(finalHash && final.sha256 && final.sha256 === finalHash)
+    && cached.finalSha256 === finalHash;
+  if (cacheUsable) return cached;
+  if (!finalFile.exists) return null;
+  const cacheKey = finalHash ? `${path.resolve(finalPath)}|${finalHash}` : "";
+  if (cacheKey && POWERPOINT_TEXT_LAYOUT_CACHE.has(cacheKey)) return POWERPOINT_TEXT_LAYOUT_CACHE.get(cacheKey);
+  const inspected = await inspectPowerPointTextLayout(finalPath).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-text-layout",
+    available: process.platform === "win32",
+    passed: false,
+    slideCount: 0,
+    checkedTextFrames: 0,
+    overflowingTextFrames: 0,
+    slides: [],
+    warnings: ["powerpoint-text-layout-check-failed"],
+    error: error.message || "PowerPoint text-layout check failed"
+  }));
+  const bound = {
+    ...inspected,
+    finalSha256: finalHash,
+    finalSize: Number(finalFile.size || 0)
+  };
+  if (cacheKey) {
+    POWERPOINT_TEXT_LAYOUT_CACHE.set(cacheKey, bound);
+    if (POWERPOINT_TEXT_LAYOUT_CACHE.size > FILE_HASH_CACHE_MAX_ENTRIES) {
+      POWERPOINT_TEXT_LAYOUT_CACHE.delete(POWERPOINT_TEXT_LAYOUT_CACHE.keys().next().value);
     }
   }
   return bound;

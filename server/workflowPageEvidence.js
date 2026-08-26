@@ -100,9 +100,7 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
       })
     : null;
   const pagePptxOpenable = pagePptxOpenability?.available === true && pagePptxOpenability?.openable === true;
-  if (pagePptxOpenability && pagePptxOpenability.available !== true) issues.push("page-pptx-powerpoint-check-unavailable");
-  else if (pagePptxOpenability?.openable !== true) issues.push("page-pptx-powerpoint-open-failed");
-  if (pagePptxOpenability?.skipped === true) issues.push("page-pptx-openability-skipped");
+  issues.push(...classifyPagePptxOpenabilityIssues(pagePptxOpenability));
 
   const manifest = await readJson(outputEvidence.page_manifest.path).catch(() => null);
   const manifestCheck = checkManifestContract(manifest);
@@ -144,6 +142,13 @@ async function scanPageEvidence(runDir, page = {}, options = {}) {
     agentId: result?.agent_id || dispatch?.agent_id || "",
     issues: [...new Set(issues)]
   };
+}
+
+export function classifyPagePptxOpenabilityIssues(openability = null) {
+  if (openability?.skipped === true) return ["page-pptx-openability-skipped"];
+  if (openability && openability.available !== true) return ["page-pptx-powerpoint-check-unavailable"];
+  if (openability?.openable !== true) return ["page-pptx-powerpoint-open-failed"];
+  return [];
 }
 
 export function isPageResultEvidenceComplete({ dispatch = {}, result = {} } = {}) {

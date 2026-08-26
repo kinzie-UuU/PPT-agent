@@ -33,30 +33,40 @@ export async function inspectEditablePptx(pptxPath) {
   const totals = slides.reduce((acc, slide) => ({
     nativeTextBoxes: acc.nativeTextBoxes + slide.nativeTextBoxes,
     nativeShapes: acc.nativeShapes + slide.nativeShapes,
+    nativeNonTextShapes: acc.nativeNonTextShapes + slide.nativeNonTextShapes,
     nativePictures: acc.nativePictures + slide.nativePictures,
     fullSlidePictures: acc.fullSlidePictures + slide.fullSlidePictures,
     rasterOnlySlides: acc.rasterOnlySlides + (slide.rasterOnly ? 1 : 0),
     rasterBackgroundSlides: acc.rasterBackgroundSlides + (slide.rasterBackground ? 1 : 0),
+    flattenedStructureSlides: acc.flattenedStructureSlides + (slide.flattenedStructureRisk ? 1 : 0),
     slidesWithText: acc.slidesWithText + (slide.nativeTextBoxes ? 1 : 0),
-    slidesWithShapes: acc.slidesWithShapes + (slide.nativeShapes ? 1 : 0)
-  }), { nativeTextBoxes: 0, nativeShapes: 0, nativePictures: 0, fullSlidePictures: 0, rasterOnlySlides: 0, rasterBackgroundSlides: 0, slidesWithText: 0, slidesWithShapes: 0 });
+    slidesWithShapes: acc.slidesWithShapes + (slide.nativeShapes ? 1 : 0),
+    slidesWithNonTextShapes: acc.slidesWithNonTextShapes + (slide.nativeNonTextShapes ? 1 : 0)
+  }), { nativeTextBoxes: 0, nativeShapes: 0, nativeNonTextShapes: 0, nativePictures: 0, fullSlidePictures: 0, rasterOnlySlides: 0, rasterBackgroundSlides: 0, flattenedStructureSlides: 0, slidesWithText: 0, slidesWithShapes: 0, slidesWithNonTextShapes: 0 });
+  const flattenedStructureDeck = slides.length > 1
+    && totals.flattenedStructureSlides >= Math.max(2, Math.ceil(slides.length * 0.5));
   const warnings = [];
   if (!totals.nativeTextBoxes) warnings.push("no-native-text-boxes");
   if (!totals.nativeShapes) warnings.push("no-native-shapes");
+  if (!totals.nativeNonTextShapes) warnings.push("no-native-non-text-shapes");
   if (totals.rasterOnlySlides) warnings.push(`full-slide-raster-only-risk:${totals.rasterOnlySlides}`);
   if (totals.rasterBackgroundSlides) warnings.push(`full-slide-background-picture:${totals.rasterBackgroundSlides}`);
+  if (flattenedStructureDeck) warnings.push(`flattened-editable-structure:${totals.flattenedStructureSlides}/${slides.length}`);
   return {
     version: 1,
     source: "pptx-openxml-inspection",
     status: warnings.length ? "warn" : "pass",
     slideCount: slides.length,
     ...totals,
-    editable: totals.nativeTextBoxes > 0 && totals.nativeShapes > 0 && totals.rasterOnlySlides === 0,
+    flattenedStructureDeck,
+    editable: totals.nativeTextBoxes > 0 && totals.nativeShapes > 0 && totals.rasterOnlySlides === 0 && !flattenedStructureDeck,
     checks: {
       nativeTextBoxes: totals.nativeTextBoxes > 0,
       nativeShapes: totals.nativeShapes > 0,
+      nativeNonTextShapes: totals.nativeNonTextShapes > 0,
       independentPictures: totals.rasterOnlySlides === 0,
-      noFullSlideRaster: totals.rasterOnlySlides === 0
+      noFullSlideRaster: totals.rasterOnlySlides === 0,
+      noFlattenedEditableStructure: !flattenedStructureDeck
     },
     warnings,
     slides
@@ -143,21 +153,150 @@ export async function inspectPowerPointOpenability(pptxPath, options = {}) {
   }
 }
 
+export async function inspectPowerPointTextLayout(pptxPath, options = {}) {
+  const timeoutMs = clampInteger(options.timeoutMs, 5000, 180000, 90000);
+  const resolved = String(pptxPath || "");
+  if (!resolved || !fsSync.existsSync(resolved)) {
+    return {
+      version: 1,
+      source: "powerpoint-com-text-layout",
+      available: process.platform === "win32",
+      passed: false,
+      slideCount: 0,
+      checkedTextFrames: 0,
+      overflowingTextFrames: 0,
+      slides: [],
+      warnings: ["pptx-file-missing"],
+      error: "PPTX file does not exist"
+    };
+  }
+  if (process.platform !== "win32") {
+    return {
+      version: 1,
+      source: "powerpoint-com-text-layout",
+      available: false,
+      passed: null,
+      slideCount: 0,
+      checkedTextFrames: 0,
+      overflowingTextFrames: 0,
+      slides: [],
+      warnings: ["powerpoint-com-unavailable"],
+      error: "PowerPoint COM text-layout check is only available on Windows"
+    };
+  }
+
+  const command = [
+    "$ErrorActionPreference='Stop'",
+    "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new()",
+    "$ppt=$env:PPTX_LAYOUT_PATH",
+    "$app=$null",
+    "$pres=$null",
+    "try {",
+    "  $app=New-Object -ComObject PowerPoint.Application",
+    "  $app.Visible=[Microsoft.Office.Core.MsoTriState]::msoTrue",
+    "  $pres=$app.Presentations.Open($ppt,[Microsoft.Office.Core.MsoTriState]::msoFalse,[Microsoft.Office.Core.MsoTriState]::msoFalse,[Microsoft.Office.Core.MsoTriState]::msoFalse)",
+    "  $slideRows=@()",
+    "  $totalText=0",
+    "  $totalOverflow=0",
+    "  foreach($slide in $pres.Slides) {",
+    "    $slideText=0",
+    "    $slideOverflow=0",
+    "    $examples=@()",
+    "    foreach($shape in $slide.Shapes) {",
+    "      try {",
+    "        if($shape.HasTextFrame -eq -1 -and $shape.TextFrame2.HasText -eq -1) {",
+    "          $slideText++",
+    "          $totalText++",
+    "          $range=$shape.TextFrame2.TextRange",
+    "          $availableW=[math]::Max(1,$shape.Width-$shape.TextFrame2.MarginLeft-$shape.TextFrame2.MarginRight)",
+    "          $availableH=[math]::Max(1,$shape.Height-$shape.TextFrame2.MarginTop-$shape.TextFrame2.MarginBottom)",
+    "          $overW=[double]$range.BoundWidth-$availableW",
+    "          $overH=[double]$range.BoundHeight-$availableH",
+    "          $severe=($overW -gt [math]::Max(4,$availableW*0.08)) -or ($overH -gt [math]::Max(3,$availableH*0.12))",
+    "          if($severe) {",
+    "            $slideOverflow++",
+    "            $totalOverflow++",
+    "            if($examples.Count -lt 8) {",
+    "              $plain=([string]$range.Text).Replace([char]13,' ').Replace([char]10,' ').Trim()",
+    "              if($plain.Length -gt 80) { $plain=$plain.Substring(0,80) }",
+    "              $examples += @{shapeId=$shape.Id;text=$plain;overflowWidth=[math]::Round($overW,2);overflowHeight=[math]::Round($overH,2)}",
+    "            }",
+    "          }",
+    "        }",
+    "      } catch {}",
+    "    }",
+    "    $slideRows += @{slide=$slide.SlideIndex;textFrames=$slideText;overflowingTextFrames=$slideOverflow;examples=$examples}",
+    "  }",
+    "  $result=@{ok=$true;available=$true;slideCount=$pres.Slides.Count;checkedTextFrames=$totalText;overflowingTextFrames=$totalOverflow;passed=($totalOverflow -eq 0);slides=$slideRows;error=''}",
+    "} catch {",
+    "  $hresult=('0x{0:X8}' -f ($_.Exception.HResult -band 0xffffffff))",
+    "  $result=@{ok=$false;available=$true;slideCount=0;checkedTextFrames=0;overflowingTextFrames=0;passed=$false;slides=@();error=('PowerPoint text-layout inspection failed (' + $hresult + ')')}",
+    "} finally {",
+    "  if ($pres -ne $null) { try { $pres.Close() } catch {} }",
+    "  if ($app -ne $null) { try { $app.Quit() } catch {} }",
+    "}",
+    "$result | ConvertTo-Json -Compress -Depth 8"
+  ].join("; ");
+
+  try {
+    const { stdout, stderr } = await execFileAsync(resolvePowerShellExecutable(), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], {
+      windowsHide: true,
+      timeout: timeoutMs,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PPTX_LAYOUT_PATH: resolved
+      }
+    });
+    const result = JSON.parse(String(stdout || "{}"));
+    const passed = result.passed === true;
+    return {
+      version: 1,
+      source: "powerpoint-com-text-layout",
+      available: result.available === true,
+      passed,
+      slideCount: Number(result.slideCount || 0),
+      checkedTextFrames: Number(result.checkedTextFrames || 0),
+      overflowingTextFrames: Number(result.overflowingTextFrames || 0),
+      slides: Array.isArray(result.slides) ? result.slides : [],
+      warnings: passed ? [] : ["powerpoint-text-overflow"],
+      error: passed ? "" : String(result.error || stderr || "PowerPoint detected overflowing text")
+    };
+  } catch (error) {
+    return {
+      version: 1,
+      source: "powerpoint-com-text-layout",
+      available: true,
+      passed: false,
+      slideCount: 0,
+      checkedTextFrames: 0,
+      overflowingTextFrames: 0,
+      slides: [],
+      warnings: ["powerpoint-text-layout-check-failed"],
+      error: error.message || "PowerPoint text-layout check failed"
+    };
+  }
+}
+
 function inspectSlideXml(xml = "", index = 0) {
   const shapeBlocks = matchBlocks(xml, "p:sp");
   const pictureBlocks = matchBlocks(xml, "p:pic");
   const textShapeBlocks = shapeBlocks.filter((block) => /<a:t>[\s\S]*?<\/a:t>/.test(block));
+  const nativeNonTextShapes = Math.max(0, shapeBlocks.length - textShapeBlocks.length);
   const fullSlidePictures = pictureBlocks.filter(isFullSlidePicture).length;
   const rasterOnly = fullSlidePictures > 0 && textShapeBlocks.length === 0 && shapeBlocks.length <= fullSlidePictures;
   const rasterBackground = fullSlidePictures > 0 && !rasterOnly;
+  const flattenedStructureRisk = fullSlidePictures > 0 && textShapeBlocks.length >= 4 && nativeNonTextShapes === 0;
   return {
     index,
     nativeTextBoxes: textShapeBlocks.length,
     nativeShapes: shapeBlocks.length,
+    nativeNonTextShapes,
     nativePictures: pictureBlocks.length,
     fullSlidePictures,
     rasterOnly,
     rasterBackground,
+    flattenedStructureRisk,
     textChars: textShapeBlocks.reduce((sum, block) => sum + extractTextChars(block), 0)
   };
 }

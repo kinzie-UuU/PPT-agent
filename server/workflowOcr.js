@@ -267,8 +267,6 @@ export async function runWorkflowOcr(jobId, options = {}) {
 
 export async function correctWorkflowOcrTextHint(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
-  const hintsPath = job.artifacts?.ocrTextHints?.path || "";
-  if (!hintsPath || !fsSync.existsSync(hintsPath)) throw new Error("OCR text hints are not available for correction.");
   const pageId = normalizePageId(options.pageId || options.page || "");
   const lineId = cleanString(options.lineId || options.id || "");
   const nextText = cleanString(options.text || "");
@@ -276,8 +274,24 @@ export async function correctWorkflowOcrTextHint(jobId, options = {}) {
   if (!lineId) throw new Error("lineId is required");
   if (!nextText) throw new Error("Corrected OCR text is required");
 
-  const hints = JSON.parse(await fs.readFile(hintsPath, "utf8"));
-  const page = (Array.isArray(hints.pages) ? hints.pages : []).find((item) => normalizePageId(item.pageId) === pageId);
+  const hintCandidates = [
+    { artifact: "visualOcrTextHints", pages: "visualOcrPages", path: job.artifacts?.visualOcrTextHints?.path || "", visual: true },
+    { artifact: "ocrTextHints", pages: "ocrPages", path: job.artifacts?.ocrTextHints?.path || "", visual: false }
+  ].filter((candidate) => candidate.path && fsSync.existsSync(candidate.path));
+  let selectedHints = null;
+  let hints = null;
+  let page = null;
+  for (const candidate of hintCandidates) {
+    const candidateHints = JSON.parse(await fs.readFile(candidate.path, "utf8"));
+    const candidatePage = (Array.isArray(candidateHints.pages) ? candidateHints.pages : []).find((item) => normalizePageId(item.pageId) === pageId);
+    if (!candidatePage) continue;
+    selectedHints = candidate;
+    hints = candidateHints;
+    page = candidatePage;
+    break;
+  }
+  if (!selectedHints || !hints || !page) throw new Error(`OCR text hints are not available for correction on ${pageId}.`);
+  const hintsPath = selectedHints.path;
   if (!page) throw new Error(`OCR page not found: ${pageId}`);
   const line = (Array.isArray(page.ocrLines) ? page.ocrLines : []).find((item) => String(item.id || "") === lineId);
   if (!line) throw new Error(`OCR line not found: ${lineId}`);
@@ -294,7 +308,7 @@ export async function correctWorkflowOcrTextHint(jobId, options = {}) {
   const hintsBuffer = await fs.readFile(hintsPath);
   const hintsStat = await fs.stat(hintsPath);
 
-  const pageArtifact = (Array.isArray(job.artifacts?.ocrPages) ? job.artifacts.ocrPages : []).find((item) => normalizePageId(item.pageId) === pageId);
+  const pageArtifact = (Array.isArray(job.artifacts?.[selectedHints.pages]) ? job.artifacts[selectedHints.pages] : []).find((item) => normalizePageId(item.pageId) === pageId);
   if (pageArtifact?.path && fsSync.existsSync(pageArtifact.path)) {
     const pageData = JSON.parse(await fs.readFile(pageArtifact.path, "utf8"));
     const pageLine = (Array.isArray(pageData.lines) ? pageData.lines : []).find((item) => String(item.id || "") === lineId);
@@ -316,8 +330,8 @@ export async function correctWorkflowOcrTextHint(jobId, options = {}) {
   const summary = hints.summary || {};
   job.artifacts = {
     ...(job.artifacts || {}),
-    ocrTextHints: {
-      ...(job.artifacts?.ocrTextHints || {}),
+    [selectedHints.artifact]: {
+      ...(job.artifacts?.[selectedHints.artifact] || {}),
       pageCount: summary.pageCount || 0,
       textCount: summary.textCount || 0,
       lowConfidenceCount: summary.lowConfidenceCount || 0,
@@ -336,7 +350,7 @@ export async function correctWorkflowOcrTextHint(jobId, options = {}) {
       correctedAt: line.corrected_at
     }].slice(-500)
   };
-  const visualTextQuality = job.artifacts?.visualOcrTextHints?.path
+  const visualTextQuality = selectedHints.visual
     ? await writeWorkflowVisualTextQualityReport(job)
     : null;
   await syncRapidOcrHintsToEditableRun(job, hintsPath);

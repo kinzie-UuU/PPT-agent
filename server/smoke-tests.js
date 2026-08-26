@@ -6,13 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import JSZip from "jszip";
+import PptxGenJS from "pptxgenjs";
 import { getDesignSystem, getTemplatePack, getTemplatePackPrompt } from "./designSystem.js";
 import { buildMaterialBrief } from "./materialBrief.js";
 import { routeDeck } from "./deckRouter.js";
 import { validateDeck } from "./validateDeck.js";
 import { applySceneGraphOverrides, applySceneGraphRepairPlan, buildSceneGraph, buildSceneGraphRepairRecord, buildVisualTarget, compareRenderedPreviewToVisualTarget, compareVisualTarget, validateSceneGraph } from "./sceneGraph.js";
 import { buildDeck } from "./ppt.js";
-import { inspectEditablePptx } from "./pptxEditability.js";
+import { inspectEditablePptx, inspectPowerPointTextLayout } from "./pptxEditability.js";
 import { getCloudImageConfig } from "./cloudImage.js";
 import { buildAssetManifest, validateAssetManifest } from "./assetManifest.js";
 import { ensureVisualProjectForJob, generateVisualProjectSlides, writeEditableSceneGraphArtifacts } from "./visualProject.js";
@@ -21,16 +22,16 @@ import { cutoutImage } from "./matting.js";
 import { buildFullDeckTestEvidence, findLegacyStyleEvidence, isCodexPptFullDeckApprovalCurrent, isCodexPptSampleApprovalCurrent, reconcileVisualArtifactsForApprovedSample } from "./workflowApprovals.js";
 import { cleanPublicError } from "./workflowWorkerBatchRunner.js";
 import { assertEditableDispatchAllowed, inspectEditablePageVisualFidelity, isImageDeckReviewApproved, restoreRecordedEditablePages } from "./workflowEditable.js";
-import { assertVisualQualityAllowsReview, assertWorkflowImageDeckReviewReady } from "./workflowImageDeckReview.js";
-import { isPageResultEvidenceComplete } from "./workflowPageEvidence.js";
+import { assertVisualQualityAllowsReview, assertWorkflowImageDeckReviewReady, getExpectedWorkflowPageCount } from "./workflowImageDeckReview.js";
+import { classifyPagePptxOpenabilityIssues, isPageResultEvidenceComplete } from "./workflowPageEvidence.js";
 import { isFinalPptxProductReady } from "./workflowArtifacts.js";
-import { collectMissingForegroundAssets, comparePngVisualFidelity, evaluateEditableVisualFidelity, isBlockingEditableVisualIssue } from "./workflowFinalEvidence.js";
+import { collectMissingForegroundAssets, comparePngVisualFidelity, evaluateEditableVisualFidelity, inspectFinalVisualQuality, isBlockingEditableVisualIssue } from "./workflowFinalEvidence.js";
 import { buildPartialFinalCoverage, isContinuationBatchSuccess } from "./workflowContinuation.js";
-import { deriveWorkflowDeliveryStatus } from "../shared/workflowDeliveryStatus.js";
+import { deriveWorkflowDeliveryStatus, getWorkflowExpectedPageCount } from "../shared/workflowDeliveryStatus.js";
 import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
 import { buildFinalDeliveryGate } from "./workflowDelivery.js";
 import { withWorkflowJobLock, workflowJobLockCount } from "./workflowJobLock.js";
-import { assertWorkflowVisualGenerationAllowed, buildBriefSourcePrompt, buildDeckStyleConsistencyReport, buildVisualImageRecord, buildVisualPromptsPayload, isVisualSourceImage, mergeOutlineMetadata, resolveRetainedVisualContinuityReference, retainUnchangedImageDeckReviewMarks } from "./workflowVisuals.js";
+import { assertWorkflowVisualGenerationAllowed, buildBriefSourcePrompt, buildDeckStyleConsistencyReport, buildVisualImageRecord, buildVisualPromptsPayload, getWorkflowVisualSourceOcrPageIds, getWorkflowVisualTargetPages, isVisualSourceImage, mergeOutlineMetadata, resolveRetainedVisualContinuityReference, retainUnchangedImageDeckReviewMarks } from "./workflowVisuals.js";
 import { applyWorkflowOcrResultToJob, extractPptxNativeTextByPage, extractSourceTextLines, getOcrInputImages, getWorkflowOcrCoverage, isSourceTextInput, mergeOcrPageEvidence, mergeWorkflowOcrTextHints, shouldSyncOcrHintsToEditableRun } from "./workflowOcr.js";
 import { buildProviderConnectionError, getProviderConfig, readProviderError } from "./providers.js";
 import { isBatchInfrastructureError, resolveAppliedSampleSha256, resolveCodexStyleReferenceImages, runSequentialSlideTasks, sanitizeBatchError } from "./workflowCodexPptSlideBatchRunner.js";
@@ -51,10 +52,57 @@ import {
   selectRepresentativeSamplePage
 } from "./workflowDeckDesignSystem.js";
 import { buildVisualTextQualityReport, reconcileImageDeckReviewEvidence, writeWorkflowVisualTextQualityReport } from "./workflowVisualTextQa.js";
+import { createLocalRequestBoundary, isLoopbackHost, resolveLocalAccessConfig } from "./localAccess.js";
+import { fingerprintRuntime } from "./runtimeIdentity.js";
+import { countRecoveryEvents } from "./workflowBusinessReadiness.js";
+import { WORKFLOW_BUSINESS_POLICY_VERSION } from "./workflowJobs.js";
 
 const EASTERN = "\u4e1c\u65b9\u81ea\u7136\u98ce";
 const TECH = "\u84dd\u767d\u79d1\u6280\u98ce";
 const SYSTEM_RECOMMEND = "\u7cfb\u7edf\u63a8\u8350";
+
+assert.equal(WORKFLOW_BUSINESS_POLICY_VERSION, "repeatable-business-v1");
+assert.equal(isLoopbackHost("127.0.0.1"), true);
+assert.equal(isLoopbackHost("[::1]"), true);
+assert.equal(isLoopbackHost("0.0.0.0"), false);
+assert.throws(() => resolveLocalAccessConfig({ PPT_TOOL_HOST: "0.0.0.0" }, 4180), /loopback address/);
+assert.throws(() => resolveLocalAccessConfig({ PPT_TOOL_ALLOWED_ORIGINS: "https://evil.example" }, 4180), /non-loopback/);
+const localAccessSmoke = resolveLocalAccessConfig({}, 4180);
+let localBoundaryNext = false;
+createLocalRequestBoundary(localAccessSmoke)({
+  hostname: "127.0.0.1",
+  method: "POST",
+  headers: { origin: "http://127.0.0.1:4180" }
+}, {}, () => { localBoundaryNext = true; });
+assert.equal(localBoundaryNext, true);
+const rejectedLocalBoundary = { statusCode: 0, body: null };
+createLocalRequestBoundary(localAccessSmoke)({
+  hostname: "127.0.0.1",
+  method: "POST",
+  headers: { origin: "https://evil.example" }
+}, {
+  status(code) { rejectedLocalBoundary.statusCode = code; return this; },
+  json(body) { rejectedLocalBoundary.body = body; }
+}, () => {});
+assert.equal(rejectedLocalBoundary.statusCode, 403);
+assert.equal(rejectedLocalBoundary.body.code, "UNTRUSTED_WRITE_ORIGIN");
+assert.equal(countRecoveryEvents([
+  { type: "editable.reset" },
+  { type: "editable.worker_task_reset" },
+  { type: "editable.worker_batch_failed" },
+  { type: "workflow.image_deck_pages_reset_for_rerun" },
+  { type: "workflow.page.retry_requested" }
+]), 3);
+const runtimeIdentitySmokeDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ppt-runtime-identity-smoke-"));
+try {
+  await fsPromises.writeFile(path.join(runtimeIdentitySmokeDir, "source.js"), "one", "utf8");
+  const firstIdentity = await fingerprintRuntime(runtimeIdentitySmokeDir, ["source.js"]);
+  await fsPromises.writeFile(path.join(runtimeIdentitySmokeDir, "source.js"), "changed", "utf8");
+  const secondIdentity = await fingerprintRuntime(runtimeIdentitySmokeDir, ["source.js"]);
+  assert.notEqual(firstIdentity.fingerprint, secondIdentity.fingerprint);
+} finally {
+  await fsPromises.rm(runtimeIdentitySmokeDir, { recursive: true, force: true });
+}
 
 const providerConnectionError = buildProviderConnectionError(
   Object.assign(new Error("fetch failed"), { cause: { code: "ECONNRESET" } }),
@@ -168,6 +216,32 @@ assert.equal(overflowCoverageGate.checks.fullSourceCoverage, false);
 assert.equal(overflowCoverageGate.checks.sourceCoverageOverflow, true);
 assert.ok(overflowCoverageGate.reasons.some((reason) => /21\/20/.test(reason)));
 
+const briefSourceCoverageJob = {
+  input: { sourceKind: "brief_source", mode: "codex-ppt-brief" },
+  sourceMeta: { pageCount: 1, renderer: "brief-source" },
+  artifacts: {
+    renderedPages: [{}],
+    codexPptOutline: { slideCount: 8 },
+    editableFinal: {
+      path: "editable-final.pptx",
+      summary: { page_count: 8 },
+      pptxEditability: { slideCount: 8, editable: true, rasterOnlySlides: 0 }
+    }
+  }
+};
+assert.equal(getWorkflowExpectedPageCount(briefSourceCoverageJob), 8);
+const briefSourceCoverageGate = buildFinalDeliveryGate(
+  briefSourceCoverageJob,
+  {},
+  { complete: true },
+  { complete: true, summary: { visualQa: { automatedStatus: "pass" } } }
+);
+assert.equal(briefSourceCoverageGate.checks.sourcePages, 8);
+assert.equal(briefSourceCoverageGate.checks.fullSourceCoverage, true);
+assert.equal(briefSourceCoverageGate.checks.sourceCoverageOverflow, false);
+assert.deepEqual(classifyPagePptxOpenabilityIssues({ available: true, openable: null, skipped: true }), ["page-pptx-openability-skipped"]);
+assert.deepEqual(classifyPagePptxOpenabilityIssues({ available: true, openable: false, skipped: false }), ["page-pptx-powerpoint-open-failed"]);
+
 const reviewedBackgroundGate = buildFinalDeliveryGate({
   sourceMeta: { pageCount: 1 },
   artifacts: {
@@ -198,6 +272,45 @@ const reviewedBackgroundGate = buildFinalDeliveryGate({
 }, {}, { complete: true }, { complete: true, summary: { visualQa: { automatedStatus: "pass" } } });
 assert.equal(reviewedBackgroundGate.checks.manualReviewRecorded, true);
 assert.ok(!reviewedBackgroundGate.warnings.some((warning) => /full-slide-background-picture|全页背景图/.test(warning)));
+
+const flattenedEditableGate = buildFinalDeliveryGate({
+  sourceMeta: { pageCount: 8 },
+  artifacts: {
+    editableFinal: {
+      path: "editable-final.pptx",
+      size: 100,
+      sha256: "flattened-final-sha",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      summary: { page_count: 8 },
+      pptxEditability: {
+        slideCount: 8,
+        editable: false,
+        fullSlidePictures: 8,
+        rasterOnlySlides: 0,
+        rasterBackgroundSlides: 8,
+        flattenedStructureSlides: 8,
+        flattenedStructureDeck: true,
+        warnings: ["flattened-editable-structure:8/8"]
+      },
+      powerPointTextLayout: {
+        available: true,
+        passed: true,
+        overflowingTextFrames: 0
+      }
+    },
+    manualReview: {
+      status: "approved",
+      finalPath: "editable-final.pptx",
+      finalSize: 100,
+      finalSha256: "flattened-final-sha",
+      finalCreatedAt: "2026-01-01T00:00:00.000Z"
+    }
+  },
+  dirs: {}
+}, {}, { complete: true }, { complete: true, summary: { visualQa: { automatedStatus: "pass" } } });
+assert.equal(flattenedEditableGate.productReady, false);
+assert.equal(flattenedEditableGate.checks.noFlattenedEditableStructure, false);
+assert.ok(flattenedEditableGate.reasons.some((reason) => /flattened/i.test(reason)));
 
 const untrackedFinalDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ppt-untracked-final-smoke-"));
 try {
@@ -237,6 +350,45 @@ try {
     pngChunk("IDAT", Buffer.from([0x00])),
     pngChunk("IEND", Buffer.alloc(0))
   ]);
+  const maskedQaRunDir = path.join(editableRefreshDir, "masked-qa", "run");
+  const maskedQaPageDir = path.join(maskedQaRunDir, "pages", "page_001");
+  await fsPromises.mkdir(maskedQaPageDir, { recursive: true });
+  const maskedQaTargetPath = path.join(editableRefreshDir, "masked-qa-target.png");
+  const maskedQaSourcePath = path.join(maskedQaPageDir, "source.png");
+  const maskedQaPreviewPath = path.join(maskedQaPageDir, "preview.png");
+  await fsPromises.writeFile(maskedQaTargetPath, minimalPng);
+  await fsPromises.writeFile(maskedQaSourcePath, minimalPng);
+  await fsPromises.writeFile(maskedQaPreviewPath, minimalPng);
+  await fsPromises.writeFile(path.join(maskedQaPageDir, "split_assets_contact.png"), minimalPng);
+  await fsPromises.writeFile(path.join(maskedQaPageDir, "product-visual-qa.json"), JSON.stringify({
+    pageId: "page_001",
+    sourcePath: maskedQaSourcePath,
+    previewPath: maskedQaPreviewPath,
+    minimumSimilarity: 0.93,
+    comparisonMode: "non-text-structure-with-validated-editable-text-mask",
+    editableTextContract: { passed: true, boxes: [[0, 0, 1, 1]] },
+    comparison: {
+      available: true,
+      rawScore: 0.99,
+      score: 0.99,
+      edgeOverlap: 0.99,
+      edgeRetention: 1,
+      contentTileCount: 8,
+      weakContentTileRatio: 0,
+      lowContentTileScore: 1,
+      targetEdgeCount: 120,
+      ignoredEditableTextBoxCount: 1
+    },
+    issues: [],
+    passed: true,
+    checkedAt: new Date().toISOString()
+  }), "utf8");
+  const maskedFinalVisualQa = inspectFinalVisualQuality({
+    artifacts: { visualImages: [{ pageId: "page_001", path: maskedQaTargetPath }] }
+  }, maskedQaRunDir, { pages: [{ page_id: "page_001" }] });
+  assert.equal(maskedFinalVisualQa.automatedStatus, "pass");
+  assert.equal(maskedFinalVisualQa.pages[0].productVisualQa.current, true);
+  assert.equal(maskedFinalVisualQa.pages[0].visualSimilarity.ignoredEditableTextBoxCount, 1);
   const truncatedPng = minimalPng.subarray(0, 24);
   const minimalPptxZip = new JSZip();
   minimalPptxZip.file("[Content_Types].xml", "<Types/>");
@@ -1178,12 +1330,74 @@ assert.equal(isVisualSourceImage("rendered-pages/page_001.md"), false);
 const briefPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "ppt-brief-prompt-smoke-"));
 try {
   const briefPath = path.join(briefPromptDir, "source.md");
+  const outlinePath = path.join(briefPromptDir, "outline.json");
   fs.writeFileSync(briefPath, "# PPT Brief Source\n用户需求：\n主题：PPT Agent 纯前端闭环测试。蓝白配色。\n已确认大纲：\n1. 封面", "utf8");
-  const briefJob = { artifacts: { source: { kind: "brief_source", path: briefPath } } };
+  fs.writeFileSync(outlinePath, JSON.stringify({
+    slideCount: 3,
+    layoutSequence: [
+      { title: "封面", layout: "cover" },
+      { title: "路线图", layout: "process", evidence: "90 天" },
+      { title: "行动", layout: "closing" }
+    ]
+  }), "utf8");
+  const briefJob = {
+    input: { sourceBrief: "PPT Agent 纯前端闭环测试" },
+    artifacts: {
+      source: { kind: "brief_source", path: briefPath },
+      renderedPages: [{ pageId: "page_001", pageNumber: 1, path: briefPath }],
+      codexPptOutline: { path: outlinePath, slideCount: 3 }
+    }
+  };
   assert.match(buildBriefSourcePrompt(briefJob), /PPT Agent 纯前端闭环测试/);
   const briefPayload = buildVisualPromptsPayload(briefJob, [{ pageId: "page_001", pageNumber: 1, path: briefPath }]);
   assert.match(briefPayload.pages[0].prompt, /Use its exact subject and requested title/);
   assert.doesNotMatch(briefPayload.pages[0].prompt, /SOURCE INFORMATION ASSET MAP/);
+  const briefTargetPages = getWorkflowVisualTargetPages(briefJob);
+  assert.equal(briefTargetPages.length, 3);
+  assert.equal(getExpectedWorkflowPageCount(briefJob), 3);
+  assert.equal(briefTargetPages[1].pageId, "page_002");
+  assert.equal(briefTargetPages[1].outlineTitle, "路线图");
+  assert.equal(briefTargetPages[1].path, "");
+  assert.deepEqual(getWorkflowVisualSourceOcrPageIds(briefJob, "1,2"), ["page_001"]);
+  const briefDeckPayload = buildVisualPromptsPayload(briefJob, briefTargetPages);
+  assert.match(briefDeckPayload.pages[1].prompt, /Slide title: 路线图/);
+  assert.match(briefDeckPayload.pages[1].prompt, /Approved outline evidence: 90 天/);
+  const splitTitleReport = buildVisualTextQualityReport({
+    sourceHints: { pages: [] },
+    outline: { layoutSequence: [{ title: "AI Agent 企业落地路线图", layout: "cover" }] },
+    visualHints: { pages: [{
+      pageId: "page_001",
+      pageNumber: 1,
+      imageSha256: "visual-1",
+      ocrLines: [
+        { text: "AI Agent", confidence: 0.99, box_px: [40, 120, 500, 160], font_pt_if_cjk: 90 },
+        { text: "企业落地路线图", confidence: 0.99, box_px: [40, 280, 700, 110], font_pt_if_cjk: 60 }
+      ]
+    }] },
+    expectedPageIds: ["page_001"]
+  });
+  assert.equal(splitTitleReport.pages[0].blockingReasons.includes("source-title-mismatch"), false);
+  const approvedOutlineDataReport = buildVisualTextQualityReport({
+    sourceHints: { pages: [] },
+    outline: { layoutSequence: [{
+      title: "90 天路线图：从一个闭环开始",
+      layout: "process",
+      evidence: "0-30天 定场景与基线；31-60天 小范围试点；61-90天 扩大覆盖"
+    }] },
+    visualHints: { pages: [{
+      pageId: "page_001",
+      pageNumber: 1,
+      imageSha256: "visual-timeline",
+      ocrLines: [
+        { text: "90 天路线图：从一个闭环开始", confidence: 0.99, box_px: [60, 60, 900, 70], font_pt_if_cjk: 42 },
+        { text: "0-30天", confidence: 0.99, box_px: [100, 320, 180, 40], font_pt_if_cjk: 22 },
+        { text: "31-60天", confidence: 0.99, box_px: [500, 320, 180, 40], font_pt_if_cjk: 22 },
+        { text: "61-90天", confidence: 0.99, box_px: [900, 320, 180, 40], font_pt_if_cjk: 22 }
+      ]
+    }] },
+    expectedPageIds: ["page_001"]
+  });
+  assert.equal(approvedOutlineDataReport.pages[0].blockingReasons.includes("invented-critical-text"), false);
 } finally {
   fs.rmSync(briefPromptDir, { recursive: true, force: true });
 }
@@ -1452,7 +1666,7 @@ try {
       codexPptApprovals: [{ gate: "sample", status: "approved", sampleSha256: approvedSampleSha256 }],
       ocrTextHints: { path: ocrHintsPath },
       codexPptRerunGuidance: {
-        page_002: { reasons: ["template-chrome-detected", "inconsistent-page-number-position"], note: "keep the master stable" }
+        page_002: { reasons: ["template-chrome-detected", "inconsistent-page-number-position", "invented-critical-text"], requiredTexts: ["1-2 scenarios"], note: "keep the master stable" }
       }
     }
   }, [
@@ -1465,6 +1679,9 @@ try {
   assert.ok(normalizedPrompt.includes("YOUR LOGO"));
   assert.ok(normalizedPrompt.includes("RERUN CORRECTION"));
   assert.ok(normalizedPrompt.includes("confirmed deck-wide master anchor"));
+  assert.ok(normalizedPrompt.includes("Remove these invented or unsupported strings"));
+  assert.ok(normalizedPrompt.includes("1-2 scenarios"));
+  assert.ok(!normalizedPrompt.includes("Restore these exact missing or altered source strings: 1-2 scenarios"));
   assert.ok(!normalizedPrompt.includes("N/total page counters, YOUR BRAND"));
   const preservedCounterPrompt = buildVisualPromptsPayload({
     id: "workflow_preserved_counter_smoke",
@@ -1844,6 +2061,24 @@ const validStyleLockedTestEvidence = buildFullDeckTestEvidence({
 });
 assert.equal(validStyleLockedTestEvidence.pages.filter((page) => page.styleAuthority).length, 1);
 assert.equal(validStyleLockedTestEvidence.pages.filter((page) => page.imageInputMode === "source-page-edit-plus-style-reference").length, 1);
+const validBriefStyleLockedTestEvidence = buildFullDeckTestEvidence({
+  artifacts: {
+    visualSample: { sha256: "sample-v1" },
+    visualImages: [
+      { pageId: "page_001", pageNumber: 1, path: "page_001.png", sha256: "sample-v1", imageInputMode: "source-page-edit", retainedApprovedSample: true },
+      { pageId: "page_002", pageNumber: 2, path: "page_002.png", sha256: "page-2-v1", imageInputMode: "approved-sample-edit" }
+    ],
+    imageDeckReview: {
+      status: "approved",
+      summary: { totalPages: 2, passCount: 2, acceptCount: 0, allPagesReviewed: true, allMarksCurrent: true, readyForApproval: true },
+      marks: {
+        page_001: { status: "pass", visualImageSha256: "sample-v1" },
+        page_002: { status: "pass", visualImageSha256: "page-2-v1" }
+      }
+    }
+  }
+});
+assert.equal(validBriefStyleLockedTestEvidence.pages[1].imageInputMode, "approved-sample-edit");
 assert.throws(() => buildFullDeckTestEvidence({
   artifacts: {
     visualSample: { sha256: "sample-v1" },
@@ -2988,6 +3223,31 @@ assert.equal(path.extname(smokePptxPath).toLowerCase(), ".pptx");
 assert.equal(smokePptxJob.quality.pptxEditability.status, "pass");
 assert.ok(smokePptxJob.quality.pptxEditability.nativeTextBoxes >= 2);
 
+if (process.platform === "win32") {
+  const overflowPptxPath = path.join(os.tmpdir(), `ppt-text-overflow-${Date.now()}.pptx`);
+  try {
+    const overflowDeck = new PptxGenJS();
+    overflowDeck.layout = "LAYOUT_WIDE";
+    const overflowSlide = overflowDeck.addSlide();
+    overflowSlide.addText("This deliberately long PowerPoint sentence cannot fit inside the tiny fixed text box.", {
+      x: 1,
+      y: 1,
+      w: 1.1,
+      h: 0.18,
+      fontSize: 28,
+      margin: 0,
+      breakLine: false
+    });
+    await overflowDeck.writeFile({ fileName: overflowPptxPath });
+    const overflowLayout = await inspectPowerPointTextLayout(overflowPptxPath);
+    assert.equal(overflowLayout.available, true);
+    assert.equal(overflowLayout.passed, false);
+    assert.ok(overflowLayout.overflowingTextFrames >= 1);
+  } finally {
+    fs.rmSync(overflowPptxPath, { force: true });
+  }
+}
+
 const imageEditableJob = {
   id: "smoke_editable_image_object",
   mode: "generate",
@@ -3548,6 +3808,8 @@ assert.ok(frontendSource.includes("onOpenImageDeckReview={openImageDeckReviewPan
 assert.ok(frontendSource.includes("onCreateWorkflow?.({"));
 assert.ok(frontendSource.includes("enforcePredictableCost: true"));
 assert.ok(frontendSource.includes("maxImageCalls: costPreview?.plannedImageCalls"));
+assert.ok(frontendSource.includes('const selectedGenerationRoute = pendingGenerationRoute === "ppt-master-native" ? "ppt-master-native" : "image-fidelity";'));
+assert.ok(frontendSource.includes("pptMasterProvider={pptMasterProvider}"));
 assert.ok(frontendSource.includes('onDeliveryModeChange?.("visual")'));
 assert.ok(frontendSource.includes('onDeliveryModeChange?.("editable")'));
 assert.ok(frontendSource.includes("topbar-system-entry"));
@@ -3794,6 +4056,16 @@ assert.ok(modelPageSpecWorkerSource.includes("|| coerceBox(availableAsset?.sourc
 assert.ok(modelPageSpecWorkerSource.includes("item.asset_id"));
 assert.ok(modelPageSpecWorkerSource.includes("!isFullSlideBackgroundAsset(asset, bundle.pageRequest?.source_size_px)"));
 assert.ok(modelPageSpecWorkerSource.includes("box_px: coerceBox(image.box_px) || coerceBox(asset?.source_box_px) || image.box_px"));
+assert.ok(modelPageSpecWorkerSource.includes("collectMissingImageAssetJobs(spec, promptBundle.pageDir)"));
+assert.ok(modelPageSpecWorkerSource.includes("const existingPathIsUsable = isUsablePageAssetPath(existingPath, bundle.pageDir)"));
+assert.ok(modelPageSpecWorkerSource.includes("const imagePath = existingPathIsUsable ? existingPath : assetPath || existingPath"));
+assert.ok(modelPageSpecWorkerSource.includes("/^(?:path\\/to|placeholder|example)(?:\\/|$)/i.test(assetPath)"));
+assert.ok(modelPageSpecWorkerSource.includes("const declaredImageId = String(image.id || \"\").trim() ? cleanAssetId(image.id) : \"\""));
+assert.ok(modelPageSpecWorkerSource.includes("path.basename(normalizeAssetPath(renderable?.path || \"\"), path.extname(normalizeAssetPath(renderable?.path || \"\")))"));
+assert.ok(modelPageSpecWorkerSource.includes("selectSpatiallyDistinctOcrLines(brief?.ocr?.lines || [])"));
+assert.ok(modelPageSpecWorkerSource.includes("boxOverlapRatio(box, kept.box_px) >= 0.82"));
+assert.ok(modelPageSpecWorkerSource.includes("Treat a connected multi-node roadmap, network, or scene illustration as one cohesive foreground illustration asset"));
+assert.ok(modelPageSpecWorkerSource.includes("if area>w*h*0.62 or area<w*h*0.006: continue"));
 assert.ok(modelPageSpecWorkerSource.includes('fs.rm(path.join(pageDir, "visual-asset-jobs.json"), { force: true })'));
 assert.ok(modelPageSpecWorkerSource.includes("collectMissingComplexBackgroundAssetJobs(spec, pageRequest)"));
 assert.ok(modelPageSpecWorkerSource.includes("ensureAvailableComplexBackgroundAssetsRepresented(spec, bundle, pageRequest)"));
@@ -3804,6 +4076,19 @@ assert.ok(modelPageSpecWorkerSource.includes("Remove all text, logos, badges, ic
 assert.ok(modelPageSpecWorkerSource.includes("must use a source-faithful image asset, not only native shapes."));
 assert.ok(modelPageSpecWorkerSource.includes("readVerifiedRecordedAssetIndex"));
 assert.ok(modelPageSpecWorkerSource.includes("isNeededVisualAssetJobCovered"));
+assert.ok(modelPageSpecWorkerSource.includes("if (!imageIsBackground || jobIsBackground)"));
+assert.ok(modelPageSpecWorkerSource.includes("Containment must not make a missing foreground illustration appear covered."));
+assert.ok(modelPageSpecWorkerSource.includes("job.target_asset_path"));
+assert.ok(modelPageSpecWorkerSource.includes("resolvePillowPythonCommand"));
+assert.ok(modelPageSpecWorkerSource.includes("process.env.OCR_PYTHON_PATH"));
+assert.ok(modelPageSpecWorkerSource.includes("Foreground visual delta analysis failed"));
+assert.ok(modelPageSpecWorkerSource.includes("consolidateDetectedForegroundIllustrationAssets"));
+assert.ok(modelPageSpecWorkerSource.includes("connectedForegroundPlacementBox"));
+assert.ok(modelPageSpecWorkerSource.includes("Source-faithful cohesive connected foreground illustration restored as one positioned asset."));
+assert.ok(modelPageSpecWorkerSource.includes("enableDeterministicTextFit"));
+assert.ok(modelPageSpecWorkerSource.includes('item.fit_text = true'));
+assert.ok(modelPageSpecWorkerSource.includes("assets/source_locked_clean_base.png is forbidden for formal editable output"));
+assert.ok(modelPageSpecWorkerSource.includes("source-locked-masked-clean-base is forbidden for formal editable output"));
 assert.ok(modelPageSpecWorkerSource.includes("isTextOnlyBrandRegion"));
 assert.ok(modelPageSpecWorkerSource.includes('font_size_calibration = "source-title-ink-height"'));
 assert.ok(modelPageSpecWorkerSource.includes('position_calibration = "source-ink-top"'));
@@ -3828,7 +4113,7 @@ assert.ok(workflowNextActionSource.includes("requiresExternalImageConfirmation: 
 assert.ok(workflowNextActionSource.includes("Route B requires explicit user confirmation before starting editable PPT rebuild."));
 assert.ok(workflowNextActionSource.includes("isImageDeckReviewApproved"));
 assert.ok(workflowNextActionSource.includes("isWorkflowJobImageDeckReviewApproved(job)"));
-assert.ok(workflowNextActionSource.includes("job.sourceMeta?.pageCount"));
+assert.ok(workflowNextActionSource.includes("getExpectedWorkflowPageCount(job)"));
 assert.ok(workflowNextActionSource.includes("Route B requires image deck review approval before editable prepare."));
 assert.ok((workflowNextActionSource.match(/Route B requires image deck review approval before editable prepare\./g) || []).length >= 2);
 assert.ok(workflowNextActionSource.includes("文字、数据、页码或页面角色等自动风险"));
@@ -3850,6 +4135,8 @@ assert.ok(imageDeckReviewBackendSource.includes("IMAGE_DECK_RERUN_CONFIRMATION_R
 assert.ok(imageDeckReviewBackendSource.includes("workflow.image_deck_pages_reset_for_rerun"));
 assert.ok(imageDeckReviewBackendSource.includes("captureImageDeckRerunGuidance"));
 assert.ok(imageDeckReviewBackendSource.includes("codexPptRerunGuidance"));
+assert.ok(imageDeckReviewBackendSource.includes("migrateLegacyInventedRequired"));
+assert.ok(imageDeckReviewBackendSource.includes("forbiddenTexts"));
 assert.ok(imageDeckReviewBackendSource.includes('"visualTextQuality"'));
 assert.ok(imageDeckReviewBackendSource.includes("await writeWorkflowVisualTextQualityReport(job)"));
 assert.ok(apiClientSource.includes("/image-deck/review/rerun-pages"));
@@ -3882,6 +4169,7 @@ assert.ok(workflowOcrSource.includes('await fs.copyFile(imagePath, stagedPath)')
 assert.ok(workflowOcrSource.includes('const existingOcrLines = Array.isArray(page.ocrLines)'));
 assert.ok(workflowOcrSource.includes('sha256: cleanString(item.sha256 || "") || currentFileSha256Sync(path.resolve(item.path))'));
 assert.ok(workflowOcrSource.includes('[\\uE000-\\uF8FF\\uFFFD]'));
+assert.ok(workflowOcrSource.includes('{ artifact: "visualOcrTextHints", pages: "visualOcrPages"'));
 assert.ok(frontendSource.includes('progressState.reviewPageIds?.length'));
 assert.ok(frontendSource.includes('const targetImages = missingImages.length ? missingImages : images'));
 assert.ok(pageWorkerBatchSource.includes('forceEditpptReset: true'));
@@ -3914,12 +4202,17 @@ assert.ok(!visualAssetHelperSource.includes('["image", "batch"'));
 assert.ok(workflowEditableSource.includes("assertImageDeckReviewGate(job, options)"));
 assert.match(workflowEditableSource, /requestedBy:\s*"editable-prepare",\s*preserveWorkflowStage:\s*true/);
 assert.ok(workflowEditableSource.includes("getExpectedWorkflowPageCount(job)"));
+assert.ok(workflowEditableSource.includes("job.artifacts?.visualOcrTextHints?.path || job.artifacts?.ocrTextHints?.path"));
 assert.ok(workflowEditableSource.includes("Route B requires explicit user confirmation before editable prepare."));
 assert.ok(workflowEditableSource.includes("isImageDeckReviewApproved"));
 assert.ok(editableRecordSource.includes("Image deck review must be current and approved before recording editable page results."));
 assert.ok(workflowEditableSource.includes("Image deck review must be current and approved before finalizing the editable PPTX."));
 assert.ok(workflowDeliverySource.includes("Image deck review is missing, stale, or incomplete for the current generated pages."));
 assert.ok(workflowFinalEvidenceSource.includes("powerPointOpenability?.available === true"));
+assert.ok(workflowFinalEvidenceSource.includes("maskValidatedEditableTextRegions"));
+assert.ok(workflowFinalEvidenceSource.includes("ignoredEditableTextBoxCount"));
+assert.ok(workflowEditableSource.includes("readEditableTextVisualContract"));
+assert.ok(workflowEditableSource.includes("non-text-structure-with-validated-editable-text-mask"));
 assert.ok(workflowFinalEvidenceSource.includes("powerPointOpenability?.openable === true"));
 assert.ok(workflowFinalEvidenceSource.includes("final.sha256 !== finalHash"));
 assert.ok(workflowFinalEvidenceSource.includes("!cached.finalSha256 || cached.finalSha256 !== finalHash"));
@@ -3929,6 +4222,9 @@ assert.ok(workflowJobsSource.includes("WORKFLOW_LIST_READ_CONCURRENCY"));
 assert.ok(workflowJobsSource.includes("buildWorkflowListSummary"));
 assert.ok(workflowJobsSource.includes("refreshWorkflowListCacheSingleFlight"));
 assert.ok(workflowJobsSource.includes("startedRevision === workflowListCacheRevision"));
+assert.ok(workflowJobsSource.includes("WORKFLOW_LIST_SNAPSHOT_PATH"));
+assert.ok(workflowJobsSource.includes("hydrateWorkflowListCacheFromSnapshot"));
+assert.ok(workflowJobsSource.includes("persistWorkflowListCacheSnapshot"));
 assert.ok(workflowJobsSource.includes("cached?.fingerprint === fingerprint"));
 assert.ok(workflowJobsSource.includes("WORKFLOW_LIST_CHANGE_PATH"));
 assert.ok(workflowEditableSource.includes("safeToRunAutomatically: false"));
@@ -4063,8 +4359,10 @@ assert.ok(frontendSource.includes("checks.finalPages"));
 assert.ok(workflowWorkerBatchRunnerSource.includes('NODE_USE_ENV_PROXY: process.execArgv.includes("--use-env-proxy")'));
 assert.ok(workflowWorkerBatchRunnerSource.includes("describeImageDeckReviewGate(artifacts, false)"));
 assert.ok(workflowWorkerBatchRunnerSource.includes("isImageDeckReviewApproved"));
+assert.ok(workflowWorkerBatchRunnerSource.includes("artifacts.visualOcrTextHints?.path"));
 assert.ok(workflowWorkerBatchRunnerSource.includes('error.code = "IMAGE_DECK_REVIEW_REQUIRED"'));
 assert.ok(workflowWorkerBatchRunnerSource.includes('Boolean(options.lowComplexityPageSpec || options.useLowComplexityPageSpec)'));
+assert.ok(workflowWorkerBatchRunnerSource.includes("const MODEL_PAGE_SPEC_MAX_TOKENS = 12000"));
 assert.ok(workflowWorkerBatchRunnerSource.includes('当前批次仍保持完整页面规格'));
 assert.ok(!workflowWorkerBatchRunnerSource.includes('recentProviderFailure.kind === "provider-timeout"\n      || options.lowComplexityPageSpec'));
 assert.ok(workflowWorkerBatchRunnerSource.includes("buildRunnerFailureAnalysis"));

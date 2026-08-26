@@ -8,7 +8,7 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
   const events = Array.isArray(job?.events) ? job.events : [];
   const stages = Object.values(job?.stages || {});
 
-  const sourcePages = numberOrZero(job?.sourceMeta?.pageCount) || countArray(artifacts.renderedPages);
+  const sourcePages = getWorkflowExpectedPageCount(job, artifacts);
   const renderedPages = countArray(artifacts.renderedPages);
   const visualPages = countArray(artifacts.visualImages);
   const imageDeckPages = numberOrZero(artifacts.imageDeck?.pageCount);
@@ -133,6 +133,17 @@ export function deriveWorkflowDeliveryStatus(job = {}, loadedTasks = []) {
     nextStep: effectiveNextStep,
     nextActions
   };
+}
+
+export function getWorkflowExpectedPageCount(job = {}, artifacts = job?.artifacts || {}) {
+  const renderedSourcePages = numberOrZero(job?.sourceMeta?.pageCount)
+    || numberOrZero(artifacts?.sourceMeta?.pageCount)
+    || countArray(artifacts?.renderedPages);
+  const isBriefSource = String(job?.input?.sourceKind || artifacts?.source?.kind || "").toLowerCase() === "brief_source"
+    || String(job?.input?.mode || "").toLowerCase() === "codex-ppt-brief"
+    || String(job?.sourceMeta?.renderer || artifacts?.sourceMeta?.renderer || "").toLowerCase() === "brief-source";
+  if (!isBriefSource) return renderedSourcePages;
+  return numberOrZero(artifacts?.codexPptOutline?.slideCount) || renderedSourcePages;
 }
 
 export function isWorkflowImageDeckReviewReady(artifacts = {}, { expectedPages = 0, visualBlockedPages = 0, visualBlockedPageIds = [] } = {}) {

@@ -68,6 +68,10 @@ export const api = {
     const response = await fetch("/api/doctor", { cache: "no-store", signal });
     return readJson(response);
   },
+  async pptMasterProvider(signal) {
+    const response = await fetch("/api/providers/ppt-master", { cache: "no-store", signal });
+    return readJson(response);
+  },
   async localImageStatus(signal) {
     const response = await fetch("/api/local-image/status", { cache: "no-store", signal });
     return readJson(response);

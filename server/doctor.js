@@ -10,6 +10,7 @@ import { rootDir, outputDir, uploadDir } from "./store.js";
 import { workflowRootDir } from "./workflowJobs.js";
 import { testEditableRuntime } from "./workflowEditable.js";
 import { resolvePowerShellExecutable } from "./pptxEditability.js";
+import { testPptMasterRuntime } from "./workflowPptMaster.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,6 +66,19 @@ export async function runProductDoctor(options = {}) {
   ));
 
   checks.push(checkCodexPptSkillContract());
+
+  const pptMaster = await testPptMasterRuntime({ timeoutMs: Number(options.pptMasterTimeoutMs || 15000) }).catch((error) => ({
+    ok: false,
+    error: error.message || "PPT Master runtime check failed"
+  }));
+  checks.push(makeCheck(
+    "ppt-master",
+    "PPT Master native provider",
+    Boolean(pptMaster.ok),
+    pptMaster.message || pptMaster.error || "PPT Master provider unavailable",
+    pptMaster,
+    pptMaster.nextAction ? { nextAction: pptMaster.nextAction } : {}
+  ));
 
   const ocrProbe = providers.ocr.enabled
     ? await testOcrProvider().catch((error) => ({ ok: false, error: error.message || "OCR probe failed" }))

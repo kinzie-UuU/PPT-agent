@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
-import { deriveWorkflowDeliveryStatus } from "../shared/workflowDeliveryStatus.js";
+import { deriveWorkflowDeliveryStatus, getWorkflowExpectedPageCount } from "../shared/workflowDeliveryStatus.js";
 import { readWorkflowJob } from "./workflowJobs.js";
 import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
 import { scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
@@ -243,7 +243,7 @@ function getEditableWorkerExternalImageCallsPerPage() {
 export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, finalEvidence = {}) {
   const artifacts = job.artifacts || {};
   const final = artifacts.editableFinal || {};
-  const editability = final.pptxEditability || {};
+  const editability = finalEvidence.pptxEditability || final.pptxEditability || {};
   const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const finalValidation = job.finalValidation || null;
   const hasFinal = Boolean(final.path);
@@ -263,6 +263,8 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
     ? numberOrZero(editability.rasterBackgroundSlides)
     : Math.max(0, fullSlidePictures - rasterOnlySlides);
   const editabilityWarnings = Array.isArray(editability.warnings) ? editability.warnings : [];
+  const flattenedStructureDeck = editability.flattenedStructureDeck === true;
+  const powerPointTextLayout = finalEvidence.powerPointTextLayout || final.powerPointTextLayout || {};
   const hasExperimentalEvidence = hasExperimentalModelEvidence(job) || envTruthy(process.env.PPT_TOOL_ALLOW_LOCAL_ASSET_FALLBACK);
   const localTextOnlyMultiPageEvidence = hasLocalTextOnlyMultiPageEvidence(job);
   const pageEvidenceComplete = Boolean(pageEvidence.complete);
@@ -270,7 +272,7 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   const visualQaStatus = String(finalEvidence.summary?.visualQa?.automatedStatus || finalEvidence.summary?.visualQa?.status || "");
   const visualQaPassed = visualQaStatus === "pass";
   const codexPptEvidence = buildCodexPptDeliveryEvidence(job);
-  const sourcePages = numberOrZero(job.sourceMeta?.pageCount) || countArray(artifacts.renderedPages);
+  const sourcePages = getWorkflowExpectedPageCount(job, artifacts);
   const finalPages = numberOrZero(final.summary?.page_count || editability.slideCount || job.finalValidation?.slides);
   const partialSourceCoverage = Boolean(hasFinal && sourcePages && finalPages && finalPages < sourcePages);
   const sourceCoverageMatches = Boolean(hasFinal && sourcePages > 0 && finalPages === sourcePages);
@@ -321,6 +323,14 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
   if (finalValidation?.passed === false) reasons.push("最终校验未通过。");
   if (editability.editable === false || rasterOnlySlides > 0) {
     warnings.push("OpenXML 可编辑性检查存在警告。");
+  }
+  if (hasFinal && flattenedStructureDeck) {
+    reasons.push(`Editable structure is flattened on ${numberOrZero(editability.flattenedStructureSlides)}/${numberOrZero(editability.slideCount)} slides: full-slide pictures contain the cards/diagrams while PowerPoint only exposes text overlays.`);
+  }
+  if (hasFinal && powerPointTextLayout.available !== true) {
+    reasons.push("PowerPoint text-layout inspection is unavailable for the final PPTX.");
+  } else if (hasFinal && powerPointTextLayout.passed !== true) {
+    reasons.push(`PowerPoint detected ${numberOrZero(powerPointTextLayout.overflowingTextFrames)} overflowing text frame(s); fix wrapping and text-box sizing before delivery.`);
   }
   if (rasterOnlySlides) {
     warnings.push(`检测到 ${rasterOnlySlides} 个整页栅格图风险。`);
@@ -374,6 +384,8 @@ export function buildFinalDeliveryGate(job, status = {}, pageEvidence = {}, fina
       hasFinal,
       validationPassed: finalValidation?.passed === true,
       editabilityPassed: editability.editable === true && rasterOnlySlides === 0,
+      noFlattenedEditableStructure: !flattenedStructureDeck,
+      powerPointTextLayoutPassed: powerPointTextLayout.available === true && powerPointTextLayout.passed === true,
       noFullSlideRaster: rasterOnlySlides === 0,
       noExperimentalEvidence: !hasExperimentalEvidence,
       noLocalTextOnlyMultiPageEvidence: !localTextOnlyMultiPageEvidence,
@@ -520,7 +532,7 @@ function buildCoverage(job) {
   const final = artifacts.editableFinal || {};
   const editability = final.pptxEditability || {};
   return {
-    sourcePages: numberOrZero(job.sourceMeta?.pageCount) || countArray(artifacts.renderedPages),
+    sourcePages: getWorkflowExpectedPageCount(job, artifacts),
     renderedPages: countArray(artifacts.renderedPages),
     visualPages: (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : []).filter((image) => image?.path && image.staleStyleReference !== true).length,
     imageDeckPages: numberOrZero(artifacts.imageDeck?.pageCount),
@@ -748,7 +760,7 @@ function buildCodexPptDeliveryEvidence(job = {}) {
   const rawSlideRun = summarizeCodexPptSlideRun(artifacts);
   const visualImages = (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
     .filter((image) => image?.path && image.staleStyleReference !== true);
-  const sourcePages = numberOrZero(job.sourceMeta?.pageCount) || (Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0);
+  const sourcePages = getWorkflowExpectedPageCount(job, artifacts);
   const slideRun = {
     ...rawSlideRun,
     sourcePages,

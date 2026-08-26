@@ -157,6 +157,8 @@ async function collectBuildFingerprint() {
     "package-lock.json",
     "dist/index.html",
     "server/index.js",
+    "server/doctor.js",
+    "server/workflowPptMaster.js",
     "server/workflowDelivery.js",
     "server/workflowPageEvidence.js",
     "server/workflowFinalEvidence.js",

@@ -395,6 +395,7 @@ function App() {
   const [connection, setConnection] = useState({ state: "checking", message: "正在检查本地服务..." });
   const [localImage, setLocalImage] = useState({ state: "checking", message: "正在检查本地生图服务..." });
   const [doctor, setDoctor] = useState({ state: "checking", message: "正在检查产品运行环境..." });
+  const [pptMasterProvider, setPptMasterProvider] = useState({ state: "checking", message: "正在检查 PPT Master..." });
   const [previewBusy, setPreviewBusy] = useState(false);
   const [apiConfig, setApiConfig] = useState({ apiKey: "", maskedApiKey: "", hasApiKey: false, baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", pageSpecModel: "gpt-4.1-mini", imageModel: "gpt-image-2" });
   const [availableModels, setAvailableModels] = useState([]);
@@ -413,6 +414,7 @@ function App() {
   const [workflowShowArchived, setWorkflowShowArchived] = useState(false);
   const [workflowBusy, setWorkflowBusy] = useState(false);
   const [pendingDeliveryMode, setPendingDeliveryMode] = useState("visual");
+  const [pendingGenerationRoute, setPendingGenerationRoute] = useState("image-fidelity");
   const [confirmRequest, setConfirmRequest] = useState(null);
   const [sampleReviewOpen, setSampleReviewOpen] = useState(false);
   const [imageDeckReviewOpen, setImageDeckReviewOpen] = useState(false);
@@ -534,6 +536,26 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
+    api.pptMasterProvider(controller.signal)
+      .then((data) => {
+        const provider = data?.provider || {};
+        setPptMasterProvider({
+          ...provider,
+          state: provider.ready ? "ready" : "blocked",
+          selectable: provider.automaticExecutionImplemented === true && provider.runnable === true,
+          message: provider.message || "PPT Master 检查完成"
+        });
+      })
+      .catch((requestError) => {
+        if (requestError?.name !== "AbortError") {
+          setPptMasterProvider({ state: "blocked", selectable: false, message: getErrorMessage(requestError) });
+        }
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
     const editableRuns = Array.isArray(workflowJob?.artifacts?.editableWorkerBatchRuns)
       ? workflowJob.artifacts.editableWorkerBatchRuns
       : [];
@@ -572,8 +594,10 @@ function App() {
         const data = await api.health(controller.signal);
         if (!active) return;
         setConnection({
-          state: "online",
-          message: data.uptime ? "本地在线 " + formatDuration(data.uptime) : "本地在线",
+          state: data.restartRequired ? "restart-required" : "online",
+          message: data.restartRequired
+            ? "本地服务源码或构建已更新，需要重启后才能使用最新版本。"
+            : data.uptime ? "本地在线 " + formatDuration(data.uptime) : "本地在线",
           details: data
         });
         setError((current) => (isConnectionError(current) ? "" : current));
@@ -632,7 +656,7 @@ function App() {
   const finalExportBlocked = isJobBlockedForFinal(job);
   const noCostApprovalSummary = useMemo(() => getNoCostCodexApprovalSummary(workflowJob), [workflowJob]);
 
-  const topbarStateClass = error || connection.state === "offline" ? "state-dot error" : connection.state === "online" ? "state-dot active" : "state-dot checking";
+  const topbarStateClass = error || ["offline", "restart-required"].includes(connection.state) ? "state-dot error" : connection.state === "online" ? "state-dot active" : "state-dot checking";
   const topbarMessage = error || status || connection.message || "准备就绪";
 
   function toggleTopbarPanel(panel) {
@@ -805,6 +829,7 @@ function App() {
         sourceUploadId,
         projectName: getEffectiveProjectName(form, files),
         mode: "ppt-rebuild",
+        generationRoute: options.generationRoute || "image-fidelity",
         deliveryMode,
         spendBudget: options.spendBudget || {},
         notes: routeNote
@@ -862,6 +887,7 @@ function App() {
         sourceOriginalName: getEffectiveProjectName(form, files) + "-brief.md",
         sourceMimeType: "text/markdown",
         mode: "codex-ppt-brief",
+        generationRoute: options.generationRoute || "image-fidelity",
         deliveryMode,
         spendBudget: options.spendBudget || {},
         notes: routeNote
@@ -2563,7 +2589,7 @@ function App() {
             </svg>
           </span>
           <span className="brand-name">PPT Agent</span>
-          <span className="topbar-pill"><span className={topbarStateClass} />本地已连接</span>
+          <span className="topbar-pill"><span className={topbarStateClass} />{connection.state === "restart-required" ? "服务需重启" : connection.state === "offline" ? "本地未连接" : "本地已连接"}</span>
           <span className="topbar-pill"><span className={modelConfigReady ? "pill-check" : "state-dot error"} />{modelConfigReady ? "模型已配置" : "模型待配置"}</span>
         </div>
         <div className="topbar-actions">
@@ -2859,6 +2885,7 @@ function App() {
           {activeStep === "generate" && (
             <DualRouteDashboard
               busy={workflowBusy || outlineBusy || generationProgress.active || Boolean(uploadDeleteBusyId)}
+              connection={connection}
               error={error}
               files={files}
               hasInput={Boolean(fileIds.length || form.notes.trim())}
@@ -2872,6 +2899,7 @@ function App() {
               onConfirm={askUserConfirm}
               onCreateWorkflow={startSkillFirstWorkflow}
               onDeliveryModeChange={setPendingDeliveryMode}
+              onGenerationRouteChange={setPendingGenerationRoute}
               onPlanOutline={() => planOutline(null, { stayInWorkspace: true })}
               onOpenDelivery={openDeliveryReviewPanel}
               onOpenEditableReview={openEditableReviewPanel}
@@ -2886,6 +2914,8 @@ function App() {
               outlinePlan={outlinePlan}
               outlineReady={Boolean(outlinePlan?.layoutSequence?.length)}
               pendingDeliveryMode={pendingDeliveryMode}
+              pendingGenerationRoute={pendingGenerationRoute}
+              pptMasterProvider={pptMasterProvider}
               onArchiveJob={toggleWorkflowArchive}
               onArchivedVisibilityChange={setWorkflowArchiveVisibility}
               onRefreshJobs={(includeArchived = false) => loadWorkflowJobs({ activeId: workflowJob?.id || "", includeArchived })}
@@ -4074,6 +4104,7 @@ function workflowTaskTitle(job = null) {
 
 function DualRouteDashboard({
   busy = false,
+  connection = null,
   deliveryBundle = null,
   error = "",
   files = [],
@@ -4088,6 +4119,7 @@ function DualRouteDashboard({
   onConfirm,
   onCreateWorkflow,
   onDeliveryModeChange,
+  onGenerationRouteChange,
   onNotesChange,
   onOpenArtifacts,
   onOpenDelivery,
@@ -4109,6 +4141,8 @@ function DualRouteDashboard({
   outlinePlan = null,
   outlineReady = false,
   pendingDeliveryMode = "visual",
+  pendingGenerationRoute = "image-fidelity",
+  pptMasterProvider = null,
   showArchived = false,
   status = "",
   onArchivedVisibilityChange
@@ -4217,6 +4251,7 @@ function DualRouteDashboard({
   const hasPricedOutline = !outlineReady || (!costPreviewLoading && costPreview?.predictability?.ready === true);
   const canCreateFromPanel = !busy && !uploadDeleteBusyId && hasCreateInput && hasPricedOutline;
   const selectedDeliveryMode = pendingDeliveryMode === "editable" ? "editable" : "visual";
+  const selectedGenerationRoute = pendingGenerationRoute === "ppt-master-native" ? "ppt-master-native" : "image-fidelity";
   const outlinePageCount = Array.isArray(outlinePlan?.layoutSequence) ? outlinePlan.layoutSequence.length : 0;
   useEffect(() => {
     if (!createOpen || !outlinePageCount) {
@@ -4526,6 +4561,7 @@ function DualRouteDashboard({
     }
     onCreateWorkflow?.({
       deliveryMode: selectedDeliveryMode,
+      generationRoute: selectedGenerationRoute,
       spendBudget: {
         enforcePredictableCost: true,
         maxTotalUsd: costPreview?.upperBoundUsd,
@@ -4579,7 +4615,8 @@ function DualRouteDashboard({
           createdLabel: job?.createdAt ? `创建于 ${formatEventTime(job.createdAt)}` : "等待创建任务",
           sourceLabel: sourcePages,
           statusLabel,
-          statusTone
+          statusTone,
+          runtimeWarning: connection?.state === "restart-required" ? connection.message : ""
         }}
         taskList={{
           busy: Boolean(uploadDeleteBusyId),
@@ -4619,6 +4656,9 @@ function DualRouteDashboard({
           errorMessage: error,
           deliveryMode: selectedDeliveryMode,
           onDeliveryModeChange,
+          generationRoute: selectedGenerationRoute,
+          onGenerationRouteChange,
+          pptMasterProvider,
           costPreview,
           costPreviewLoading,
           steps: ["分析内容", "确认视觉样张", "生成整套图片", selectedDeliveryMode === "editable" ? "可编辑重建" : "下载图片版"],

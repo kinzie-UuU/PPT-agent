@@ -7,10 +7,11 @@ import JSZip from "jszip";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { readWorkflowJob, saveWorkflowJob } from "./workflowJobs.js";
-import { inspectEditablePptx, inspectPowerPointOpenability } from "./pptxEditability.js";
+import { inspectEditablePptx, inspectPowerPointOpenability, inspectPowerPointTextLayout } from "./pptxEditability.js";
 import { runWorkflowOcr } from "./workflowOcr.js";
 import { comparePngVisualFidelity, EDITABLE_VISUAL_SIMILARITY_MINIMUM, evaluateEditableVisualFidelity } from "./workflowFinalEvidence.js";
 import { isWorkflowImageDeckReviewReady } from "../shared/workflowDeliveryStatus.js";
+import { getExpectedWorkflowPageCount as getExpectedImageDeckPageCount } from "./workflowImageDeckReview.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -814,7 +815,10 @@ export async function recordWorkflowEditablePage(jobId, options = {}) {
 export async function inspectEditablePageVisualFidelity(pageDir, pageId = "") {
   const sourcePath = path.join(pageDir, "source.png");
   const previewPath = path.join(pageDir, "preview.png");
-  const comparison = comparePngVisualFidelity(sourcePath, previewPath);
+  const editableTextContract = readEditableTextVisualContract(pageDir);
+  const comparison = comparePngVisualFidelity(sourcePath, previewPath, {
+    ignoreBoxes: editableTextContract.passed ? editableTextContract.boxes : []
+  });
   const issues = evaluateEditableVisualFidelity(comparison);
   const result = {
     version: 1,
@@ -823,6 +827,10 @@ export async function inspectEditablePageVisualFidelity(pageDir, pageId = "") {
     sourcePath,
     previewPath,
     minimumSimilarity: EDITABLE_VISUAL_SIMILARITY_MINIMUM,
+    comparisonMode: editableTextContract.passed
+      ? "non-text-structure-with-validated-editable-text-mask"
+      : "full-page-pixel-and-structure",
+    editableTextContract,
     comparison,
     issues,
     passed: issues.length === 0,
@@ -830,6 +838,41 @@ export async function inspectEditablePageVisualFidelity(pageDir, pageId = "") {
   };
   await fs.writeFile(path.join(pageDir, "product-visual-qa.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
   return result;
+}
+
+function readEditableTextVisualContract(pageDir = "") {
+  try {
+    const manifest = JSON.parse(fsSync.readFileSync(path.join(pageDir, "manifest.json"), "utf8").replace(/^\uFEFF/, ""));
+    const validation = JSON.parse(fsSync.readFileSync(path.join(pageDir, "validation.json"), "utf8").replace(/^\uFEFF/, ""));
+    const texts = Array.isArray(manifest.text_boxes)
+      ? manifest.text_boxes
+      : Array.isArray(manifest.texts)
+        ? manifest.texts
+        : [];
+    const boxes = texts.map((item) => Array.isArray(item?.box_px) ? item.box_px.map(Number) : null)
+      .filter((box) => box && box.length === 4 && box.every(Number.isFinite) && box[2] > 0 && box[3] > 0);
+    const requiredText = Array.isArray(validation.required_text) ? validation.required_text : [];
+    const missingRequiredText = Array.isArray(validation.missing_required_text) ? validation.missing_required_text : [];
+    const passed = validation.passed === true && texts.length > 0 && boxes.length === texts.length && missingRequiredText.length === 0;
+    return {
+      passed,
+      editableTextShapeCount: Number(validation.editable_text_shapes || texts.length || 0),
+      manifestTextCount: texts.length,
+      requiredTextCount: requiredText.length,
+      missingRequiredText,
+      boxes: passed ? boxes : []
+    };
+  } catch (error) {
+    return {
+      passed: false,
+      editableTextShapeCount: 0,
+      manifestTextCount: 0,
+      requiredTextCount: 0,
+      missingRequiredText: [],
+      boxes: [],
+      error: cleanString(error?.message || error)
+    };
+  }
 }
 
 function syncEditableWorkerTaskAfterRecord(tasks = [], { pageId, agentId, pageDir = "", promptFile = "", recordCreatedAt } = {}) {
@@ -1028,8 +1071,33 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     warnings: ["powerpoint-open-check-failed"],
     error: error.message || "PowerPoint open check failed"
   }));
+  let powerPointTextLayout = await inspectPowerPointTextLayout(finalPath).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-text-layout",
+    available: process.platform === "win32",
+    passed: false,
+    slideCount: 0,
+    checkedTextFrames: 0,
+    overflowingTextFrames: 0,
+    slides: [],
+    warnings: ["powerpoint-text-layout-check-failed"],
+    error: error.message || "PowerPoint text-layout check failed"
+  }));
+  const expectedFinalSlides = Number(summary?.page_count || editability?.slideCount || 0);
+  const powerPointSlideCountMismatch = Boolean(
+    expectedFinalSlides > 0
+    && (Number(powerPointOpenability?.slideCount || 0) !== expectedFinalSlides
+      || Number(powerPointTextLayout?.slideCount || 0) !== expectedFinalSlides)
+  );
+  const powerPointTextLayoutIncomplete = powerPointTextLayout.available !== true
+    || powerPointTextLayout.passed !== true
+    || (Number(editability?.nativeTextBoxes || 0) > 0 && Number(powerPointTextLayout?.checkedTextFrames || 0) === 0);
   const shouldRunOpenableRepair = options.disableOpenableRepair !== true
-    && (powerPointOpenability.openable === false || options.forceOpenableRepair === true || options.repairPagePptx === true);
+    && (powerPointOpenability.openable === false
+      || powerPointSlideCountMismatch
+      || powerPointTextLayoutIncomplete
+      || options.forceOpenableRepair === true
+      || options.repairPagePptx === true);
   const openableRepair = shouldRunOpenableRepair
     ? await repairEditablePptxWithOpenableManifestWriter(runDir, finalPath, runtime).catch((error) => ({
         ok: false,
@@ -1053,6 +1121,18 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
       slideCount: 0,
       warnings: ["powerpoint-open-check-failed"],
       error: error.message || "PowerPoint open check failed"
+    }));
+    powerPointTextLayout = await inspectPowerPointTextLayout(finalPath).catch((error) => ({
+      version: 1,
+      source: "powerpoint-com-text-layout",
+      available: process.platform === "win32",
+      passed: false,
+      slideCount: 0,
+      checkedTextFrames: 0,
+      overflowingTextFrames: 0,
+      slides: [],
+      warnings: ["powerpoint-text-layout-check-failed"],
+      error: error.message || "PowerPoint text-layout check failed"
     }));
     const validateScript = path.join(runtime.cliPath, "editppt", "runtime", "validate_pptx.py");
     const deckManifestPath = path.join(runDir, "deck_manifest.json");
@@ -1086,6 +1166,11 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     finalSha256,
     finalSize: fsSync.statSync(finalPath).size
   };
+  powerPointTextLayout = {
+    ...powerPointTextLayout,
+    finalSha256,
+    finalSize: fsSync.statSync(finalPath).size
+  };
   const finalRecord = artifactRecord("editable_final_pptx", finalPath, {
     sha256: finalSha256,
     runDir,
@@ -1094,6 +1179,7 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
     validation: validationRecord,
     pptxEditability: editability,
     powerPointOpenability,
+    powerPointTextLayout,
     openableRepair
   });
   job.artifacts = {
@@ -1107,12 +1193,14 @@ export async function finalizeWorkflowEditableRun(jobId, options = {}) {
   job.status = "review_pending";
   job.stageStatus = "complete";
   job.stages.finalizing = markStage(job.stages.finalizing, "complete", "Editable PPTX draft assembled; final delivery still requires review gate", { finalPath, runDir });
-  job.stages.complete = markStage(job.stages.complete, "pending", "Final delivery pending manual review and product gate", { finalPath, editability, powerPointOpenability });
+  job.stages.complete = markStage(job.stages.complete, "pending", "Final delivery pending manual review and product gate", { finalPath, editability, powerPointOpenability, powerPointTextLayout });
   job.events = appendEvent(job.events, "editable.finalized", "Final editable PPTX assembled", {
     finalPath,
     runDir,
     editable: editability.editable,
-    powerPointOpenable: powerPointOpenability.openable
+    powerPointOpenable: powerPointOpenability.openable,
+    powerPointTextLayoutPassed: powerPointTextLayout.passed,
+    overflowingTextFrames: powerPointTextLayout.overflowingTextFrames
   });
   return saveWorkflowJob(job);
 }
@@ -1140,6 +1228,20 @@ export async function repairWorkflowEditablePageOpenability(jobId, pageId, optio
         error: error.message || "PowerPoint open check failed"
       }))
     : null;
+  const beforeTextLayout = fsSync.existsSync(pageOut)
+    ? await inspectPowerPointTextLayout(pageOut).catch((error) => ({
+        version: 1,
+        source: "powerpoint-com-text-layout",
+        available: process.platform === "win32",
+        passed: false,
+        slideCount: 0,
+        checkedTextFrames: 0,
+        overflowingTextFrames: 0,
+        slides: [],
+        warnings: ["powerpoint-text-layout-check-failed"],
+        error: error.message || "PowerPoint text-layout check failed"
+      }))
+    : null;
   const result = await execFileAsync(process.execPath, [scriptPath, "--manifest", manifestPath, "--out", pageOut], {
     cwd: process.cwd(),
     timeout: runtime.timeoutMs || DEFAULT_TIMEOUT_MS,
@@ -1162,6 +1264,18 @@ export async function repairWorkflowEditablePageOpenability(jobId, pageId, optio
     warnings: ["powerpoint-open-check-failed"],
     error: error.message || "PowerPoint open check failed"
   }));
+  const afterTextLayout = await inspectPowerPointTextLayout(pageOut).catch((error) => ({
+    version: 1,
+    source: "powerpoint-com-text-layout",
+    available: process.platform === "win32",
+    passed: false,
+    slideCount: 0,
+    checkedTextFrames: 0,
+    overflowingTextFrames: 0,
+    slides: [],
+    warnings: ["powerpoint-text-layout-check-failed"],
+    error: error.message || "PowerPoint text-layout check failed"
+  }));
   job = await readWorkflowJob(jobId);
   const repairRecord = {
     kind: "editable_page_openable_repair",
@@ -1169,7 +1283,9 @@ export async function repairWorkflowEditablePageOpenability(jobId, pageId, optio
     pagePptx: pageOut,
     manifestPath,
     before,
+    beforeTextLayout,
     after,
+    afterTextLayout,
     hashRefresh,
     stdout: String(result.stdout || "").slice(-2000),
     stderr: String(result.stderr || "").slice(-2000),
@@ -1185,6 +1301,8 @@ export async function repairWorkflowEditablePageOpenability(jobId, pageId, optio
   job.events = appendEvent(job.events, "editable.page_openable_repaired", `Repaired page PPTX openability ${normalizedPageId}`, {
     pageId: normalizedPageId,
     openable: after.openable,
+    textLayoutPassed: afterTextLayout.passed,
+    overflowingTextFrames: afterTextLayout.overflowingTextFrames,
     hashRefresh
   });
   const saved = await saveWorkflowJob(job);
@@ -1462,7 +1580,7 @@ function getEditablePrepareInputs(job, options = {}) {
 }
 
 async function linkRapidOcrHints(job, runDir) {
-  const hintsPath = job.artifacts?.ocrTextHints?.path;
+  const hintsPath = job.artifacts?.visualOcrTextHints?.path || job.artifacts?.ocrTextHints?.path;
   if (!hintsPath || !fsSync.existsSync(hintsPath)) return null;
   const target = path.join(runDir, "workflow_rapidocr_text_hints.json");
   await fs.copyFile(hintsPath, target);
@@ -1864,20 +1982,7 @@ function isWorkflowJobImageDeckReviewApproved(job = {}, options = {}) {
 }
 
 function getExpectedWorkflowPageCount(job = {}) {
-  const artifacts = job.artifacts || {};
-  return Number(
-    job.sourceMeta?.pageCount
-    || artifacts.sourceMeta?.pageCount
-    || job.input?.sourcePageCount
-    || artifacts.source?.pageCount
-    || 0
-  ) || Math.max(
-    Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
-    Number(artifacts.imageDeck?.pageCount || 0),
-    Number(artifacts.ocrTextHints?.pageCount || 0),
-    (Array.isArray(artifacts.visualImages) ? artifacts.visualImages : [])
-      .filter((image) => image?.path && image.staleStyleReference !== true).length
-  );
+  return getExpectedImageDeckPageCount(job);
 }
 
 export function isImageDeckReviewApproved(artifacts = {}, options = {}) {
@@ -1961,7 +2066,7 @@ function isVisualQualityReviewCurrent(artifacts = {}) {
 }
 
 function hasRapidOcrTextHints(job = {}) {
-  const hintsPath = job.artifacts?.ocrTextHints?.path || "";
+  const hintsPath = job.artifacts?.visualOcrTextHints?.path || job.artifacts?.ocrTextHints?.path || "";
   return Boolean(hintsPath && fsSync.existsSync(hintsPath));
 }
 
@@ -1976,12 +2081,14 @@ function normalizeVisualQualitySummary(visualQuality = {}) {
 }
 
 function getEditableTextHintEvidence(artifacts = {}, expectedPageIds = []) {
-  const ocr = artifacts.ocrTextHints || {};
+  const useVisualOcr = Boolean(artifacts.visualOcrTextHints?.path);
+  const ocr = useVisualOcr ? artifacts.visualOcrTextHints : artifacts.ocrTextHints || {};
   const editable = artifacts.editableHints || {};
   const editableSummary = editable.summary || editable.textHints || {};
   const ocrReady = Boolean(ocr.path && (ocr.pageCount || ocr.textCount || fsSync.existsSync(ocr.path)));
   const expectedPages = [...new Set((Array.isArray(expectedPageIds) ? expectedPageIds : []).map(normalizePageId).filter(Boolean))];
-  const ocrPageIds = new Set((Array.isArray(artifacts.ocrPages) ? artifacts.ocrPages : [])
+  const ocrPages = useVisualOcr ? artifacts.visualOcrPages : artifacts.ocrPages;
+  const ocrPageIds = new Set((Array.isArray(ocrPages) ? ocrPages : [])
     .map((page) => normalizePageId(page?.pageId || page?.pageNumber))
     .filter(Boolean));
   const coveredPages = expectedPages.length

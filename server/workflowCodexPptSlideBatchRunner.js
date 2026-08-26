@@ -12,6 +12,7 @@ import {
   assertWorkflowVisualGenerationAllowed,
   discoverVisualImages,
   getRenderedPages,
+  getWorkflowVisualSourceOcrPageIds,
   markStage,
   writeVisualQualityReport
 } from "./workflowVisuals.js";
@@ -112,6 +113,8 @@ export async function runWorkflowCodexPptSlideBatch(jobId, options = {}) {
       passthrough: Boolean(nonProduct),
       allowNonProductVisual: Boolean(nonProduct),
       source: nonProduct ? "codex-slide-batch-placeholder" : "product-codex-slide-batch",
+      imageInputMode: image.imageInputMode || "",
+      sourceImagePath: image.sourceImagePath || "",
       referenceImagePaths: image.referenceImagePaths || [],
       approvedSampleSha256: resolveAppliedSampleSha256(job, image),
       qaNote: nonProduct ? "Regression placeholder recorded by codex-ppt slide batch runner." : "Generated and recorded by product codex-ppt slide batch runner."
@@ -315,9 +318,17 @@ export async function getWorkflowCodexPptSlideBatchPreflight(jobId, options = {}
   const externalImageConfirmed = Boolean(requestExternalImageConfirmed || authorization?.persisted);
   const blockingIssues = [];
   const warnings = [];
-  const ocrCoverage = getWorkflowOcrCoverage(job, {
-    pages: selectedTasks.map((task) => task.pageId)
-  });
+  const sourceOcrPageIds = getWorkflowVisualSourceOcrPageIds(job, selectedPageNumbers);
+  const ocrCoverage = sourceOcrPageIds.length
+    ? getWorkflowOcrCoverage(job, { pages: sourceOcrPageIds })
+    : {
+      targetPageIds: [],
+      coveredPageIds: [],
+      missingPageIds: [],
+      targetCount: 0,
+      coveredCount: 0,
+      complete: true
+    };
   if (!approvals.ready) {
     blockingIssues.push(`Missing codex-ppt approval gate(s): ${approvals.missing.join(", ")}`);
   }
@@ -510,6 +521,23 @@ async function createCodexSlideImage(job = {}, task = {}, promptPayload = {}) {
     throw error;
   }
   if (sampleReferenceRequired && (!sourceImagePath || promptPayload.useSourceImageReference === false)) {
+    if (job.artifacts?.source?.kind === "brief_source" && approvedSamplePath) {
+      const result = await editImageWithProvider({
+        prompt,
+        sourceImagePath: approvedSamplePath,
+        referenceImagePaths: [],
+        width: 1536,
+        height: 864,
+        prefix: `${job.id}_${task.pageId}`
+      });
+      return {
+        ...result,
+        imageInputMode: "approved-sample-edit",
+        sourceImagePath: approvedSamplePath,
+        referenceImagePaths: [approvedSamplePath],
+        approvedSampleSha256: job.artifacts?.visualSample?.sha256 || ""
+      };
+    }
     const error = new Error("The current source page is required together with the approved sample for style-locked image editing.");
     error.code = "CODEX_PPT_SOURCE_IMAGE_REFERENCE_REQUIRED";
     throw error;
@@ -538,7 +566,8 @@ export function resolveAppliedSampleSha256(job = {}, image = {}) {
   if (!sample.sha256 || !samplePath || !isCodexPptSampleApprovalCurrent(job)) return "";
   const references = (Array.isArray(image.referenceImagePaths) ? image.referenceImagePaths : [])
     .map((item) => path.resolve(item || ""));
-  return references.includes(path.resolve(samplePath)) ? sample.sha256 : "";
+  const sourceImagePath = safeExistingFile(image.sourceImagePath || "");
+  return references.includes(path.resolve(samplePath)) || (sourceImagePath && path.resolve(sourceImagePath) === path.resolve(samplePath)) ? sample.sha256 : "";
 }
 
 export function resolveCodexStyleReferenceImages(job = {}, promptPayload = {}) {

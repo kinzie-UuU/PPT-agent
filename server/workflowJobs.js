@@ -4,6 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { rootDir } from "./store.js";
 import { isInternalWorkflowJob } from "../shared/workflowVisibility.js";
+import { normalizePresentationRoute } from "./workflowPptMaster.js";
 
 export const workflowRootDir = path.join(rootDir, "workspace", "jobs");
 
@@ -24,6 +25,7 @@ export const WORKFLOW_STAGE_ORDER = [
 
 export const WORKFLOW_STAGE_STATUS = ["pending", "running", "complete", "failed", "skipped"];
 export const WORKFLOW_PAGE_STATUS = ["pending", "running", "recorded", "failed", "retrying"];
+export const WORKFLOW_BUSINESS_POLICY_VERSION = "repeatable-business-v1";
 
 const WORKFLOW_DIRS = [
   "input",
@@ -40,8 +42,12 @@ const WORKFLOW_LIST_CACHE_TTL_MS = 5000;
 const WORKFLOW_LIST_READ_CONCURRENCY = 32;
 const WORKFLOW_LIST_MAX_SCAN_ATTEMPTS = 3;
 const WORKFLOW_LIST_CHANGE_PATH = path.join(workflowRootDir, ".workflow-list-version");
+const WORKFLOW_LIST_SNAPSHOT_VERSION = 1;
+const WORKFLOW_LIST_SNAPSHOT_PATH = path.join(rootDir, "workspace", ".workflow-list-cache-v1.json");
 let workflowListCache = { summaries: null, entries: new Map(), expiresAt: 0, rootFingerprint: "" };
 let workflowListRefreshPromise = null;
+let workflowListRefreshTimer = null;
+let workflowListSnapshotLoadPromise = null;
 let workflowListCacheRevision = 0;
 
 export async function ensureWorkflowRoot() {
@@ -93,6 +99,7 @@ export async function createWorkflowJob(input = {}) {
       sourceBrief: cleanString(input.sourceBrief || ""),
       projectName: cleanString(input.projectName || ""),
       mode: cleanString(input.mode || "ppt-rebuild"),
+      generationRoute: normalizePresentationRoute(input.generationRoute),
       deliveryMode: input.deliveryMode === "editable" ? "editable" : "visual",
       notes: cleanString(input.notes || ""),
       visibility: cleanString(input.visibility || ""),
@@ -108,6 +115,10 @@ export async function createWorkflowJob(input = {}) {
       noOriginalOverwrite: true,
       resumableState: true,
       perPageRetry: true,
+      businessReadiness: {
+        policyVersion: WORKFLOW_BUSINESS_POLICY_VERSION,
+        enrolledAt: now.toISOString()
+      },
       spendBudget: normalizeSpendBudget(input.spendBudget, input.deliveryMode)
     }
   };
@@ -141,16 +152,36 @@ export async function listWorkflowJobSummaries(options = {}) {
   await ensureWorkflowRoot();
   const now = Date.now();
   const rootFingerprint = await getWorkflowListRootFingerprint();
-  let summaries = workflowListCache.summaries
-    && workflowListCache.expiresAt > now
-    && workflowListCache.rootFingerprint === rootFingerprint
-    ? workflowListCache.summaries
-    : null;
+  if (!workflowListCache.summaries && workflowListCache.entries.size === 0) {
+    await hydrateWorkflowListCacheFromSnapshot(rootFingerprint);
+  }
+  const cacheMatchesRoot = workflowListCache.summaries
+    && workflowListCache.rootFingerprint === rootFingerprint;
+  let summaries = cacheMatchesRoot ? workflowListCache.summaries : null;
+  if (summaries && workflowListCache.expiresAt <= now) {
+    // The explicit change token is updated on every product write. When it is
+    // unchanged, serve the still-valid snapshot immediately and refresh it
+    // shortly after the request burst instead of making every caller wait for
+    // a full directory stat scan.
+    workflowListCache.expiresAt = now + WORKFLOW_LIST_CACHE_TTL_MS;
+    scheduleWorkflowListCacheRefresh();
+  }
   if (!summaries) {
     summaries = await refreshWorkflowListCacheSingleFlight();
   }
   const limit = normalizeListLimit(options.limit);
   return limit ? summaries.slice(0, limit) : [...summaries];
+}
+
+function scheduleWorkflowListCacheRefresh() {
+  if (workflowListRefreshTimer || workflowListRefreshPromise) return;
+  workflowListRefreshTimer = setTimeout(() => {
+    workflowListRefreshTimer = null;
+    void refreshWorkflowListCacheSingleFlight().catch(() => {
+      workflowListCache.expiresAt = 0;
+    });
+  }, 250);
+  workflowListRefreshTimer.unref?.();
 }
 
 async function refreshWorkflowListCacheSingleFlight() {
@@ -181,6 +212,7 @@ async function refreshWorkflowListCache() {
       expiresAt: Date.now() + WORKFLOW_LIST_CACHE_TTL_MS,
       rootFingerprint: finishedRootFingerprint
     };
+    await persistWorkflowListCacheSnapshot(workflowListCache).catch(() => {});
     return scan.summaries;
   }
 
@@ -195,6 +227,55 @@ async function refreshWorkflowListCache() {
     rootFingerprint: lastScan?.rootFingerprint || ""
   };
   return workflowListCache.summaries;
+}
+
+async function hydrateWorkflowListCacheFromSnapshot(rootFingerprint) {
+  if (workflowListSnapshotLoadPromise) return workflowListSnapshotLoadPromise;
+  const load = (async () => {
+    const raw = await fs.readFile(WORKFLOW_LIST_SNAPSHOT_PATH, "utf8").catch(() => "");
+    if (!raw) return;
+    let snapshot = null;
+    try {
+      snapshot = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (snapshot?.version !== WORKFLOW_LIST_SNAPSHOT_VERSION || !Array.isArray(snapshot.entries)) return;
+    const entries = new Map();
+    for (const item of snapshot.entries) {
+      if (!item?.id || !item?.fingerprint || !item?.summary || item.id !== item.summary.id) continue;
+      entries.set(item.id, { fingerprint: item.fingerprint, summary: item.summary });
+    }
+    if (!entries.size) return;
+    const snapshotMatches = snapshot.rootFingerprint === rootFingerprint;
+    workflowListCache = {
+      summaries: snapshotMatches ? [...entries.values()].map((item) => item.summary).sort(compareWorkflowJobsByRecency) : null,
+      entries,
+      expiresAt: snapshotMatches ? Date.now() + WORKFLOW_LIST_CACHE_TTL_MS : 0,
+      rootFingerprint: snapshotMatches ? rootFingerprint : ""
+    };
+  })();
+  workflowListSnapshotLoadPromise = load;
+  try {
+    await load;
+  } finally {
+    if (workflowListSnapshotLoadPromise === load) workflowListSnapshotLoadPromise = null;
+  }
+}
+
+async function persistWorkflowListCacheSnapshot(cache) {
+  if (!cache?.rootFingerprint || !cache.entries?.size) return;
+  const snapshot = {
+    version: WORKFLOW_LIST_SNAPSHOT_VERSION,
+    generatedAt: new Date().toISOString(),
+    rootFingerprint: cache.rootFingerprint,
+    entries: [...cache.entries.entries()].map(([id, item]) => ({
+      id,
+      fingerprint: item.fingerprint,
+      summary: item.summary
+    }))
+  };
+  await writeJsonAtomic(WORKFLOW_LIST_SNAPSHOT_PATH, snapshot);
 }
 
 async function scanWorkflowList(previousEntries) {
@@ -288,12 +369,19 @@ function buildWorkflowListSummary(job = {}) {
     updatedAt: job.updatedAt || job.createdAt || "",
     input: {
       sourceOriginalName: cleanString(input.sourceOriginalName || ""),
+      sourceMimeType: cleanString(input.sourceMimeType || ""),
+      sourceKind: cleanString(input.sourceKind || ""),
       sourceBrief: cleanString(input.sourceBrief || ""),
       projectName: cleanString(input.projectName || ""),
       mode: cleanString(input.mode || ""),
+      generationRoute: normalizePresentationRoute(input.generationRoute),
       notes: cleanString(input.notes || ""),
       visibility: cleanString(input.visibility || ""),
       internal: input.internal === true
+    },
+    businessReadiness: {
+      policyVersion: cleanString(job.constraints?.businessReadiness?.policyVersion || ""),
+      enrolledAt: cleanString(job.constraints?.businessReadiness?.enrolledAt || "")
     },
     lifecycle: job.lifecycle || {},
     listSearchText

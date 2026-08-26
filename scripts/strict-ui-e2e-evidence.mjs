@@ -118,6 +118,8 @@ const sourcePaths = [
   "scripts/strict-ui-e2e-evidence.mjs",
   "scripts/smoke-workflow-e2e.mjs",
   "server/index.js",
+  "server/doctor.js",
+  "server/workflowPptMaster.js",
   "server/workflowJobs.js",
   "server/workflowApprovals.js",
   "server/workflowCodexPptDecisions.js",
@@ -125,7 +127,8 @@ const sourcePaths = [
   "server/workflowDelivery.js",
   "server/workflowPageEvidence.js",
   "server/workflowFinalEvidence.js",
-  "docs/strict-ui-e2e-procedure.md"
+  "docs/strict-ui-e2e-procedure.md",
+  "docs/ppt-master-provider.md"
 ];
 const sourceFiles = await hashFiles(sourcePaths);
 const screenshots = await hashFiles(capture.screenshots || []);

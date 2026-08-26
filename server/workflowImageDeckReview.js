@@ -464,9 +464,12 @@ function getVisualImages(job = {}) {
     .sort((a, b) => Number(a.pageNumber || 0) - Number(b.pageNumber || 0));
 }
 
-function getExpectedWorkflowPageCount(job = {}) {
+export function getExpectedWorkflowPageCount(job = {}) {
   const artifacts = job.artifacts || {};
-  return Number(
+  const outlineCount = artifacts.source?.kind === "brief_source"
+    ? Number(artifacts.codexPptOutline?.slideCount || readOutlineSlideCount(artifacts.codexPptOutline?.path || "") || 0)
+    : 0;
+  return outlineCount || Number(
     job.sourceMeta?.pageCount
     || artifacts.sourceMeta?.pageCount
     || job.input?.sourcePageCount
@@ -478,6 +481,17 @@ function getExpectedWorkflowPageCount(job = {}) {
     Number(artifacts.ocrTextHints?.pageCount || 0),
     getVisualImages(job).length
   );
+}
+
+function readOutlineSlideCount(filePath = "") {
+  const cleanPath = cleanString(filePath);
+  if (!cleanPath || !fsSync.existsSync(cleanPath)) return 0;
+  try {
+    const outline = JSON.parse(fsSync.readFileSync(cleanPath, "utf8"));
+    return Number(outline.slideCount || (Array.isArray(outline.layoutSequence) ? outline.layoutSequence.length : 0) || 0);
+  } catch {
+    return 0;
+  }
 }
 
 function getVisualTextQualityEvidenceSha256(job = {}) {
@@ -593,8 +607,21 @@ function captureImageDeckRerunGuidance(job = {}, pageId = "", note = "") {
     }
   }
   const previous = job.artifacts?.codexPptRerunGuidance?.[pageId] || {};
+  const previousReasons = Array.isArray(previous.reasons) ? previous.reasons.map(cleanString).filter(Boolean) : [];
+  const previousHasRestoreReason = previousReasons.some((reason) => [
+    "critical-data-or-contact-missing",
+    "critical-brand-or-code-missing",
+    "substantial-source-text-loss",
+    "missing-critical-source-text",
+    "source-title-mismatch",
+    "semantic-evidence-missing"
+  ].includes(reason));
+  const previousRequiredTexts = Array.isArray(previous.requiredTexts) ? previous.requiredTexts : [];
+  const migrateLegacyInventedRequired = previousReasons.includes("invented-critical-text")
+    && !previousHasRestoreReason
+    && !(Array.isArray(previous.forbiddenTexts) && previous.forbiddenTexts.length);
   const reasons = [...new Set([
-    ...(Array.isArray(previous.reasons) ? previous.reasons : []),
+    ...previousReasons,
     ...(Array.isArray(page?.blockingReasons) ? page.blockingReasons : []),
     ...(Array.isArray(page?.manualReviewReasons) ? page.manualReviewReasons : []),
     ...(Array.isArray(page?.semanticQuality?.blockingReasons) ? page.semanticQuality.blockingReasons : []),
@@ -603,9 +630,13 @@ function captureImageDeckRerunGuidance(job = {}, pageId = "", note = "") {
     ...getPageStyleDriftReasons(job, pageId)
   ].map(cleanString).filter(Boolean))];
   const requiredTexts = [...new Set([
-    ...(Array.isArray(previous.requiredTexts) ? previous.requiredTexts : []),
+    ...(!migrateLegacyInventedRequired ? previousRequiredTexts : []),
     ...(Array.isArray(page?.missingCriticalTexts) ? page.missingCriticalTexts : []),
-    ...(Array.isArray(page?.semanticQuality?.missingCriticalTexts) ? page.semanticQuality.missingCriticalTexts : []),
+    ...(Array.isArray(page?.semanticQuality?.missingCriticalTexts) ? page.semanticQuality.missingCriticalTexts : [])
+  ].map(cleanString).filter(Boolean))].slice(0, 20);
+  const forbiddenTexts = [...new Set([
+    ...(Array.isArray(previous.forbiddenTexts) ? previous.forbiddenTexts : []),
+    ...(migrateLegacyInventedRequired ? previousRequiredTexts : []),
     ...(Array.isArray(page?.inventedCriticalBlockingTexts) ? page.inventedCriticalBlockingTexts : []),
     ...(Array.isArray(page?.semanticQuality?.inventedCriticalBlockingTexts) ? page.semanticQuality.inventedCriticalBlockingTexts : [])
   ].map(cleanString).filter(Boolean))].slice(0, 20);
@@ -615,6 +646,7 @@ function captureImageDeckRerunGuidance(job = {}, pageId = "", note = "") {
     attempts: Math.max(0, Number(previous.attempts || 0)) + 1,
     reasons,
     requiredTexts,
+    forbiddenTexts,
     note: cleanString(note || previous.note || ""),
     capturedAt: new Date().toISOString()
   };

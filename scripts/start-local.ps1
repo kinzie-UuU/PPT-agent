@@ -96,8 +96,10 @@ $health = Get-Health
 $started = $false
 $servicePid = $health.pid
 $startup = $null
+$restartedStaleRuntime = $false
 
-if ($Restart -and $health -and $health.pid) {
+if (($Restart -or $health.restartRequired) -and $health -and $health.pid) {
+  $restartedStaleRuntime = [bool]$health.restartRequired
   Stop-Process -Id ([int]$health.pid) -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 900
   $health = $null
@@ -142,6 +144,7 @@ if (-not $NoBrowser) {
 [PSCustomObject]@{
   ok = $true
   started = $started
+  restartedStaleRuntime = $restartedStaleRuntime
   pid = $servicePid
   servicePid = $health.pid
   url = $url

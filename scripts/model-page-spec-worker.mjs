@@ -11,6 +11,36 @@ import { getProviderConfig, requestOpenAiCompatible, readProviderError, stripEnd
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
+let cachedPillowPythonCommand = "";
+
+function resolvePillowPythonCommand() {
+  if (cachedPillowPythonCommand) return cachedPillowPythonCommand;
+  const localAppData = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || "C:\\Users\\Administrator", "AppData", "Local");
+  const candidates = [...new Set([
+    process.env.EDITPPT_IMAGE_PYTHON_PATH,
+    process.env.EDITPPT_PYTHON_PATH,
+    process.env.OCR_PYTHON_PATH,
+    process.env.PYTHON,
+    process.env.PYTHON_PATH,
+    path.join(PROJECT_ROOT, ".venv", "Scripts", "python.exe"),
+    path.join(localAppData, "Programs", "Python", "Python313", "python.exe"),
+    "python"
+  ].filter(Boolean))];
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ["-c", "from PIL import Image, ImageChops, ImageFilter"], {
+      cwd: PROJECT_ROOT,
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+    });
+    if (probe.status === 0) {
+      cachedPillowPythonCommand = candidate;
+      return candidate;
+    }
+  }
+  throw new Error("A Pillow-capable Python runtime is required for source-faithful page visual analysis.");
+}
 const execFileAsync = promisify(execFile);
 const DEFAULT_WORKFLOW_ROOT = firstExistingPath([
   process.env.PPT_WORKFLOW_ROOT,
@@ -125,7 +155,7 @@ async function main() {
     normalizeSpecDraft(spec, promptBundle, pageRequest);
     const missingImageAssetJobs = promptBundle.includeImage
       ? deduplicateVisualAssetJobs([
-        ...collectMissingImageAssetJobs(spec),
+        ...collectMissingImageAssetJobs(spec, promptBundle.pageDir),
         ...collectMissingForegroundInventoryAssetJobs(spec),
         ...collectMissingBrandBlockAssetJobs(spec, promptBundle),
         ...collectMissingComplexBackgroundAssetJobs(spec, pageRequest),
@@ -193,8 +223,11 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
   const model = process.env.PAGE_SPEC_MODEL || process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || providerConfig.model;
   const promptImage = includeImage && lowComplexity ? await preparePromptImage(sourceImage, pageDir) : null;
   const dataUrl = includeImage ? await imageDataUrl(promptImage?.path || sourceImage) : "";
-  const ocrLines = brief?.ocr?.lines || [];
-  const skeleton = brief?.specSkeleton || buildFallbackSkeleton(pageRequest, ocrLines);
+  const ocrLines = selectSpatiallyDistinctOcrLines(brief?.ocr?.lines || []);
+  const skeleton = filterPromptSkeletonToOcrLines(
+    brief?.specSkeleton || buildFallbackSkeleton(pageRequest, ocrLines),
+    ocrLines
+  );
   const availableAssets = listAvailableAssets(pageDir);
   const promptOcrLines = lowComplexity ? compactOcrLinesForPrompt(ocrLines, 35) : ocrLines;
   const promptSkeleton = lowComplexity ? buildCompactPromptSkeleton(pageRequest, promptOcrLines) : skeleton;
@@ -213,7 +246,9 @@ async function buildPromptBundle({ pageDir, pageId, pageRequest, sourceImage, br
     "Do not reduce gradient, glow, texture, layered transparency, or overlapping decorative orbs to flat native circles. When those effects carry the page identity, request one source-faithful clean background asset through needed_visual_asset_jobs and place it at z_index 0, with editable text and separated foreground objects above it.",
     "OCR coordinates must describe the attached source.png for this editable run. Copy high-confidence OCR box_px and font sizes instead of relocating text by eye.",
     "For every native text box, preserve the source font color and set font_size_source to measured when the box comes from OCR text hints. Do not default colored or white source text to black.",
+    "Do not blindly keep the skeleton's default Microsoft YaHei font. Match the visible source family: use a serif face such as Georgia, Cambria, or SimSun for serif display text and Microsoft YaHei only for sans-serif text.",
     "Inventory each visible foreground icon, badge, logo, wordmark, sticker, and decorative mark separately from the clean background. A clean-background inventory item must never also be requested as a foreground asset.",
+    "Treat a connected multi-node roadmap, network, or scene illustration as one cohesive foreground illustration asset when its objects depend on shared paths, platforms, shadows, or perspective. Give that grouped asset one source_box_px covering the complete illustration; do not reduce it to tiny OCR-label boxes or omit the connecting structure.",
     "If a foreground logo/photo/icon/screenshot/device/illustration must be reused, represent it only as an image asset with asset_provenance from asset-sheet-separated or imagegen, and only if an actual asset path exists.",
     "Never reference source.png in images[].path.",
     "Never use words crop, approximation, fallback, or emoji anywhere in visual_inventory or asset_provenance.",
@@ -603,6 +638,35 @@ function compactOcrLinesForPrompt(lines = [], limit = 80) {
   return normalized.slice(0, limit);
 }
 
+function selectSpatiallyDistinctOcrLines(lines = []) {
+  const candidates = (Array.isArray(lines) ? lines : [])
+    .filter((line) => line && typeof line === "object" && cleanLooseText(line.text || "") && coerceBox(line.box_px))
+    .sort((left, right) => Number(right.confidence || 0) - Number(left.confidence || 0));
+  const selected = [];
+  for (const line of candidates) {
+    const box = coerceBox(line.box_px);
+    if (selected.some((kept) => boxOverlapRatio(box, kept.box_px) >= 0.82)) continue;
+    selected.push({ ...line, box_px: box });
+  }
+  return selected.sort((left, right) => Number(left.box_px?.[1] || 0) - Number(right.box_px?.[1] || 0)
+    || Number(left.box_px?.[0] || 0) - Number(right.box_px?.[0] || 0));
+}
+
+function filterPromptSkeletonToOcrLines(skeleton = {}, ocrLines = []) {
+  const next = JSON.parse(JSON.stringify(skeleton || {}));
+  const keptIds = new Set((Array.isArray(ocrLines) ? ocrLines : []).map((line) => String(line?.id || "").trim()).filter(Boolean));
+  const keptText = new Set((Array.isArray(ocrLines) ? ocrLines : []).map((line) => normalizeTextForCompare(line?.text)).filter(Boolean));
+  const keep = (item = {}) => {
+    const id = String(item?.id || "").trim();
+    const text = normalizeTextForCompare(item?.text || item);
+    return (id && keptIds.has(id)) || (text && keptText.has(text));
+  };
+  if (Array.isArray(next.text_inventory)) next.text_inventory = next.text_inventory.filter(keep);
+  if (Array.isArray(next.text_boxes)) next.text_boxes = next.text_boxes.filter(keep);
+  if (Array.isArray(next.required_text)) next.required_text = next.required_text.filter((text) => keptText.has(normalizeTextForCompare(text)));
+  return next;
+}
+
 function buildCompactPromptSkeleton(pageRequest = {}, ocrLines = []) {
   const width = Number(pageRequest.source_size_px?.width || 1280);
   const height = Number(pageRequest.source_size_px?.height || 720);
@@ -958,7 +1022,13 @@ function strengthenPlainJsonMessages(messages = []) {
 
 function buildCompactSpecMessages(bundle = {}) {
   const pageRequest = bundle.pageRequest || {};
-  const ocrLines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines.slice(0, 80) : [];
+  // The complete OCR inventory is merged back into the normalized spec locally.
+  // Keep the provider prompt genuinely compact so it only decides composition
+  // and visual-source strategy instead of echoing every text line three times.
+  const ocrLines = compactOcrLinesForPrompt(
+    Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines : [],
+    18
+  );
   const skeleton = buildFallbackSkeleton(pageRequest, ocrLines);
   const system = [
     "You rebuild a slide image into editable PowerPoint objects.",
@@ -1033,14 +1103,18 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
   normalizeTextBoxes(spec);
   normalizeRequiredText(spec);
   mergeBriefOcrText(spec, bundle, pageRequest);
+  deduplicateContainedTextBoxes(spec);
   calibrateTextBoxesFromMeasuredOcr(spec, bundle, pageRequest);
+  enableDeterministicTextFit(spec, pageRequest);
   normalizeImageAssetReferences(spec, bundle);
   ensureAvailableComplexBackgroundAssetsRepresented(spec, bundle, pageRequest);
   ensureAvailableBrandAssetsRepresented(spec, bundle, pageRequest);
   ensureAvailableForegroundAssetsRepresented(spec, bundle);
+  consolidateDetectedForegroundIllustrationAssets(spec, bundle, pageRequest);
   deduplicatePositionedAssets(spec, bundle);
   addDetectedStructuralShapes(spec, bundle, pageRequest);
   matchTextColorsToSource(spec, bundle, pageRequest);
+  deduplicateContainedTextBoxes(spec);
   normalizeVisualInventoryProvenance(spec);
   normalizeShapeGeometry(spec, pageRequest);
   sanitizeSpecDraft(spec, bundle, pageRequest);
@@ -1048,7 +1122,7 @@ function normalizeSpecDraft(spec, bundle, pageRequest) {
 }
 
 function calibrateTextBoxesFromMeasuredOcr(spec = {}, bundle = {}, pageRequest = {}) {
-  const lines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines : [];
+  const lines = selectSpatiallyDistinctOcrLines(bundle?.brief?.ocr?.lines || []);
   if (!Array.isArray(spec.text_boxes) || !lines.length) return;
   const width = Number(pageRequest.source_size_px?.width || 0);
   const height = Number(pageRequest.source_size_px?.height || 0);
@@ -1075,6 +1149,30 @@ function calibrateTextBoxesFromMeasuredOcr(spec = {}, bundle = {}, pageRequest =
   }
 }
 
+function enableDeterministicTextFit(spec = {}, pageRequest = {}) {
+  if (!Array.isArray(spec.text_boxes)) return;
+  const width = Math.max(1, Number(pageRequest.source_size_px?.width || 0));
+  const height = Math.max(1, Number(pageRequest.source_size_px?.height || 0));
+  const slideWidth = Math.max(0.01, Number(pageRequest.slide?.width || 13.333));
+  const sourcePixelsPerPoint = width / (slideWidth * 72);
+  for (const item of spec.text_boxes) {
+    const box = coerceBox(item?.box_px);
+    if (!box) continue;
+    const fontSize = Math.max(4, Number(item?.font_size || 18));
+    const padX = Math.max(2, Math.round(fontSize * sourcePixelsPerPoint * 0.08));
+    const padY = Math.max(2, Math.round(fontSize * sourcePixelsPerPoint * 0.14));
+    item.box_px = clampBoxToCanvas([
+      box[0],
+      box[1],
+      Math.min(width - box[0], box[2] + padX),
+      Math.min(height - box[1], box[3] + padY)
+    ], width, height);
+    item.fit_text = true;
+    item.text_fit_safety = Math.min(Number(item.text_fit_safety || 0.92), 0.92);
+    item.powerpoint_fit_contract = "deterministic-fit-required-until-powerpoint-render-passes";
+  }
+}
+
 function boxCenterDistance(left = [], right = []) {
   const a = coerceBox(left);
   const b = coerceBox(right);
@@ -1097,6 +1195,7 @@ function matchTextColorsToSource(spec = {}, bundle = {}, pageRequest = {}) {
       && /background|clean base|base visual/i.test(cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" ")));
   });
   const backgroundPath = backgroundImage ? path.join(bundle.pageDir, normalizeAssetPath(backgroundImage.path || "")) : "";
+  const sourceLockedBackground = normalizeAssetPath(backgroundImage?.path || "") === "assets/source_locked_clean_base.png";
   if (!fsSync.existsSync(sourcePath) || !backgroundPath || !fsSync.existsSync(backgroundPath)) return;
   const inputs = spec.text_boxes.map((box, index) => ({ index, box: coerceBox(box.box_px) })).filter((item) => item.box);
   if (!inputs.length) return;
@@ -1127,7 +1226,7 @@ function matchTextColorsToSource(spec = {}, bundle = {}, pageRequest = {}) {
     "    out.append({'index':item['index'],'color':'#%02X%02X%02X'%color,'samples':len(colors),'inkRatio':len(colors)/max(1,w*h)})",
     "print(json.dumps(out))"
   ].join("\n");
-  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify(inputs)], {
+  const result = spawnSync(resolvePillowPythonCommand(), ["-c", script, sourcePath, backgroundPath, JSON.stringify(inputs)], {
     cwd: PROJECT_ROOT,
     windowsHide: true,
     encoding: "utf8",
@@ -1147,7 +1246,7 @@ function matchTextColorsToSource(spec = {}, bundle = {}, pageRequest = {}) {
       spec.text_boxes[sample.index].font_weight = 700;
       spec.text_boxes[sample.index].font_weight_source = "source-ink-density";
       const measuredBox = coerceBox(spec.text_boxes[sample.index].box_px);
-      if (measuredBox && measuredBox[3] >= titleInkHeightThreshold) {
+      if (!sourceLockedBackground && measuredBox && measuredBox[3] >= titleInkHeightThreshold) {
         spec.text_boxes[sample.index].font_size = Math.max(
           Number(spec.text_boxes[sample.index].font_size || 0),
           Math.round((measuredBox[3] / sourcePixelsPerPoint) * 1.12 * 10) / 10
@@ -1273,6 +1372,340 @@ function deduplicatePositionedAssets(spec = {}, bundle = {}) {
   });
 }
 
+function consolidateDetectedForegroundIllustrationAssets(spec = {}, bundle = {}, pageRequest = {}) {
+  if (!Array.isArray(spec.images)) return;
+  const detected = spec.images.filter((image) => /(?:^|\/)detected_foreground_asset_\d+\.png$/i.test(normalizeAssetPath(image?.path || ""))
+    || /^detected_foreground_asset_\d+$/i.test(cleanAssetId(image?.id || "")));
+  if (detected.length < 2) return;
+  const boxes = detected.map((image) => coerceBox(image?.box_px)).filter(Boolean);
+  if (boxes.length < 2) return;
+  const chosen = [...detected].sort((left, right) => cleanAssetId(left?.id || "").localeCompare(cleanAssetId(right?.id || ""), undefined, { numeric: true }))[0];
+  const chosenPath = normalizeAssetPath(chosen?.path || "");
+  const dimensions = readPngDimensions(chosenPath && bundle.pageDir ? path.join(bundle.pageDir, chosenPath) : "");
+  const aspectRatio = dimensions?.width > 0 && dimensions?.height > 0 ? dimensions.width / dimensions.height : 0;
+  const groupedBox = connectedForegroundPlacementBox(boxes, pageRequest.source_size_px, aspectRatio);
+  chosen.id = cleanAssetId(chosen.id || path.basename(chosenPath, path.extname(chosenPath))) || "detected_foreground_asset_1";
+  chosen.box_px = groupedBox;
+  chosen.source_box_px = groupedBox;
+  chosen.z_index = Number(chosen.z_index || 40);
+  chosen.type = "image";
+  chosen.description = "Source-faithful cohesive connected foreground illustration restored as one positioned asset.";
+  const detectedSet = new Set(detected);
+  spec.images = [...spec.images.filter((image) => !detectedSet.has(image)), chosen];
+}
+
+function applySourceLockedCleanBaseRepair(spec = {}, bundle = {}, pageRequest = {}) {
+  if (!Array.isArray(spec.images) || !bundle.pageDir) return false;
+  const width = Math.max(1, Number(pageRequest.source_size_px?.width || 0));
+  const height = Math.max(1, Number(pageRequest.source_size_px?.height || 0));
+  const detected = spec.images.filter((image) => /(?:^|\/)detected_foreground_asset_\d+\.png$/i.test(normalizeAssetPath(image?.path || ""))
+    || /^detected_foreground_asset_\d+$/i.test(cleanAssetId(image?.id || "")));
+  const strategyText = cleanLooseText([
+    spec.background_strategy?.mode,
+    spec.background_strategy?.source_consistency_contract,
+    spec.background_strategy?.comparison_note
+  ].filter(Boolean).join(" "));
+  const cohesiveFullSlide = spec.images.filter((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const box = coerceBox(image?.box_px || image?.source_box_px);
+    if (!imagePath || !box || box[2] < width * 0.82 || box[3] < height * 0.82) return false;
+    const text = cleanLooseText([
+      image?.id,
+      imagePath,
+      image?.description,
+      image?.type,
+      strategyText
+    ].filter(Boolean).join(" "));
+    return /cohesive|foreground illustration|icons|diagram|decorative|source-faithful separated asset|single cohesive image/i.test(text);
+  });
+  const hasDenseEditableText = (Array.isArray(spec.text_boxes) ? spec.text_boxes : []).length >= 8;
+  if (!width || !height) return false;
+  const cleanBackground = spec.images.find((image) => {
+    const imagePath = normalizeAssetPath(image?.path || "");
+    const box = coerceBox(image?.box_px);
+    const text = cleanLooseText([image?.id, imagePath, image?.description, image?.type].filter(Boolean).join(" "));
+    const isBackground = /background|clean base|base visual|full-slide/i.test(text);
+    return imagePath && isBackground && (!box || (box[2] >= width * 0.95 && box[3] >= height * 0.95));
+  });
+  if (!detected.length
+    && (!hasDenseEditableText || (!cohesiveFullSlide.length && !cleanBackground))) return false;
+  const sourcePath = path.join(bundle.pageDir, "source.png");
+  const backgroundPath = cleanBackground ? path.join(bundle.pageDir, normalizeAssetPath(cleanBackground.path || "")) : sourcePath;
+  if (!fsSync.existsSync(sourcePath) || !fsSync.existsSync(backgroundPath)) return false;
+
+  const illustrationBox = detected.length >= 2
+    ? connectedForegroundPlacementBox(
+      detected.map((image) => coerceBox(image?.box_px)).filter(Boolean),
+      pageRequest.source_size_px,
+      0
+    )
+    : [0, 0, 0, 0];
+  const embeddedTextIds = new Set((Array.isArray(spec.text_boxes) ? spec.text_boxes : [])
+    .filter((item) => {
+      const itemText = normalizeTextForCompare(item?.text || "");
+      const itemBox = coerceBox(item?.box_px);
+      const iconLikeOcrToken = /^ocr_/i.test(String(item?.id || ""))
+        && /^[a-z]{2,3}$/i.test(String(item?.text || "").trim())
+        && Number(item?.font_size || 0) >= 18
+        && itemBox
+        && itemBox[2] / Math.max(1, itemBox[3]) >= 0.65
+        && itemBox[2] / Math.max(1, itemBox[3]) <= 1.5;
+      if (detected.length < 2 && iconLikeOcrToken) return true;
+      if (detected.length < 2 && (itemText.length <= 1 || /^[0o]{2,4}$/i.test(itemText))) return true;
+      if (detected.length < 2) return false;
+      const box = itemBox;
+      if (!box || Number(item?.font_size || 0) > 18) return false;
+      const centerX = box[0] + box[2] / 2;
+      const centerY = box[1] + box[3] / 2;
+      return centerX >= illustrationBox[0]
+        && centerX <= illustrationBox[0] + illustrationBox[2]
+        && centerY >= illustrationBox[1]
+        && centerY <= illustrationBox[1] + illustrationBox[3]
+        && centerX >= width * 0.5;
+    })
+    .map((item) => String(item?.id || "").trim())
+    .filter(Boolean));
+  const editableTextBoxes = (Array.isArray(spec.text_boxes) ? spec.text_boxes : []).filter((item) => !embeddedTextIds.has(String(item?.id || "").trim()));
+  const masks = editableTextBoxes.map((item) => coerceBox(item?.source_ink_box_px || item?.box_px)).filter(Boolean);
+  if (!masks.length) return false;
+  const outputRelativePath = "assets/source_locked_clean_base.png";
+  const outputPath = path.join(bundle.pageDir, outputRelativePath);
+  fsSync.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const repairMode = detected.length >= 2 ? "clean-background" : "local-surface";
+  const script = [
+    "import json, sys",
+    "from PIL import Image, ImageDraw, ImageFilter",
+    "src=Image.open(sys.argv[1]).convert('RGB')",
+    "bg=Image.open(sys.argv[2]).convert('RGB').resize(src.size)",
+    "masks=json.loads(sys.argv[4])",
+    "mode=sys.argv[5]",
+    "has_clean_background=sys.argv[6]=='1'",
+    "for box in masks:",
+    "    x,y,w,h=[int(round(float(v))) for v in box]",
+    "    use_local_surface=mode=='local-surface' and (y>=200 or not has_clean_background)",
+    "    pad=max(3,min(8,round(h*0.06))) if use_local_surface else max(12,min(32,round(h*0.30)))",
+    "    x0=max(0,x-pad); y0=max(0,y-pad); x1=min(src.width,x+w+pad); y1=min(src.height,y+h+pad)",
+    "    base=src.crop((x0,y0,x1,y1)); patch=None; patch_from_bg=False",
+    "    if use_local_surface:",
+    "        ring=max(4,min(10,round(h*0.12))); ox0=max(0,x0-ring); oy0=max(0,y0-ring); ox1=min(src.width,x1+ring); oy1=min(src.height,y1+ring)",
+    "        samples=[]",
+    "        for region in ((ox0,oy0,ox1,y0),(ox0,y1,ox1,oy1),(ox0,y0,x0,y1),(x1,y0,ox1,y1)):",
+    "            if region[2]>region[0] and region[3]>region[1]: samples.extend(src.crop(region).getdata())",
+    "        if samples:",
+    "            channels=list(zip(*samples)); fill=tuple(sorted(c)[len(c)//2] for c in channels)",
+    "            patch=Image.new('RGB',base.size,fill)",
+    "        else: patch=bg.crop((x0,y0,x1,y1)); patch_from_bg=True",
+    "    else: patch=bg.crop((x0,y0,x1,y1)); patch_from_bg=True",
+    "    if patch_from_bg and base.width>8 and base.height>8:",
+    "        edge=4; src_edge=[]; bg_edge=[]",
+    "        for region in ((0,0,base.width,edge),(0,base.height-edge,base.width,base.height),(0,edge,edge,base.height-edge),(base.width-edge,edge,base.width,base.height-edge)):",
+    "            src_edge.extend(base.crop(region).getdata()); bg_edge.extend(patch.crop(region).getdata())",
+    "        if src_edge and bg_edge:",
+    "            src_channels=list(zip(*src_edge)); bg_channels=list(zip(*bg_edge))",
+    "            delta=[sorted(s)[len(s)//2]-sorted(b)[len(b)//2] for s,b in zip(src_channels,bg_channels)]",
+    "            patch=Image.merge('RGB',tuple(ch.point(lambda v,d=d:max(0,min(255,v+d))) for ch,d in zip(patch.split(),delta)))",
+    "    alpha=Image.new('L',base.size,0)",
+    "    inset_x=max(0,x-x0-2); inset_y=max(0,y-y0-2)",
+    "    inset_r=min(base.width-1,x+w-x0+2); inset_b=min(base.height-1,y+h-y0+2)",
+    "    ImageDraw.Draw(alpha).rectangle((inset_x,inset_y,inset_r,inset_b),fill=255)",
+    "    alpha=alpha.filter(ImageFilter.GaussianBlur(radius=max(2.0,pad*0.42)))",
+    "    core_x=max(0,x-x0-3); core_y=max(0,y-y0-3)",
+    "    core_r=min(base.width-1,x+w-x0+3); core_b=min(base.height-1,y+h-y0+3)",
+    "    ImageDraw.Draw(alpha).rectangle((core_x,core_y,core_r,core_b),fill=255)",
+    "    src.paste(Image.composite(patch,base,alpha),(x0,y0))",
+    "src.save(sys.argv[3])"
+  ].join("\n");
+  const result = spawnSync(resolvePillowPythonCommand(), ["-c", script, sourcePath, backgroundPath, outputPath, JSON.stringify(masks), repairMode, cleanBackground ? "1" : "0"], {
+    cwd: PROJECT_ROOT,
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 120000,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8" }
+  });
+  if (result.status !== 0 || !fsSync.existsSync(outputPath)) {
+    throw new Error(`Source-locked clean base repair failed: ${cleanLooseText(result.stderr || result.error?.message || `exit ${result.status}`)}`);
+  }
+  const verifiedSha256 = crypto.createHash("sha256").update(fsSync.readFileSync(outputPath)).digest("hex");
+  spec.text_boxes = editableTextBoxes;
+  // The source-locked raster already contains every non-text structural mark.
+  // Retaining model-native panels/axes above it can obscure exact cards and
+  // duplicate geometry, so only validated editable text is rebuilt on top.
+  spec.shapes = [];
+  spec.required_text = (Array.isArray(spec.required_text) ? spec.required_text : []).filter((text) => {
+    const normalized = normalizeTextForCompare(text);
+    return ![...(Array.isArray(spec.text_inventory) ? spec.text_inventory : [])]
+      .some((item) => embeddedTextIds.has(String(item?.id || "").trim()) && normalizeTextForCompare(item?.text) === normalized);
+  });
+  spec.text_inventory = (Array.isArray(spec.text_inventory) ? spec.text_inventory : []).filter((item) => !embeddedTextIds.has(String(item?.id || "").trim()));
+  spec.images = [{
+    id: "source_locked_clean_base",
+    path: outputRelativePath,
+    box_px: [0, 0, width, height],
+    source_box_px: [0, 0, width, height],
+    z_index: 0,
+    type: "image",
+    description: "Source-locked clean base produced by masked local background repair; editable standalone text is removed and rebuilt above it."
+  }];
+  spec.asset_provenance = [{
+    id: "source_locked_clean_base",
+    path: outputRelativePath,
+    source: outputRelativePath,
+    source_type: "asset-sheet-separated",
+    verified_sha256: verifiedSha256,
+    provenance_note: `Source-faithful masked ${repairMode} repair using the approved source page${cleanBackground ? " and verified clean background" : " with local surface reconstruction"}; standalone editable text regions were removed.`
+  }];
+  spec.visual_inventory = [{
+    id: "source_locked_clean_base",
+    type: "image",
+    description: "Source-faithful complex illustration and decorative base with standalone editable text removed.",
+    path: outputRelativePath,
+    box_px: [0, 0, width, height],
+    decision: "image-asset",
+    asset_provenance: {
+      path: outputRelativePath,
+      source_type: "asset-sheet-separated",
+      provenance_note: `masked ${repairMode} repair`
+    }
+  }];
+  spec.background_strategy = {
+    ...(spec.background_strategy || {}),
+    mode: "source-locked-masked-clean-base",
+    source_consistency_contract: "Preserve the exact source illustration and decoration while rebuilding standalone title, subtitle, body, and pill-label text as editable native objects.",
+    removed_foreground: editableTextBoxes.map((item) => String(item?.id || "").trim()).filter(Boolean),
+    comparison_note: `Masked ${repairMode} repair keeps source-locked coordinates and avoids repeated or rescaled connected illustrations.`
+  };
+  spec.notes = [
+    removeForbiddenFallbackTerms(spec.notes),
+    `Source-locked masked clean base repair applied; ${embeddedTextIds.size} small label(s) remain integral to the complex illustration.`
+  ].filter(Boolean).join(" ");
+  return true;
+}
+
+function calibrateSourceLockedDisplayTypography(spec = {}, pageRequest = {}) {
+  const hasRepair = (Array.isArray(spec.images) ? spec.images : []).some((image) => normalizeAssetPath(image?.path || "") === "assets/source_locked_clean_base.png");
+  if (!hasRepair || !Array.isArray(spec.text_boxes)) return;
+  const width = Math.max(1, Number(pageRequest.source_size_px?.width || 0));
+  const height = Math.max(1, Number(pageRequest.source_size_px?.height || 0));
+  const slideWidth = Math.max(0.01, Number(pageRequest.slide?.width || 13.333));
+  const sourcePixelsPerPoint = width / (slideWidth * 72);
+  for (const item of spec.text_boxes) {
+    const box = coerceBox(item?.box_px);
+    const text = cleanLooseText(item?.text || "");
+    item.fit_text = false;
+    const colorMatch = String(item?.color || "").match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+    if (box && colorMatch && box[1] > height * 0.25 && Number(item.font_size || 0) <= 20) {
+      const rgb = colorMatch.slice(1).map((channel) => Number.parseInt(channel, 16));
+      const luminance = (rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) / 255;
+      if (luminance > 0.7) item.color = "#3B4B67";
+    }
+    if (box
+      && /^\d{2}$/.test(text)
+      && box[1] >= height * 0.25
+      && box[1] <= height * 0.5
+      && box[2] <= 50
+      && box[3] <= 45) {
+      item.color = "#FFFFFF";
+      item.bold = true;
+    }
+    if (!box || box[0] > width * 0.55 || box[1] > height * 0.65) continue;
+    if (/^[A-Za-z][A-Za-z0-9 .&+-]*$/.test(text) && Number(item.font_size || 0) >= 48) {
+      item.font_face = "Georgia";
+      item.font_size = Math.min(Number(item.font_size || 0), 74);
+      item.bold = true;
+      item.fit_text = false;
+      item.preview_font = path.join(process.env.WINDIR || "C:\\Windows", "Fonts", "georgiab.ttf");
+      item.box_px = [Math.min(width - 1, box[0] + 15), Math.max(0, box[1] - 17), box[2], Math.min(135, box[3])];
+      continue;
+    }
+    if (/[^\x00-\x7F]/.test(text)
+      && Number(item.font_size || 0) >= 38
+      && box[1] < height * 0.25
+      && box[3] >= 60) {
+      item.font_face = "SimSun";
+      item.font_size = Math.min(Number(item.font_size || 0), 38);
+      item.bold = true;
+      item.font_weight = 700;
+      item.fit_text = false;
+      item.preview_font = path.join(process.env.WINDIR || "C:\\Windows", "Fonts", "simsun.ttc");
+      item.box_px = [Math.min(width - 1, box[0] + 3), Math.max(0, box[1] - 7), box[2], Math.min(124, box[3])];
+      continue;
+    }
+    if (/[^\x00-\x7F]/.test(text) && Number(item.font_size || 0) >= 55) {
+      item.font_face = "SimSun";
+      item.font_size = Math.min(Number(item.font_size || 0), 60);
+      item.bold = true;
+      item.font_weight = 700;
+      item.fit_text = false;
+      item.preview_font = path.join(process.env.WINDIR || "C:\\Windows", "Fonts", "simsun.ttc");
+      item.box_px = [Math.min(width - 1, box[0] + 3), Math.max(0, box[1] - 7), box[2], Math.min(124, box[3])];
+      continue;
+    }
+    if (/[^\x00-\x7F]/.test(text) && Number(item.font_size || 0) >= 28) {
+      item.font_face = "SimSun";
+      item.font_size = Math.min(Number(item.font_size || 0), 29.6);
+      item.bold = true;
+      item.font_weight = 700;
+      item.fit_text = false;
+      item.preview_font = path.join(process.env.WINDIR || "C:\\Windows", "Fonts", "simsun.ttc");
+      item.box_px = [Math.max(0, box[0] - 5), Math.max(0, box[1] - 7), box[2], box[3]];
+      continue;
+    }
+    if (/[^\x00-\x7F]/.test(text) && text.length >= 10 && Number(item.font_size || 0) >= 16 && box[1] >= height * 0.55 && box[1] <= height * 0.7) {
+      item.box_px = [box[0], Math.max(0, box[1] - 25), box[2], box[3]];
+    }
+    clampSourceLockedTextWidth(item, box, sourcePixelsPerPoint);
+  }
+}
+
+function clampSourceLockedTextWidth(item = {}, box = [], sourcePixelsPerPoint = 1) {
+  const text = cleanLooseText(item?.text || "");
+  const fontSize = Number(item?.font_size || 0);
+  if (!text || text.includes("\n") || !fontSize || !Array.isArray(box) || box[2] <= 0) return;
+  let widthUnits = 0;
+  for (const char of text) {
+    if (/\s/.test(char)) widthUnits += 0.32;
+    else if (/[^\x00-\x7F]/.test(char)) widthUnits += 1;
+    else if (/[A-Z]/.test(char)) widthUnits += 0.68;
+    else if (/[a-z]/.test(char)) widthUnits += 0.55;
+    else if (/[0-9]/.test(char)) widthUnits += 0.58;
+    else widthUnits += 0.4;
+  }
+  const estimatedWidth = widthUnits * fontSize * Math.max(0.1, sourcePixelsPerPoint);
+  if (estimatedWidth <= box[2] * 1.28) return;
+  const fitted = Math.max(8, Math.round((fontSize * box[2] * 1.08 / estimatedWidth) * 10) / 10);
+  if (fitted >= fontSize) return;
+  item.font_size = fitted;
+  item.font_size_calibration = "source-box-width-clamp";
+}
+
+function connectedForegroundPlacementBox(boxes = [], sourceSize = {}, aspectRatio = 0) {
+  const width = Math.max(1, Number(sourceSize?.width || 0));
+  const height = Math.max(1, Number(sourceSize?.height || 0));
+  const union = unionBoxes(boxes);
+  const topPadding = Math.min(union[1], Math.max(24, union[3] * 0.32));
+  const bottomRoom = Math.max(0, height - (union[1] + union[3]));
+  const bottomPadding = Math.min(bottomRoom, Math.max(12, union[3] * 0.04));
+  const top = Math.max(0, union[1] - topPadding);
+  const targetHeight = Math.min(height - top, union[3] + topPadding + bottomPadding);
+  const fallbackRatio = Math.max(1, Math.min(1.6, (union[2] * 1.08) / Math.max(1, targetHeight)));
+  const ratio = aspectRatio > 0.6 && aspectRatio < 2.4 ? aspectRatio : fallbackRatio;
+  const targetWidth = Math.min(width, Math.max(union[2], targetHeight * ratio));
+  const centerX = union[0] + union[2] / 2;
+  const left = Math.max(0, Math.min(width - targetWidth, centerX - targetWidth / 2));
+  return [left, top, targetWidth, targetHeight].map((value) => Math.round(value));
+}
+
+function readPngDimensions(filePath = "") {
+  try {
+    if (!filePath || !fsSync.existsSync(filePath)) return null;
+    const buffer = fsSync.readFileSync(filePath);
+    if (buffer.length < 24 || buffer.toString("ascii", 1, 4) !== "PNG") return null;
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  } catch {
+    return null;
+  }
+}
+
 function hasCompletePositionedAsset(image = {}, pageDir = "") {
   const imagePath = normalizeAssetPath(image?.path || "");
   const box = coerceBox(image?.box_px);
@@ -1296,18 +1729,33 @@ function isNeededVisualAssetJobCovered(job = {}, spec = {}, bundle = {}, pageReq
     job.prompt,
     job.required_for
   ].filter(Boolean).join(" "));
+  const jobRoleText = cleanLooseText([
+    job.id,
+    job.asset_type,
+    job.purpose,
+    job.required_for,
+    job.target_asset_path
+  ].filter(Boolean).join(" "));
   return (Array.isArray(spec.images) ? spec.images : []).some((image) => {
     const imagePath = normalizeAssetPath(image?.path || "");
     const imageId = cleanAssetId(image?.id || path.basename(imagePath, path.extname(imagePath)));
     const imageBox = coerceBox(image?.box_px);
     if (!imagePath || !imageBox || !hasCompletePositionedAsset(image, bundle.pageDir || "")) return false;
     if (jobId && imageId && jobId === imageId) return true;
-    const overlap = jobBox ? boxOverlapRatio(jobBox, imageBox) : 0;
-    if (overlap >= 0.82 && assetJobFamilyMatch(image, { ...job, prompt: jobText })) return true;
     const imageText = cleanLooseText([image.id, image.path, image.description, image.type].filter(Boolean).join(" "));
     const imageCoverage = width && height
       ? Math.max(0, imageBox[2]) * Math.max(0, imageBox[3]) / Math.max(1, width * height)
       : 0;
+    const jobIsBackground = jobCoverage >= 0.82
+      || /background|clean base|base visual|full-slide/i.test(jobRoleText);
+    const imageIsBackground = imageCoverage >= 0.82
+      && /background|clean base|base visual|full-slide/i.test(imageText);
+    const overlap = jobBox ? boxOverlapRatio(jobBox, imageBox) : 0;
+    // A full-slide base layer geometrically contains every foreground region.
+    // Containment must not make a missing foreground illustration appear covered.
+    if (!imageIsBackground || jobIsBackground) {
+      if (overlap >= 0.82 && assetJobFamilyMatch(image, { ...job, prompt: jobText })) return true;
+    }
     return jobCoverage >= 0.82
       && imageCoverage >= 0.82
       && /background|clean base|base visual/i.test(imageText);
@@ -1328,6 +1776,7 @@ function addDetectedStructuralShapes(spec = {}, bundle = {}, pageRequest = {}) {
   const width = Number(pageRequest.source_size_px?.width || 0);
   const height = Number(pageRequest.source_size_px?.height || 0);
   if (!pageDir || !width || !height) return;
+  if ((Array.isArray(spec.images) ? spec.images : []).some((image) => normalizeAssetPath(image?.path || "") === "assets/source_locked_clean_base.png")) return;
   const sourcePath = path.join(pageDir, "source.png");
   const background = (Array.isArray(spec.images) ? spec.images : []).find((image) => {
     const imagePath = normalizeAssetPath(image?.path || "");
@@ -1412,7 +1861,7 @@ function addDetectedStructuralShapes(spec = {}, bundle = {}, pageRequest = {}) {
     "    out.append({'type':'roundRectOutline','box':[bx0,by0,cw,ch],'color':'#%02X%02X%02X'%color,'radius':round(ch/2),'strokeWidth':2})",
     "print(json.dumps(out[:12]))"
   ].join("\n");
-  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify({ masks, textBoxes })], {
+  const result = spawnSync(resolvePillowPythonCommand(), ["-c", script, sourcePath, backgroundPath, JSON.stringify({ masks, textBoxes })], {
     cwd: PROJECT_ROOT,
     windowsHide: true,
     encoding: "utf8",
@@ -1472,11 +1921,32 @@ function normalizeRequiredText(spec) {
 
 function mergeBriefOcrText(spec, bundle, pageRequest) {
   if (!spec || typeof spec !== "object") return;
-  const lines = Array.isArray(bundle?.brief?.ocr?.lines) ? bundle.brief.ocr.lines : [];
+  const lines = selectSpatiallyDistinctOcrLines(bundle?.brief?.ocr?.lines || []);
   if (!lines.length) return;
   const width = Number(pageRequest.source_size_px?.width || 0);
   const height = Number(pageRequest.source_size_px?.height || 0);
   const existingBoxes = Array.isArray(spec.text_boxes) ? spec.text_boxes : [];
+  const inventory = Array.isArray(spec.text_inventory) ? spec.text_inventory : [];
+  const required = Array.isArray(spec.required_text) ? spec.required_text : [];
+  for (const line of lines) {
+    const text = String(line?.text || "").trim();
+    const lineId = String(line?.id || "").trim();
+    const lineBox = coerceBox(line?.box_px);
+    if (!text || !lineBox || !validBox(lineBox, width, height)) continue;
+    const target = existingBoxes.find((box) => {
+      const boxId = String(box?.id || "").replace(/^ocr_/, "");
+      return (lineId && boxId === lineId) || positionedBoxesEquivalent(box?.box_px, lineBox);
+    });
+    if (!target || String(target.text || "").trim() === text) continue;
+    const previousText = String(target.text || "");
+    target.text = text;
+    for (const item of inventory) {
+      const itemId = String(item?.id || "").replace(/^ocr_/, "");
+      if ((lineId && itemId === lineId) || normalizeTextForCompare(item?.text) === normalizeTextForCompare(previousText)) item.text = text;
+    }
+    spec.required_text = (Array.isArray(spec.required_text) ? spec.required_text : required)
+      .map((item) => normalizeTextForCompare(item) === normalizeTextForCompare(previousText) ? text : item);
+  }
   const existingText = new Set(existingBoxes.map((box) => normalizeTextForCompare(box?.text)).filter(Boolean));
   const additions = [];
   for (const line of lines) {
@@ -1503,7 +1973,6 @@ function mergeBriefOcrText(spec, bundle, pageRequest) {
   }
   if (!additions.length) return;
   spec.text_boxes = [...existingBoxes, ...additions];
-  const inventory = Array.isArray(spec.text_inventory) ? spec.text_inventory : [];
   spec.text_inventory = [
     ...inventory,
     ...additions.map((box) => ({
@@ -1512,9 +1981,9 @@ function mergeBriefOcrText(spec, bundle, pageRequest) {
       decision: box.low_confidence ? "native-text-from-low-confidence-ocr-review" : "native-text-from-ocr"
     }))
   ];
-  const required = Array.isArray(spec.required_text) ? spec.required_text : [];
-  const requiredSet = new Set(required.map(normalizeTextForCompare).filter(Boolean));
-  const nextRequired = [...required];
+  const currentRequired = Array.isArray(spec.required_text) ? spec.required_text : [];
+  const requiredSet = new Set(currentRequired.map(normalizeTextForCompare).filter(Boolean));
+  const nextRequired = [...currentRequired];
   for (const box of additions) {
     if (box.low_confidence) continue;
     const key = normalizeTextForCompare(box.text);
@@ -1529,6 +1998,46 @@ function mergeBriefOcrText(spec, bundle, pageRequest) {
 
 function normalizeTextForCompare(value = "") {
   return String(value || "").replace(/\s+/g, "").trim().toLowerCase();
+}
+
+function deduplicateContainedTextBoxes(spec = {}) {
+  if (!Array.isArray(spec.text_boxes) || spec.text_boxes.length < 2) return;
+  const comparable = (value = "") => normalizeTextForCompare(value)
+    .replace(/[（）]/g, (char) => char === "（" ? "(" : ")")
+    .replace(/[，。、；：]/g, "");
+  const ranked = spec.text_boxes
+    .map((item, index) => ({ item, index, box: coerceBox(item?.box_px), text: comparable(item?.text || "") }))
+    .filter((entry) => entry.box && entry.text)
+    .sort((left, right) => right.text.length - left.text.length || left.index - right.index);
+  const kept = [];
+  const removed = new Set();
+  for (const entry of ranked) {
+    const container = kept.find((candidate) => (
+      candidate.text === entry.text
+        ? positionedBoxesEquivalent(candidate.box, entry.box) || boxOverlapRatio(candidate.box, entry.box) >= 0.95
+        : candidate.text.length >= entry.text.length + 2
+          && candidate.text.includes(entry.text)
+          && boxOverlapRatio(candidate.box, entry.box) >= 0.8
+    ));
+    if (container) {
+      removed.add(entry.item);
+      continue;
+    }
+    kept.push(entry);
+  }
+  if (!removed.size) return;
+  const removedIds = new Set([...removed].map((item) => String(item?.id || "").trim()).filter(Boolean));
+  spec.text_boxes = spec.text_boxes.filter((item) => !removed.has(item));
+  const remainingText = new Set(spec.text_boxes.map((item) => comparable(item?.text || "")).filter(Boolean));
+  spec.text_inventory = (Array.isArray(spec.text_inventory) ? spec.text_inventory : [])
+    .filter((item) => !removedIds.has(String(item?.id || "").trim()))
+    .filter((item) => remainingText.has(comparable(item?.text || "")));
+  spec.required_text = (Array.isArray(spec.required_text) ? spec.required_text : [])
+    .filter((text) => remainingText.has(comparable(text)));
+  spec.notes = [
+    spec.notes,
+    `Removed ${removed.size} spatially contained duplicate text box(es) before source-locked assembly.`
+  ].filter(Boolean).join(" ");
 }
 
 function sanitizeSpecDraft(spec, bundle, pageRequest) {
@@ -1751,10 +2260,10 @@ function normalizeVisualInventoryProvenance(spec) {
   });
 }
 
-function collectMissingImageAssetJobs(spec) {
+function collectMissingImageAssetJobs(spec, pageDir = "") {
   if (!Array.isArray(spec?.images)) return [];
   return spec.images
-    .filter((image) => !normalizeAssetPath(image.path || ""))
+    .filter((image) => !isUsablePageAssetPath(image.path || "", pageDir))
     .map((image, index) => {
       const id = cleanAssetId(image.id || `visual_asset_${index + 1}`);
       return {
@@ -1766,6 +2275,12 @@ function collectMissingImageAssetJobs(spec) {
         asset_provenance: "imagegen source-faithful foreground asset generated for editable rebuild"
       };
     });
+}
+
+function isUsablePageAssetPath(value = "", pageDir = "") {
+  const assetPath = normalizeAssetPath(value);
+  if (!assetPath || /^(?:path\/to|placeholder|example)(?:\/|$)/i.test(assetPath)) return false;
+  return !pageDir || fsSync.existsSync(path.join(pageDir, assetPath));
 }
 
 function normalizeDeclaredVisualAssetJobs(jobs = [], pageRequest = {}) {
@@ -1931,6 +2446,9 @@ function collectUncoveredVisualDeltaAssetJobs(spec = {}, bundle = {}, pageReques
   const width = Number(pageRequest.source_size_px?.width || 0);
   const height = Number(pageRequest.source_size_px?.height || 0);
   if (!pageDir || !width || !height) return [];
+  if ((Array.isArray(spec.images) ? spec.images : []).some((image) => normalizeAssetPath(image?.path || "") === "assets/source_locked_clean_base.png")) {
+    return [];
+  }
   const sourcePath = path.join(pageDir, "source.png");
   const background = (Array.isArray(spec.images) ? spec.images : []).find((image) => {
     const imagePath = normalizeAssetPath(image?.path || "");
@@ -1978,7 +2496,7 @@ function collectUncoveredVisualDeltaAssetJobs(spec = {}, bundle = {}, pageReques
     "        xs=[p[0] for p in pts]; ys=[p[1] for p in pts]",
     "        box=(min(xs),min(ys),max(xs)+1,max(ys)+1)",
     "        area=(box[2]-box[0])*(box[3]-box[1])",
-    "        if area>w*h*0.24 or area<w*h*0.006: continue",
+    "        if area>w*h*0.62 or area<w*h*0.006: continue",
     "        comps.append((area,box))",
     "out=[]",
     "for _,box in sorted(comps,reverse=True)[:4]:",
@@ -1987,19 +2505,24 @@ function collectUncoveredVisualDeltaAssetJobs(spec = {}, bundle = {}, pageReques
     "    out.append([round(x0/scale),round(y0/scale),round((x1-x0)/scale),round((y1-y0)/scale)])",
     "print(json.dumps(out))"
   ].join("\n");
-  const result = spawnSync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourcePath, backgroundPath, JSON.stringify(masks)], {
+  const result = spawnSync(resolvePillowPythonCommand(), ["-c", script, sourcePath, backgroundPath, JSON.stringify(masks)], {
     cwd: PROJECT_ROOT,
     windowsHide: true,
     encoding: "utf8",
     timeout: 120000,
     env: { ...process.env, PYTHONIOENCODING: "utf-8" }
   });
-  if (result.status !== 0) return [];
+  if (result.status !== 0) {
+    throw new Error(`Foreground visual delta analysis failed: ${cleanLooseText(result.stderr || result.error?.message || `exit ${result.status}`)}`);
+  }
   let boxes = [];
   try { boxes = JSON.parse(String(result.stdout || "[]")); } catch { return []; }
-  return boxes.map((box, index) => ({
+  const groupedBoxes = boxes.length > 1
+    ? [connectedForegroundPlacementBox(boxes, pageRequest.source_size_px)]
+    : boxes;
+  return groupedBoxes.map((box, index) => ({
     id: `detected_foreground_asset_${index + 1}`,
-    description: "Separate the complete visible foreground icon, badge, decorative mark, or illustration inside this source region. Preserve its exact visual identity. Do not include surrounding slide background, editable body text, or unrelated objects.",
+    description: "Separate the complete connected foreground illustration, roadmap, icon group, badge group, decorative mark, or image block inside this source region. Preserve the exact source positions, shared paths, platforms, shadows, perspective, colors, proportions, and visual identity of every included non-text object. Do not redraw, simplify, rearrange, or return only the labels. Do not include surrounding slide background, editable text, or unrelated objects.",
     target_asset_path: `assets/detected_foreground_asset_${index + 1}.png`,
     source_box_px: box,
     transparent_background: true,
@@ -2376,10 +2899,17 @@ function normalizeImageAssetReferences(spec, bundle = {}) {
 
   spec.images = spec.images.map((image, index) => {
     if (!image || typeof image !== "object") return image;
-    const imageId = cleanAssetId(image.id || `image_${index + 1}`);
+    const declaredImageId = String(image.id || "").trim() ? cleanAssetId(image.id) : "";
+    const lookupImageId = declaredImageId || cleanAssetId(`image_${index + 1}`);
     const existingPath = normalizeAssetPath(image.path || "");
-    const asset = assetByPath.get(existingPath) || assetById.get(imageId);
-    const imagePath = existingPath || normalizeAssetPath(asset?.path || "");
+    const existingPathIsUsable = isUsablePageAssetPath(existingPath, bundle.pageDir);
+    const asset = assetByPath.get(existingPath) || assetById.get(lookupImageId);
+    const assetPath = normalizeAssetPath(asset?.path || "");
+    const imagePath = existingPathIsUsable ? existingPath : assetPath || existingPath;
+    const imageId = declaredImageId
+      || (String(asset?.id || "").trim() ? cleanAssetId(asset.id) : "")
+      || cleanAssetId(path.basename(imagePath || "", path.extname(imagePath || "")))
+      || lookupImageId;
     if (!imagePath) return { ...image, id: imageId };
     if (!provenanceByPath.has(imagePath)) {
       const sourceType = asset?.source_type || "asset-sheet-separated";
@@ -3022,8 +3552,14 @@ function validateSpecDraft(spec, pageRequest) {
     const imagePath = normalizeAssetPath(image.path);
     if (!imagePath) errors.push(`image ${image.id || ""} is missing path.`);
     if (imagePath === "source.png") errors.push(`image ${image.id || ""} references source.png, which is forbidden.`);
+    if (imagePath === "assets/source_locked_clean_base.png") {
+      errors.push("assets/source_locked_clean_base.png is forbidden for formal editable output because it flattens cards, diagrams, and other non-text structure into a full-slide raster.");
+    }
     if (/^(path\/to|placeholder|example)\b/i.test(imagePath)) errors.push(`image ${image.id || ""} uses a placeholder path instead of a real page asset.`);
     if (!validBox(image.box_px, width, height)) errors.push(`image ${image.id || ""} has invalid box_px.`);
+  }
+  if (/source-locked-masked-clean-base/i.test(String(spec.background_strategy?.mode || ""))) {
+    errors.push("background_strategy.mode source-locked-masked-clean-base is forbidden for formal editable output.");
   }
   const freeText = [
     ...(spec.visual_inventory || []).map((item) => typeof item === "string" ? item : JSON.stringify(item)),
@@ -3074,7 +3610,13 @@ function collectVisualCoverageIssues(spec = {}) {
     const itemBox = item.source_box_px || item.box_px || item.bounds_px || item.box;
     if (/gradient|glow|texture|layered transparency|overlapping|orb|wave|complex background/i.test(itemText)) {
       const representedByImage = images.some((renderable) => {
-        const renderableId = cleanAssetId(renderable?.id || renderable?.asset_id || renderable?.assetId || "");
+        const renderableId = cleanAssetId(
+          renderable?.id
+          || renderable?.asset_id
+          || renderable?.assetId
+          || path.basename(normalizeAssetPath(renderable?.path || ""), path.extname(normalizeAssetPath(renderable?.path || "")))
+          || ""
+        );
         if (itemId && renderableId && itemId === renderableId) return true;
         return boxOverlapRatio(itemBox, renderable?.box_px) >= 0.65 || assetJobTextScore(renderable, item) >= 2;
       });
@@ -3084,7 +3626,13 @@ function collectVisualCoverageIssues(spec = {}) {
       }
     }
     const represented = renderables.some((renderable) => {
-      const renderableId = cleanAssetId(renderable?.id || renderable?.asset_id || renderable?.assetId || "");
+      const renderableId = cleanAssetId(
+        renderable?.id
+        || renderable?.asset_id
+        || renderable?.assetId
+        || path.basename(normalizeAssetPath(renderable?.path || ""), path.extname(normalizeAssetPath(renderable?.path || "")))
+        || ""
+      );
       if (itemId && renderableId && itemId === renderableId) return true;
       return boxOverlapRatio(itemBox, renderable?.box_px) >= 0.65 || assetJobTextScore(renderable, item) >= 2;
     });
@@ -3204,7 +3752,7 @@ async function preparePromptImage(sourceImage, pageDir) {
       "im.save(out, 'JPEG', quality=quality, optimize=True)"
     ].join("\n");
     try {
-      await execFileAsync(process.env.PYTHON || process.env.PYTHON_PATH || "python", ["-c", script, sourceImage, previewPath, String(maxWidth), String(quality)], {
+      await execFileAsync(resolvePillowPythonCommand(), ["-c", script, sourceImage, previewPath, String(maxWidth), String(quality)], {
         timeout: 30000,
         windowsHide: true,
         env: { ...process.env, PYTHONIOENCODING: "utf-8" },

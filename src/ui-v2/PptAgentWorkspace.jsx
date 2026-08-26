@@ -363,6 +363,15 @@ function CreateWorkspace({ create }) {
       </section>
 
       <aside className={styles.createInspector}>
+        <div className={styles.sectionLabel}><span>生成引擎</span><Settings2 size={13} /></div>
+        <div className={styles.engineChoices} role="group" aria-label="选择生成引擎">
+          <button className={create.generationRoute === "image-fidelity" ? styles.activeChoice : ""} type="button" aria-pressed={create.generationRoute === "image-fidelity"} onClick={() => create.onGenerationRouteChange?.("image-fidelity")} disabled={create.inputLocked}>
+            <Images size={17} /><span><b>高保真双 Skill</b><small>当前稳定路线：图片视觉生成后重建可编辑版本</small></span>
+          </button>
+          <button className={create.generationRoute === "ppt-master-native" ? styles.activeChoice : ""} type="button" aria-pressed={create.generationRoute === "ppt-master-native"} onClick={() => create.onGenerationRouteChange?.("ppt-master-native")} disabled={create.inputLocked || !create.pptMasterProvider?.selectable}>
+            <Presentation size={17} /><span><b>PPT Master 原生可编辑</b><small>{create.pptMasterProvider?.ready ? `v${create.pptMasterProvider.version || "4.7.0"} 已通过完整性检查，自动 Runner 尚未启用` : "本地运行时未就绪"}</small></span>
+          </button>
+        </div>
         <div className={styles.sectionLabel}><span>交付目标</span><PanelRight size={13} /></div>
         <div className={styles.deliveryChoices} role="group" aria-label="选择交付目标">
           <button className={create.deliveryMode === "visual" ? styles.activeChoice : ""} type="button" aria-pressed={create.deliveryMode === "visual"} onClick={() => create.onDeliveryModeChange("visual")} disabled={create.inputLocked}>
@@ -387,6 +396,7 @@ function CreateWorkspace({ create }) {
             {create.costPreview?.plannedImageCalls ? <em>最多 {create.costPreview.plannedImageCalls} 次图片调用，达到上限自动停止</em> : null}
           </div>
         ) : null}
+        {create.pptMasterProvider?.ready && !create.pptMasterProvider?.selectable ? <div className={styles.providerNote}><Check size={15} /><span>PPT Master 已安装并通过无费用预检；为避免假接通，真实 Runner 完成前保持不可选。</span></div> : null}
 
         <div className={styles.createSubmit}>
           <small>{removingFileId ? "正在删除文件，请稍候..." : create.hint}</small>
@@ -412,6 +422,12 @@ export function PptAgentWorkspace({ advanced, create, header, preview, taskList,
       <TaskSidebar taskList={taskList} onCreate={create.onOpen} />
       <section className={styles.workspace}>
         <WorkspaceHeader header={workspaceHeader} onCreate={create.onOpen} />
+        {workspaceHeader.runtimeWarning ? (
+          <div className={styles.runtimeRestartBanner} role="alert">
+            <CircleAlert size={15} aria-hidden="true" />
+            <span>{workspaceHeader.runtimeWarning}</span>
+          </div>
+        ) : null}
         {create.open ? <CreateWorkspace create={create} /> : (
           <div className={styles.productionDesk}>
             <SlideStudio preview={preview} />

@@ -280,6 +280,8 @@ export async function completeWorkflowCodexPptSlideTask(jobId, pageId, options =
       model: cleanString(options.model || options.backend?.model || job.artifacts?.codexPptBackend?.model || ""),
       dryRun: Boolean(options.dryRun || options.passthrough),
       source: cleanString(options.source || "external-slide-worker"),
+      imageInputMode: cleanString(options.imageInputMode || ""),
+      sourceImagePath: cleanString(options.sourceImagePath || ""),
       referenceImagePaths: Array.isArray(options.referenceImagePaths) ? options.referenceImagePaths : [],
       approvedSampleSha256: cleanString(options.approvedSampleSha256 || ""),
       qaNote: cleanString(options.qaNote || "")

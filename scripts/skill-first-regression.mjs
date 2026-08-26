@@ -13,7 +13,9 @@ async function main() {
     checkFrontendV2Workspace(files),
     checkFrontendButtonContracts(files),
     checkApiSurface(files),
+    checkLocalSecurityAndRuntimeIdentity(files),
     checkSkillRuntimeRoots(files),
+    checkPptMasterProviderBoundary(files),
     checkDeliveryGate(files),
     checkFinalEvidence(files),
     checkMojibakeAuditScope(files)
@@ -62,11 +64,14 @@ async function readProjectFiles() {
     workflowFinalEvidence: await readText("server/workflowFinalEvidence.js"),
     workflowPageEvidence: await readText("server/workflowPageEvidence.js"),
     workflowJobs: await readText("server/workflowJobs.js"),
+    workflowPptMaster: await readText("server/workflowPptMaster.js"),
     workflowVisibility: await readText("shared/workflowVisibility.js"),
     workflowSelectionGuard: await readText("src/workflow/workflowSelectionGuard.js"),
     workflowArtifacts: await readText("server/workflowArtifacts.js"),
     workflowCostEstimate: await readText("server/workflowCostEstimate.js"),
     workflowBusinessReadiness: await readText("server/workflowBusinessReadiness.js"),
+    localAccess: await readText("server/localAccess.js"),
+    runtimeIdentity: await readText("server/runtimeIdentity.js"),
     providers: await readText("server/providers.js"),
     pageRebuildAssembler: await readText("scripts/page-rebuild-assembler.mjs"),
     visualAssetHelper: await readText("scripts/visual-asset-helper.mjs"),
@@ -98,6 +103,38 @@ function checkSkillRuntimeRoots(files) {
     mustNotInclude(files.visualAssetHelper, "editImageWithProvider");
     mustNotInclude(files.visualAssetHelper, "generateImageWithProvider");
     mustNotInclude(files.visualAssetHelper, ".editppt-api-backend-only");
+  });
+}
+
+function checkPptMasterProviderBoundary(files) {
+  return named("PPT Master stays isolated behind an explicit provider boundary", () => {
+    mustInclude(files.workflowPptMaster, 'PRESENTATION_ROUTE_IMAGE_FIDELITY = "image-fidelity"');
+    mustInclude(files.workflowPptMaster, 'PRESENTATION_ROUTE_PPT_MASTER_NATIVE = "ppt-master-native"');
+    mustInclude(files.workflowPptMaster, 'official_repository');
+    mustInclude(files.workflowPptMaster, 'attribution_guard.py');
+    mustInclude(files.workflowPptMaster, 'automaticExecutionImplemented: false');
+    mustInclude(files.workflowJobs, "generationRoute: normalizePresentationRoute(input.generationRoute)");
+    mustInclude(files.serverIndex, 'app.get("/api/providers/ppt-master"');
+    mustInclude(files.doctor, '"ppt-master"');
+    mustInclude(files.apiClient, "async pptMasterProvider(signal)");
+    mustInclude(files.uiV2, "PPT Master 原生可编辑");
+    mustInclude(files.uiV2, "真实 Runner 完成前保持不可选");
+    mustNotInclude(files.serverIndex, "PPT_MASTER_RUNNER_COMMAND");
+  });
+}
+
+function checkLocalSecurityAndRuntimeIdentity(files) {
+  return named("Local access and runtime identity stay enforced", () => {
+    mustInclude(files.localAccess, 'PPT_TOOL_HOST must be a loopback address');
+    mustInclude(files.localAccess, '"UNTRUSTED_WRITE_ORIGIN"');
+    mustInclude(files.localAccess, 'Cross-Origin-Resource-Policy');
+    mustInclude(files.runtimeIdentity, 'startupFingerprint');
+    mustInclude(files.runtimeIdentity, 'restartRequired');
+    mustInclude(files.serverIndex, 'app.use(createLocalRequestBoundary(localAccess))');
+    mustInclude(files.serverIndex, 'app.listen(port, localAccess.host');
+    mustInclude(files.serverIndex, 'restartRequired: identity.restartRequired');
+    mustInclude(files.frontend, 'connection.state === "restart-required"');
+    mustNotInclude(files.serverIndex, 'app.use(cors());');
   });
 }
 
@@ -409,6 +446,9 @@ function checkApiSurface(files) {
     mustInclude(files.workflowCostEstimate, "plannedImageCalls");
     mustInclude(files.workflowBusinessReadiness, "minimumSuccessRate: 0.9");
     mustInclude(files.workflowBusinessReadiness, "minimumTasks: 20");
+    mustInclude(files.workflowBusinessReadiness, "WORKFLOW_BUSINESS_POLICY_VERSION");
+    mustInclude(files.workflowBusinessReadiness, "legacyTasksExcluded");
+    mustInclude(files.workflowBusinessReadiness, "cacheHits");
     mustInclude(files.apiClient, "latestV1Acceptance");
     mustInclude(files.serverIndex, "primaryWorkflowState");
     mustInclude(files.serverIndex, "primaryJobId");
@@ -577,6 +617,9 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowDelivery, "rasterOnlySlides");
     mustInclude(files.workflowDelivery, "rasterBackgroundSlides");
     mustInclude(files.workflowDelivery, "noFullSlideRaster");
+    mustInclude(files.workflowDelivery, "flattenedStructureDeck");
+    mustInclude(files.workflowDelivery, "noFlattenedEditableStructure");
+    mustInclude(files.workflowDelivery, "powerPointTextLayoutPassed");
     mustInclude(files.workflowDelivery, "finalEvidenceComplete");
     mustInclude(files.workflowDelivery, "partialSourceCoverage");
     mustInclude(files.workflowDelivery, "fullSourceCoverage");
@@ -610,6 +653,8 @@ function checkDeliveryGate(files) {
     mustInclude(files.workflowEditable, "EDITABLE_DISPATCH_STAGE_MISMATCH");
     mustInclude(files.workflowEditable, "EDITABLE_DISPATCH_PAGE_NOT_SELECTED");
     mustInclude(files.workflowEditable, "rebuild_page_locally");
+    mustInclude(files.workflowEditable, "powerPointTextLayoutIncomplete");
+    mustInclude(files.workflowEditable, "afterTextLayout");
     mustInclude(files.providers, "plain-json-fallback");
     mustInclude(files.providers, "parsed.ok === true");
     mustInclude(files.workflowNextAction, "partial-final-review-or-continue");
@@ -618,6 +663,15 @@ function checkDeliveryGate(files) {
     mustInclude(files.pptxEditability, "rasterOnly");
     mustInclude(files.pptxEditability, "rasterBackground");
     mustInclude(files.pptxEditability, "full-slide-background-picture");
+    mustInclude(files.pptxEditability, "nativeNonTextShapes");
+    mustInclude(files.pptxEditability, "flattened-editable-structure");
+    mustInclude(files.pptxEditability, "inspectPowerPointTextLayout");
+    mustInclude(files.workflowFinalEvidence, "final-pptx-powerpoint-text-overflow");
+    mustInclude(files.workflowFinalEvidence, "final-pptx-powerpoint-slide-count-mismatch");
+    mustInclude(files.workflowFinalEvidence, "final-pptx-powerpoint-text-layout-slide-count-mismatch");
+    mustInclude(files.workflowFinalEvidence, "final-pptx-powerpoint-text-layout-empty");
+    mustInclude(files.modelPageSpecWorker, "enableDeterministicTextFit");
+    mustInclude(files.modelPageSpecWorker, "source_locked_clean_base.png is forbidden for formal editable output");
   });
 }
 

@@ -34,7 +34,10 @@ const VISUAL_TEXT_QA_REASON_CODES = new Set([
 ]);
 
 export async function writeWorkflowVisualTextQualityReport(job = {}, options = {}) {
-  const sourceHints = readJson(job.artifacts?.ocrTextHints?.path || "");
+  const recordedSourceHints = readJson(job.artifacts?.ocrTextHints?.path || "");
+  const sourceHints = job.artifacts?.source?.kind === "brief_source"
+    ? { ...recordedSourceHints, pages: [] }
+    : recordedSourceHints;
   const visualHints = readJson(job.artifacts?.visualOcrTextHints?.path || "");
   const outline = readJson(job.artifacts?.codexPptOutline?.path || "");
   const expectedPageIds = (Array.isArray(job.artifacts?.visualImages) ? job.artifacts.visualImages : [])
@@ -218,6 +221,32 @@ function analyzePage({
   confirmedDeckCriticalLines = []
 }) {
   const sourceLines = usableLines(sourcePage);
+  const approvedOutlineTitle = String(outlineStep.title || "").trim();
+  if (!sourceLines.length && approvedOutlineTitle) {
+    sourceLines.push({
+      text: approvedOutlineTitle,
+      confidence: 1,
+      corrected: true,
+      native_text: true,
+      box_px: [80, 72, 1100, 72],
+      font_pt_if_cjk: 42,
+      source: "approved-outline-title"
+    });
+    for (const text of [outlineStep.evidence, outlineStep.purpose, outlineStep.visualIntent]) {
+      const approvedOutlineEvidence = String(text || "").trim();
+      if (!approvedOutlineEvidence) continue;
+      sourceLines.push({
+        text: approvedOutlineEvidence,
+        confidence: 1,
+        corrected: true,
+        native_text: true,
+        authority_only: true,
+        box_px: [80, 520, 1100, 32],
+        font_pt_if_cjk: 18,
+        source: "approved-outline-evidence"
+      });
+    }
+  }
   const visualLines = usableLines(visualPage);
   const sourceText = sourceLines.map((line) => line.text).join(" ");
   const visualText = visualLines.map((line) => line.text).join(" ");
@@ -245,6 +274,10 @@ function analyzePage({
   const visualTitleLines = titleCandidates.filter((line) => (
     Number(line.font_pt_if_cjk || line.box_px?.[3] || 0) >= titlePt * 0.72
   ));
+  const visualTitleEvidenceLines = titleCandidates.filter((line) => (
+    Number(line.font_pt_if_cjk || line.box_px?.[3] || 0) >= titlePt * 0.5
+  ));
+  const combinedVisualTitle = cleanComparable(visualTitleEvidenceLines.map((line) => line.text).join(""));
   const positionedSourceTitleCandidates = sourceLines
     .filter((line) => Number(line.box_px?.[1] || 0) <= 720 * 0.42)
     .filter((line) => Number(line.box_px?.[0] || 0) <= 720 || Number(line.box_px?.[2] || 0) >= 640)
@@ -283,12 +316,17 @@ function analyzePage({
           .sort((a, b) => Number(a.box_px?.[1] || 0) - Number(b.box_px?.[1] || 0))
           .slice(0, 3);
   const sourceTitleTexts = sourceTitleLines.map((line) => line.text);
-  const missingSourceTitleLines = sourceTitleLines.filter((line) => !hasCriticalLineMatch(visualTitleLines, line.text));
+  const missingSourceTitleLines = sourceTitleLines.filter((line) => {
+    if (hasCriticalLineMatch(visualTitleEvidenceLines, line.text)) return false;
+    const sourceTitle = cleanComparable(line.text);
+    return !sourceTitle || (!combinedVisualTitle.includes(sourceTitle) && !sourceTitle.includes(combinedVisualTitle));
+  });
   const missingSourceTitleTexts = missingSourceTitleLines.map((line) => line.text);
   const sourceTitleMismatchBlocks = missingSourceTitleLines.some((line) => isStrongOcrEvidence(line, "title"));
   const roleLimits = contract.typography.roles[role] || contract.typography.roles.content;
   const nativeStructuredSourceExists = sourceLines.some((line) => line.native_text === true && classifyDeckText(line.text) === "contact");
   const criticalSource = sourceLines.filter((line) => {
+    if (line.authority_only === true) return false;
     const kind = classifyDeckText(line.text);
     if (!["data", "contact", "brand_or_code", "brand_candidate"].includes(kind) || cleanComparable(line.text).length < 3) return false;
     if (kind === "contact" && nativeStructuredSourceExists && line.native_text !== true) return false;
@@ -298,7 +336,7 @@ function analyzePage({
   const sourceBrandOrCodeTexts = criticalSource
     .filter((line) => classifyDeckText(line.text) === "brand_or_code")
     .map((line) => line.text);
-  const meaningfulSource = sourceLines.filter((line) => ["content", "data", "contact", "brand_or_code", "brand_candidate"].includes(classifyDeckText(line.text)) && cleanComparable(line.text).length >= 2);
+  const meaningfulSource = sourceLines.filter((line) => line.authority_only !== true && ["content", "data", "contact", "brand_or_code", "brand_candidate"].includes(classifyDeckText(line.text)) && cleanComparable(line.text).length >= 2);
   const denseTableMatchOptions = { allowDenseTokenCoverage: ["table", "product", "comparison"].includes(role) };
   const sourceToVisualMatchOptions = { ...denseTableMatchOptions, allowContainingBrandFragment: true };
   const missingMeaningful = meaningfulSource.filter((line) => !hasCriticalLineMatch(visualLines, line.text, sourceToVisualMatchOptions));

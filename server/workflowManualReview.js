@@ -3,6 +3,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import { buildEditableVisualQaSignature, isBlockingEditableVisualIssue, scanWorkflowFinalEvidence } from "./workflowFinalEvidence.js";
 import { scanWorkflowPageEvidence } from "./workflowPageEvidence.js";
+import { getWorkflowExpectedPageCount } from "../shared/workflowDeliveryStatus.js";
 
 export async function approveWorkflowManualReview(jobId, options = {}) {
   const job = await readWorkflowJob(jobId);
@@ -29,7 +30,7 @@ export async function approveWorkflowManualReview(jobId, options = {}) {
   }
   const tasks = Array.isArray(artifacts.editableWorkerTasks) ? artifacts.editableWorkerTasks : [];
   const recordedPages = tasks.filter((task) => task.status === "recorded").map((task) => task.pageId).filter(Boolean);
-  const sourcePages = numberOrZero(job.sourceMeta?.pageCount || artifacts.sourceMeta?.pageCount);
+  const sourcePages = getWorkflowExpectedPageCount(job, artifacts);
   const finalPages = numberOrZero(final.summary?.page_count || final.pptxEditability?.slideCount);
   if (!sourcePages || !finalPages) {
     throw new Error("Source and final page counts are required before manual review can be approved.");

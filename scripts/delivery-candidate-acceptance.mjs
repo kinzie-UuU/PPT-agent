@@ -14,6 +14,8 @@ await writeLatest({ status: "running", startedAt, currentPhase: "baseline", phas
 
 try {
   await runNpm("check", "baseline-check", 180000);
+  await runNpm("check:business", "business-readiness-syntax", 120000);
+  await runNpm("check:ppt-master", "ppt-master-syntax", 120000);
   await runNpm("smoke", "api-smoke", 180000);
   await runNpm("regression:skill-first", "skill-first-regression", 180000);
   await runNpm("quality:targeted", "targeted-quality-and-race", 180000);
@@ -38,6 +40,11 @@ try {
     "shared/workflowDeliveryStatus.js",
     "shared/workflowVisibility.js",
     "server/index.js",
+    "server/localAccess.js",
+    "server/runtimeIdentity.js",
+    "server/doctor.js",
+    "server/workflowBusinessReadiness.js",
+    "server/workflowPptMaster.js",
     "server/workflowJobs.js",
     "server/workflowDelivery.js",
     "server/workflowPageEvidence.js",
@@ -51,7 +58,8 @@ try {
     "scripts/workflow-selection-race.mjs",
     "scripts/strict-ui-e2e.mjs",
     "scripts/strict-ui-e2e.playwright.js",
-    "scripts/strict-ui-e2e-evidence.mjs"
+    "scripts/strict-ui-e2e-evidence.mjs",
+    "docs/ppt-master-provider.md"
   ]);
   const workingTreeFiles = await hashOptionalFiles(await listWorkingTreePaths());
   const baseCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), windowsHide: true })).stdout.trim();

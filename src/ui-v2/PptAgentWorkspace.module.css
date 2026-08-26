@@ -370,6 +370,8 @@
 .inspectorMessage { margin: 0; padding: 0 20px 0 70px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .runtimeNotice { display: flex; align-items: flex-start; gap: 8px; margin: 14px 20px 0; padding: 10px 11px; border: 1px solid #cbd9f8; border-radius: 6px; background: #f4f7ff; color: #31579f; font-size: 12px; line-height: 1.5; }
 .runtimeNotice svg { flex: 0 0 auto; margin-top: 1px; }
+.runtimeRestartBanner { display: flex; align-items: center; gap: 8px; padding: 9px 18px; border-bottom: 1px solid #f5c2c2; background: #fff4f4; color: #a12626; font-size: 12px; line-height: 1.45; }
+.runtimeRestartBanner svg { flex: 0 0 auto; }
 .errorNotice { border-color: #f3c7c7; background: #fff5f5; color: #b42318; }
 .inspectorActions { display: grid; gap: 8px; padding: 17px 20px 20px; border-bottom: 1px solid var(--line); }
 .action { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 13px; border: 1px solid #d8dde5; border-radius: 6px; background: #fff; color: #3e4653; font-size: 12px; font-weight: 800; text-decoration: none; cursor: pointer; }
@@ -457,6 +459,13 @@
 
 .createInspector { display: flex; flex-direction: column; min-width: 0; padding: 16px 0 0; border-left: 1px solid var(--line); background: #fafbfc; }
 .deliveryChoices { display: grid; gap: 9px; padding: 0 18px 18px; }
+.engineChoices { display: grid; gap: 8px; padding: 0 18px 18px; }
+.engineChoices button { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 10px; align-items: center; min-height: 68px; padding: 11px 12px; border: 1px solid #dce1e8; border-radius: 7px; background: #fff; color: #667085; text-align: left; cursor: pointer; }
+.engineChoices button > span { display: grid; gap: 3px; }
+.engineChoices b { color: #303642; font-size: 13px; }
+.engineChoices small { color: #8a93a2; font-size: 11px; line-height: 1.4; }
+.engineChoices .activeChoice { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); box-shadow: 0 0 0 2px rgba(21,94,239,.08); }
+.engineChoices button:disabled { cursor: not-allowed; opacity: .72; }
 .deliveryChoices button { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 11px; align-items: center; min-height: 76px; padding: 12px 13px; border: 1px solid #dce1e8; border-radius: 7px; background: #fff; color: #667085; text-align: left; cursor: pointer; }
 .deliveryChoices button > span { display: grid; gap: 3px; }
 .deliveryChoices b { color: #303642; font-size: 13px; }
@@ -475,6 +484,7 @@
 .costPreview em { color: #667085; font-size: 10px; font-style: normal; }
 .readyCostPreview { border-color: #b9dfca; background: #f2fbf6; }
 .blockedCostPreview { border-color: #f1cf9d; background: #fff9ed; }
+.providerNote { display: flex; gap: 8px; margin: 10px 18px 0; padding: 11px; border: 1px solid #b9dfca; border-radius: 6px; background: #f2fbf6; color: #26734d; font-size: 11px; line-height: 1.5; }
 .createSubmit { display: grid; gap: 10px; margin-top: auto; padding: 18px; border-top: 1px solid var(--line); }
 .createSubmit small { color: #7d8695; font-size: 11px; line-height: 1.5; }
 .createSubmit button { min-height: 42px; border: 1px solid var(--blue); border-radius: 6px; background: var(--blue); color: #fff; font-size: 13px; font-weight: 850; cursor: pointer; }

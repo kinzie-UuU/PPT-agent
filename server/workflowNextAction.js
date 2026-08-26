@@ -11,7 +11,7 @@ import { retryStaleWorkflowPageEvidence } from "./workflowPageRetry.js";
 import { listWorkflowEditableWorkerTasks } from "./workflowWorkerQueue.js";
 import { getWorkflowDeliveryStatus } from "./workflowDelivery.js";
 import { buildPartialFinalCoverage } from "./workflowContinuation.js";
-import { assertWorkflowImageDeckReviewReady } from "./workflowImageDeckReview.js";
+import { assertWorkflowImageDeckReviewReady, getExpectedWorkflowPageCount } from "./workflowImageDeckReview.js";
 
 const MANUAL_ACTION_RE = /approve|approval|review\/approve|codex slide worker|slide workers|editable\/dispatch|editable\/record|page workers|reset failed/i;
 
@@ -388,18 +388,7 @@ function currentVisualImages(job = {}) {
 
 function isWorkflowJobImageDeckReviewApproved(job = {}) {
   const artifacts = job.artifacts || {};
-  const expectedPages = Number(
-    job.sourceMeta?.pageCount
-    || artifacts.sourceMeta?.pageCount
-    || job.input?.sourcePageCount
-    || artifacts.source?.pageCount
-    || 0
-  ) || Math.max(
-    Array.isArray(artifacts.renderedPages) ? artifacts.renderedPages.length : 0,
-    Number(artifacts.imageDeck?.pageCount || 0),
-    Number(artifacts.ocrTextHints?.pageCount || 0),
-    currentVisualImages(job).length
-  );
+  const expectedPages = getExpectedWorkflowPageCount(job);
   return isImageDeckReviewApproved(artifacts, { expectedPages });
 }
 
